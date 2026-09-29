@@ -291,6 +291,10 @@ export interface AppConfig {
   chat_shortcut: string
   /** 统一捕获快捷键（2026-09-29 新增），默认 ⇧⌘U */
   capture_shortcut: string
+  /** 聚焦模式：只显示 focus_pins 里的模块，竖排全宽（2026-09-29 新增，默认关） */
+  focus_enabled: boolean
+  /** 聚焦模式下显示的模块 id，顺序即显示顺序 */
+  focus_pins: string[]
   /** 剪贴板历史最大条数（含置顶） */
   clipboard_max_items: number
   /** 非置顶记录保留天数 */

@@ -119,6 +119,11 @@ const state = reactive<StoreState>({
     search_shortcut: DEFAULT_SEARCH_SHORTCUT,
     chat_shortcut: DEFAULT_CHAT_SHORTCUT,
     capture_shortcut: DEFAULT_SHORTCUTS.capture,
+    // 聚焦模式默认值：与 Rust 侧 default_focus_pins 一致（两边各写一份是「第二份拷贝」，
+    // 但这里只是**启动快照的初值**，真源仍在 config.rs 的 serde default 上：
+    // 磁盘上已有该字段时以磁盘为准，不会被这里覆盖）
+    focus_enabled: false,
+    focus_pins: ['todo', 'sticky1', 'countdown'],
     clipboard_max_items: 500,
     clipboard_ttl_days: 7,
     clipboard_paused: false,
@@ -1161,6 +1166,20 @@ export function useStore() {
     await tauriApi.saveConfig(state.config)
   }
 
+  /**
+   * 设置聚焦模式（2026-09-29 新增）。
+   *
+   * 与 setDashboardLayout 同一套「先改本地快照、再整份 saveConfig」流程。
+   * 刻意**不**存 localStorage：聚焦的模块选择是用户的一份偏好，
+   * 跟其它设置放在一起，换机/清缓存时才一起丢，不会只丢这一项。
+   */
+  async function setFocusMode(enabled: boolean, pins: string[]) {
+    state.config.focus_enabled = enabled
+    state.config.focus_pins = pins
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
+  }
+
   /** 倒计时到点提示音开关 */
   async function setCountdownSound(value: boolean) {
     state.config.countdown_sound = value
@@ -1652,6 +1671,7 @@ export function useStore() {
     setCaptureShortcut,
     setDashboardMidContent,
     setDashboardLayout,
+    setFocusMode,
     setCountdownSound,
     setNoticeDuration,
     setClockQuote,

@@ -18,6 +18,7 @@ import ClockCard from '../components/ClockCard.vue'
 import WeatherCard from '../components/WeatherCard.vue'
 import StickyCard from '../components/StickyCard.vue'
 import DashCollapsedBar from '../components/DashCollapsedBar.vue'
+const FocusStrip = defineAsyncComponent(() => import('../components/FocusStrip.vue'))
 import CountdownCard from '../components/CountdownCard.vue'
 import WindowResizeHandles from '../components/WindowResizeHandles.vue'
 import { useStore } from '../stores/workbench'
@@ -425,6 +426,127 @@ const dashGridRows = computed(() => {
   }
   return m
 })
+
+/* ───────────────── 聚焦模式（2026-09-29 新增）─────────────────
+ *
+ * 只显示几个模块、竖排铺满整宽。为什么不用原来的 12 列栅格：
+ * 聚焦的价值是「每张卡拿到全部宽度」，而栅格的宽是固定的 1/12、2/4、1/3……
+ * 挑三张出来还占原来的窄格，等于没聚焦。
+ *
+ * 高度用 flex 比例而不是固定行高：比例取自各 variant 自己声明的 idealH，
+ * 于是「待办多高、便签多高」是模块自己定的，不是这里拍脑袋。
+ *
+ * 空内容模块在聚焦模式里**逐个**折叠（不是整段）—— 这在栅格里不行（会留洞），
+ * 但这里是 flex 竖排：压扁一个不会在它下面留洞，所以逐个折叠是安全的。
+ * 同一个「折叠」概念在两种布局下规则不同，原因是布局不同，不是规则自相矛盾。
+ */
+const focusOn = computed(() => store.state.config.focus_enabled === true)
+
+/** 磁盘上 focus_pins 为空（老配置 / 用户全取消）时的兜底。与 config.rs 的
+ *  `default_focus_pins` 同值 —— 两边各写一份是「第二份拷贝」，但真源在 Rust 的
+ *  serde default 上（磁盘已有该字段时以磁盘为准），这里只是防止读到空数组。 */
+const DEFAULT_FOCUS_PINS = ['todo', 'sticky1', 'countdown']
+/** 选中的模块 id（顺序即显示顺序）。缺失的补上默认项，避免升级后一屏空白 */
+const focusPins = computed(() => {
+  const raw = store.state.config.focus_pins ?? []
+  const known = new Set(allModuleOptions.value.map((o) => o.id))
+  const valid = raw.filter((id) => known.has(id))
+  return valid.length > 0 ? valid : DEFAULT_FOCUS_PINS
+})
+
+/** 候选模块：当前版面上的全部模块（+ 未加入版面的），供切换条使用 */
+const allModuleOptions = computed(() => {
+  const out: { id: string; title: string }[] = []
+  const seen = new Set<string>()
+  for (const p of layout.placements.value) {
+    if (seen.has(p.id)) continue
+    seen.add(p.id)
+    out.push({ id: p.id, title: dashPlacementTitle(p) })
+  }
+  // 版面上还没有的模块也列出来：聚焦模式下「还能加什么」是唯一值得展示的额外信息
+  for (const m of layout.available.value) {
+    if (seen.has(m.id)) continue
+    seen.add(m.id)
+    out.push({ id: m.id, title: m.title })
+  }
+  return out
+})
+
+async function persistFocus(enabled: boolean, pins: string[]) {
+  await store.setFocusMode(enabled, pins)
+}
+
+/** 从标题栏切进来：开启时把视图也切到工作台，否则「聚焦」在一个看不见的视图里生效 */
+function toggleFocusMode() {
+  const next = !focusOn.value
+  if (next && activeView.value !== 'dashboard') activeView.value = 'dashboard'
+  void persistFocus(next, focusPins.value)
+}
+
+/** 切换条上点某个模块：在/不在聚焦列表里 */
+function toggleFocusPin(id: string) {
+  const cur = focusPins.value
+  const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]
+  // 一个都不选会让工作台变成空屏 —— 那不是「更专注」，是坏了。
+  // 所以最后一次取消被忽略，并在下面明确告诉用户。
+  if (next.length === 0) {
+    showToast('至少要保留一个模块')
+    return
+  }
+  void persistFocus(true, next)
+}
+
+/** 聚焦模式里每个模块占的高度比例（取自 variant 的 idealH） */
+function focusWeight(p: DashPlacement): number {
+  if (isFocusCollapsed(p.id)) return 0
+  // `dashVariantDef` 直接返回**该模块当前 variant** 的定义（含 idealH），
+  // 不是「模块 + variants 数组」—— 之前按后者写会报「variants 不存在」。
+  const def = dashVariantDef(p.id, p.variant)
+  // 没有 variant 定义（扩展 module 少见）时给 1：宁可不精确也不要 0（0 会让卡片消失）
+  return Math.max(1, Math.min(def?.idealH ?? 3, 8))
+}
+
+/** 聚焦模式里的空内容判定：与栅格版同一套「是否降级」名单 */
+function isFocusCollapsed(id: string): boolean {
+  const state = store.state
+  switch (id) {
+    case 'prompts':
+      return state.snippets.length === 0
+    case 'todo':
+    case 'todo_overview':
+      return state.todos.every((t) => t.done)
+    case 'countdown':
+      return state.countdowns.length === 0
+    case 'notes':
+      return state.notes.length === 0
+    case 'recent':
+    case 'resources':
+      return state.resources.length === 0
+    default:
+      return false
+  }
+}
+
+/**
+ * 聚焦模式里模块的呈现：沿用保存的 variant / 标题，只是丢掉坐标。
+ *
+ * 版面上没有该模块时给一个占位 placement —— 用户可以从切换条里挑一个**还没**
+ * 放上版面的模块来看效果，不该因为「版面上没有」就渲染不出来。
+ * 但 `ext:` 前缀的扩展不行：它的 manifest 决定卡片长什么样，
+ * 凭一个空壳 placement 渲染只会得到一个错的框（见 index.vue 里 ext: 的分支）。
+ */
+function focusPlacement(id: string): DashPlacement | undefined {
+  const saved = layout.placements.value.find((p) => p.id === id)
+  if (saved) return { ...saved, x: 0, y: 0, w: 12, h: 1 }
+  if (id.startsWith('ext:')) return undefined
+  // 显式标注类型：就地写对象字面量会被推断成「少了 x/y/w/h 的窄类型」，
+  // 与 DashPlacement 不兼容（TS2322）。
+  // `variant` 留空而不是写 null —— 接口声明的是 `variant?: string`，
+  // 而 `null` 在这里不合法（读侧 `p.variant ?? defaultVariant` 用的是 ??，
+  // 空值与 null 行为一致，声明却只允许 undefined）。
+  const fallback: DashPlacement = { id, x: 0, y: 0, w: 12, h: 1 }
+  return fallback
+}
 
 /** 各模块压扁后单行条上的提示语 */
 const COLLAPSED_HINT: Record<string, string> = {
@@ -947,6 +1069,7 @@ provide('showToast', showToast)
     <TitleBar
       @search="searchVisible = true"
       @chat="toggleChat"
+      @focus="toggleFocusMode"
     />
 
     <div class="app-body" :class="{ collapsed: sidebarCollapsed }">
@@ -1046,9 +1169,61 @@ provide('showToast', showToast)
       <div class="main-area">
         <main class="workspace" aria-label="主工作区">
         <!-- 工作台：可自定义布局（12 列单元格网格，模块库编辑器） -->
-        <div v-if="activeView === 'dashboard'" class="dash-wrap">
+        <!--
+          `is-focus` 只在聚焦模式挂上：`.dash-wrap` 默认是 block（栅格版靠
+          `gridTemplateRows: 1fr` 自己撑高），而聚焦栈需要 `flex: 1 1 auto`
+          才能拿到剩余高度 —— 在 block 容器里那条 flex 完全无效，栈高会退化成
+          内容高度，实测就是「两个折叠条 38px + 间隙把唯一的卡片挤成 0 高」。
+          所以只在聚焦时改这个容器的 display，不动栅格那条路径。
+        -->
+        <div
+          v-if="activeView === 'dashboard'"
+          class="dash-wrap"
+          :class="{ 'is-focus': focusOn }"
+        >
+          <!--
+            聚焦模式：顶部切换条 + 竖排全宽的卡片栈。
+            与下面栅格版**互斥**（v-if / v-else-if），两套布局不同时存在 ——
+            同时存在的话折叠规则会打架（栅格版整段折叠、聚焦版逐个折叠）。
+          -->
+          <template v-if="focusOn">
+            <FocusStrip
+              :options="allModuleOptions"
+              :pinned-ids="focusPins"
+              closable
+              @toggle="toggleFocusPin"
+              @close="toggleFocusMode"
+            />
+            <div v-if="focusPins.length" class="focus-stack">
+              <div
+                v-for="id in focusPins"
+                :key="id"
+                class="focus-cell"
+                :class="{ 'is-collapsed': isFocusCollapsed(id) }"
+                :style="{ flexGrow: focusWeight(focusPlacement(id)!) }"
+              >
+                <DashCollapsedBar
+                  v-if="isFocusCollapsed(id)"
+                  :title="focusPlacement(id) ? dashPlacementTitle(focusPlacement(id)!) : id"
+                  :hint="COLLAPSED_HINT[id] ?? '还没有内容'"
+                  :action-label="`添加${id}内容`"
+                  @action="onCollapsedAction(id)"
+                />
+                <component
+                  :is="dashCardComponent(id)"
+                  v-else-if="focusPlacement(id)"
+                  v-bind="dashCardProps(focusPlacement(id)!)"
+                  @go-suda="activeView = 'suda'"
+                />
+              </div>
+            </div>
+            <div v-else class="dash-empty">
+              <p>聚焦模式下一个模块都没选，下面挑一个</p>
+            </div>
+          </template>
+
           <div
-            v-if="layout.placements.value.length"
+            v-else-if="layout.placements.value.length"
             class="dash-grid"
             :style="{
               gridTemplateRows: `repeat(${dashGridRows}, minmax(var(--dash-row-min), 1fr))`,
@@ -1655,6 +1830,47 @@ html[data-wallpaper='1'] .title-bar [data-tip]::after {
   --dash-row-min: 36px;
   min-height: calc(var(--dash-row-min) * var(--dash-rows) + var(--space-4) * (var(--dash-rows) - 1) + 20px);
 }
+/* 聚焦模式（2026-09-29）：竖排卡片栈。
+   刻意不用 12 列栅格：聚焦的价值就是每张卡拿到**全部**宽度，
+   沿用栅格的话挑三张出来还是各占 1/12，等于没聚焦。
+   高度用 flex-grow 比例（取自各 variant 的 idealH），于是「谁多高」由模块自己定。 */
+/* 聚焦模式把 wrap 变成竖向 flex 容器，好让下面那个 flex:1 的栈拿到剩余高度。
+   仅在 .is-focus 时生效，栅格版那条路径的布局完全不受影响。 */
+.dash-wrap.is-focus {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.focus-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 兜底：选中的模块太多、或窗口太矮时改为滚动。
+     没有这一条的话，多个 38px 的折叠条会先把空间吃光，
+     真正有内容的卡片被挤成 0 高 —— 「看不见」是最坏的结果，宁可滚。 */
+  overflow-y: auto;
+}
+.focus-cell {
+  /* flex-basis: 0 + grow 比例 ⇒ 高度严格按比例分配，窗口缩放只改每张卡的像素高度，
+     比例不变 —— 与栅格版「不滚动、不留白」的口径一致 */
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 有内容的卡片**必须**有下限高度：否则在极矮窗口里它会被折叠条挤成 0 高，
+   用户看到的是「我明明选了这个模块，它却不见了」。 */
+.focus-cell:not(.is-collapsed) {
+  min-height: 140px;
+}
+/* 空内容模块压成一条：固定高度、不参与分配 */
+.focus-cell.is-collapsed {
+  flex: 0 0 auto;
+  height: 38px;
+  min-height: 0;
+}
+
 .dash-cell {
   min-width: 0;
   min-height: 0;

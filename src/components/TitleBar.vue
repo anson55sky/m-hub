@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Copy, Maximize2, MessageSquare, Minus, Pin, PinOff, Search, Square, X } from 'lucide-vue-next'
+import { Copy, Focus, Maximize2, MessageSquare, Minus, Pin, PinOff, Search, Square, X } from 'lucide-vue-next'
 import { isTauri, tauriApi } from '../api/tauri'
 import {
   isMac,
@@ -21,9 +21,17 @@ const showToast = inject<(msg: string, action?: { label: string; onClick: () => 
 defineEmits<{
   (e: 'search'): void
   (e: 'chat'): void
+  /** 聚焦模式开关（2026-09-29 新增） */
+  (e: 'focus'): void
 }>()
 
 const alwaysOnTop = computed(() => store.state.config.window.always_on_top)
+
+/**
+ * 聚焦模式是否开着（2026-09-29 新增）。按钮的 active 态靠它 ——
+ * 界面变成三张大卡之后，用户唯一能判断「我在不在聚焦里」的线索就是这个按钮。
+ */
+const focusOn = computed(() => store.state.config.focus_enabled === true)
 
 // ---- 平台：macOS 的窗口按钮在**左侧**、是三颗红黄绿圆点，且没有「最大化/还原」这个概念
 // （macOS 用「缩放」：拖角 / 双击标题栏 / 绿点，都是在最大化与恢复之间切换，
@@ -174,6 +182,20 @@ function close() {
       >
         <MessageSquare :size="15" :stroke-width="1.8" />
       </button>
+      <!--
+        聚焦模式开关放在标题栏而不是工作台内部：它切换的是「工作台长什么样」，
+        而工作台自身没有常驻表头，塞进去等于每次都要滚回顶部才按得到。
+        按钮用 active 态表示当前是否在聚焦里 —— 否则用户按下后、界面变成
+        三张大卡之后，反而不知道自己在哪个模式里，也就不知道怎么回去。
+      -->
+      <button
+        class="tool-btn"
+        :class="{ active: focusOn }"
+        :title="focusOn ? '退出聚焦，回到完整工作台' : '聚焦模式：只留几张卡'"
+        @click="$emit('focus')"
+      >
+        <Focus :size="15" :stroke-width="1.8" />
+      </button>
       <div class="tool-divider"></div>
       <button
         class="win-btn top-btn"
@@ -251,6 +273,23 @@ function close() {
 [data-theme="dark"] .tool-btn:hover {
   background: var(--brand-50);
   color: var(--text-1);
+}
+/* 激活态（聚焦模式）。
+   刻意**不**依赖 hover 才看得出：hover 一移开就没了，而「我在不在聚焦里」
+   是必须随时可读的状态。用与 `.win-btn.top-btn.active` 同一套口径，
+   两处「已开启」的按钮看起来一致 —— 同一语义不该有两种长相。 */
+.tool-btn.active {
+  background: var(--brand-50);
+  color: var(--brand-500);
+}
+.tool-btn.active:hover {
+  background: var(--brand-50);
+  color: var(--brand-500);
+}
+[data-theme="dark"] .tool-btn.active,
+[data-theme="dark"] .tool-btn.active:hover {
+  background: var(--brand-50);
+  color: var(--brand-500);
 }
 .tool-divider {
   width: 1px;

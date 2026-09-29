@@ -91,6 +91,21 @@ pub struct AppConfig {
     #[serde(default = "default_dnd_end_hour")]
     pub dnd_end_hour: i64,
 
+    // ---- 聚焦模式（2026-09-29 新增）----
+    /// 聚焦模式：只显示 `focus_pins` 里选中的模块，竖排全宽。默认关。
+    ///
+    /// 为什么默认关：它改变的是**默认看到什么**，属于用户一旦没主动打开就
+    /// 不该发生的状态变化（同免打扰时段那条）。
+    #[serde(default)]
+    pub focus_enabled: bool,
+    /// 聚焦模式下显示的模块 id，**顺序即显示顺序**。
+    ///
+    /// 默认 `todo`（今天要做什么）+ `sticky1`（随手记）+ `countdown`（给这件事
+    /// 一个边界）。刻意不含 clock/weather/sysmon —— 那是「环境信息」，全天可见，
+    /// 收进聚焦模式等于把它藏起来，而它们并不占多少地方。
+    #[serde(default = "default_focus_pins")]
+    pub focus_pins: Vec<String>,
+
     // ---- 自动备份（2026-09-29 新增）----
     /// 自动备份的目标目录（绝对路径）。空 = 不做自动备份。
     ///
@@ -377,6 +392,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_focus_pins() -> Vec<String> {
+    vec!["todo".into(), "sticky1".into(), "countdown".into()]
+}
+
 fn default_dnd_start_hour() -> i64 {
     22
 }
@@ -478,6 +497,8 @@ impl Default for AppConfig {
             theme_preset: "indigo".to_string(),
             accent_color: None,
             wallpaper_path: String::new(),
+            focus_enabled: false,
+            focus_pins: default_focus_pins(),
             dnd_enabled: false,
             dnd_scheduled: false,
             dnd_start_hour: default_dnd_start_hour(),
@@ -989,6 +1010,70 @@ mod tests {
     }
 
     #[test]
+    /// 前端整份回写配置时，聚焦模式这两个字段必须**原样回来**。
+    ///
+    /// 为什么要单独测：前端的 `setFocusMode` 走的是 `saveConfig(state.config)` ——
+    /// 把**启动快照**整份送回后端存盘。而快照是在 `focus_enabled` / `focus_pins`
+    /// 这两个字段出现**之前**序列化出来的（老用户的磁盘配置里根本没有它们）。
+    /// 一次整份回写就会把它们抹掉，于是「聚焦模式开着，重启后自己关掉了」。
+    ///
+    /// 这类「回写丢字段」的坑本工程踩过两次，所以用 serde 往返 + 逐字段断言钉死：
+    /// 少了 `#[serde(default)]` 或字段名写错，这里立刻红。
+    #[test]
+    fn focus_fields_survive_a_snapshot_round_trip() {
+        // 老配置：只有极少数字段（模拟用户升级前的 app.json）
+        let old: serde_json::Value = serde_json::json!({ "theme_preset": "green" });
+        let parsed: AppConfig = serde_json::from_value(old).expect("老配置应能解析");
+
+        // 前端快照形态：两个字段都带上
+        let mut snapshot = parsed.clone();
+        snapshot.focus_enabled = true;
+        snapshot.focus_pins = vec!["clock".into(), "prompts".into()];
+
+        // 走一遍 serde 往返 = 一次落盘再读回
+        let text = serde_json::to_string(&snapshot).unwrap();
+        let back: AppConfig = serde_json::from_str(&text).unwrap();
+        assert!(back.focus_enabled, "聚焦开关必须活过一次落盘");
+        assert_eq!(
+            back.focus_pins,
+            vec!["clock".to_string(), "prompts".to_string()],
+            "聚焦模块列表与顺序必须活过一次落盘"
+        );
+
+        // ⚠️ 上面那段往返**抓不住字段被改名**：往返两侧用的是同一个结构体，
+        // 改名后它自己跟自己一致，照样通过（实测给字段加 `#[serde(rename = "focus_pin")]`
+        // 后，这条测试依旧是绿的 —— 一个假测试比没有测试更糟）。
+        // 真正要防的是「改名把磁盘上的老配置读不出来」，所以这里必须用
+        // **手写字面量 JSON** 来钉住盘上的键名。
+        let on_disk = serde_json::from_str::<AppConfig>(
+            r#"{ "focus_enabled": true, "focus_pins": ["clock", "prompts"] }"#,
+        )
+        .expect("盘上的键名必须正是 focus_enabled / focus_pins");
+        assert!(
+            on_disk.focus_enabled,
+            "\"focus_enabled\" 这个盘上键名被改名了，老配置会读不出聚焦开关"
+        );
+        assert_eq!(
+            on_disk.focus_pins,
+            vec!["clock".to_string(), "prompts".to_string()],
+            "\"focus_pins\" 这个盘上键名被改名了（且顺序必须保留）"
+        );
+
+        // 缺字段时必须落回**默认值**，而不是空/报错。
+        // 这里靠的是 AppConfig 上的**容器级** `#[serde(default)]` —— 它让整个结构体
+        // 在字段缺失时用 Default::default()。所以单字段的 `#[serde(default = "...")]`
+        // 在这里是冗余的：实测把它删掉，这条断言照样绿。
+        // 保留它是为了把「这个字段的默认值是什么」写在字段旁边（容器级 default
+        // 只会在 AppConfig::default() 里体现，字段旁反而看不见）。
+        let fresh: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(!fresh.focus_enabled, "聚焦默认必须关");
+        assert_eq!(
+            fresh.focus_pins,
+            vec!["todo".to_string(), "sticky1".to_string(), "countdown".to_string()],
+            "聚焦模块默认值必须是待办 / 便签 / 倒计时"
+        );
+    }
+
     fn merge_keeps_backend_managed_fields() {
         let disk = disk_with_backend_values();
         let snapshot = snapshot_without_backend_fields(&disk);
