@@ -28,27 +28,29 @@ use std::path::{Path, PathBuf};
 /// 最小示例 —— 给一个跑不起来的骨架比不给更糟。文档里写明怎么改。
 const KINDS: &[&str] = &["module", "view"];
 
-/// 扩展 id 的合法性：反向域名风格，全小写，允许 `.` `-`。
+/// 扩展 id 的合法性 —— **直接复用发布预检的判定**。
 ///
-/// 收紧到不用猜：id 会成为入口 URL 的一段（`/<id>/index.html`）、
-/// 也是资产作用域的匹配键，所以不能有空格、斜杠、大写。
+/// 这里原先自己写了一份更严的规则（要求以字母/数字开头、上限 64、不许下划线），
+/// 结果和 `precheck::id_ok` 当场漂移：脚手架放行 `111`（纯数字、没有点），
+/// 预检却要求「小写反向域名」—— 用户能把扩展建出来，到发布那一步才被拦下。
+/// 那是**脚手架在骗人**：它生成的 id 自己都不认。
+///
+/// 现在只有一个真源（`precheck::id_ok`），本函数只负责把「不合法」翻译成
+/// 一句能照着改的提示。
 pub fn validate_id(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err("INVALID_ARGUMENT: 扩展 ID 不能为空".to_string());
     }
-    if id.len() > 64 {
-        return Err("INVALID_ARGUMENT: 扩展 ID 太长（上限 64 字符）".to_string());
+    if crate::precheck::id_ok(id) {
+        return Ok(());
     }
-    let ok = id
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
-        && id.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit());
-    if !ok {
-        return Err(format!(
-            "INVALID_ARGUMENT: 扩展 ID「{id}」不合法 —— 只允许小写字母、数字、点和连字符，且须以字母或数字开头（如 local.my-ext）"
-        ));
-    }
-    Ok(())
+    Err(format!(
+        "INVALID_ARGUMENT: 扩展 ID「{id}」不合法 —— 需要是**小写反向域名**，至少含一个点，\
+         例如 local.myext 或 com.example.myext（只允许小写字母、数字、点、下划线与连字符）。\n\
+         为什么必须是这个形状：id 会成为入口 URL 的一段（/<id>/index.html），\
+         也是资产作用域的匹配键，所以不能有空格、斜杠与大写；而反向域名是为了\
+         全局唯一 —— 别人发布同名扩展时不会撞上你。"
+    ))
 }
 
 /// 目录名取 id 的最后一段（`local.my-ext` → `my-ext`）。
@@ -470,13 +472,47 @@ mod tests {
 
     #[test]
     fn id_rules() {
+        // 通过：必须与发布预检同口径（反向域名、至少一个点）
+        assert!(validate_id("local.myext").is_ok());
+        assert!(validate_id("com.example.myext").is_ok());
         assert!(validate_id("local.my-ext").is_ok());
-        assert!(validate_id("com.m-hub.ctool").is_ok());
+        // 「下划线」预检允许，所以这里也必须允许 —— 旧版脚手架拒绝它，
+        // 而预检放行，同样是漂移的一个方向
+        assert!(validate_id("local.my_ext").is_ok(), "预检允许下划线，脚手架不该比它更严");
+
+        // 拒绝：这些预检都不认
         assert!(validate_id("").is_err(), "空 id 要拒绝");
+        assert!(validate_id("111").is_err(), "纯数字没有点，不是反向域名 —— 用户实测踩过");
         assert!(validate_id("Local.ext").is_err(), "大写要拒绝（URL 与作用域都吃不下）");
         assert!(validate_id("local/ext").is_err(), "斜杠要拒绝（会拼坏入口 URL）");
-        assert!(validate_id("-local").is_err(), "必须以字母或数字开头");
-        assert!(validate_id(&"a".repeat(65)).is_err(), "过长要拒绝");
+        assert!(validate_id(".local.ext").is_err(), "不能以点开头（会落到隐藏目录）");
+        assert!(validate_id("local..ext").is_err(), "不能有连续的点");
+        assert!(validate_id(&"a".repeat(129)).is_err(), "过长要拒绝");
+    }
+
+    /// 脚手架放行的 id，**必须**发布预检也放行。
+    ///
+    /// 这是上面那个 bug 的通用防线。原来的 `id_rules` 只测了脚手架**自己**
+    /// 认可的几个例子，而「脚手架的规则」与「预检的规则」是两份独立实现 ——
+    /// 两份都自洽，合起来却不一致（脚手架放 `111`、预检不认）。
+    /// 单侧测试永远发现不了这种漂移，必须**拿真源来对**。
+    #[test]
+    fn every_accepted_id_also_passes_publish_precheck() {
+        let candidates = [
+            "local.myext", "com.example.myext", "local.my-ext", "local.my_ext",
+            "a.b", "local.1", "111", "", "Local.ext", "local/ext", ".local.x",
+            "local..x", "local.", "local ext", "local.mé", &"a".repeat(129),
+            "local.x", "com.m-hub.tool",
+        ];
+        for id in candidates {
+            let scaffold_ok = validate_id(id).is_ok();
+            let precheck_ok = crate::precheck::id_ok(id);
+            assert_eq!(
+                scaffold_ok, precheck_ok,
+                "id「{id}」两处判定不一致：脚手架={scaffold_ok}、预检={precheck_ok}。\
+                 脚手架在骗人 —— 它放行的 id 自己都不认。"
+            );
+        }
     }
 
     #[test]

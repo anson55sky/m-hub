@@ -55,7 +55,14 @@ fn is_semver(v: &str) -> bool {
     parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
-fn id_ok(id: &str) -> bool {
+/// 扩展 id 的**唯一**判定。
+///
+/// `pub(crate)` 是刻意的：脚手架（`ext_scaffold`）原先自己写了一份更严的
+/// `validate_id`，两份规则当场就漂移了 —— 脚手架放行 `111`（纯数字），
+/// 而这里要求至少含一个点（反向域名），于是用户建得出来、发布却被预检拦下。
+/// 这种「同一份规则写两遍」的问题本工程反复踩，所以这里给出唯一真源：
+/// 凡是判断扩展 id 合不合法，一律调它。
+pub(crate) fn id_ok(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && !id.starts_with('.')

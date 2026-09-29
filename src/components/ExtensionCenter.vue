@@ -874,11 +874,23 @@ function onMore(e: ExtensionEntry) {
           <b>选择目录</b>用来接管你已有的源码。两条路都<b>不需要登录账号</b>，
           扩展也不会离开这台机器。
         </p>
+        <!--
+          ⚠️ 这段上一版我写错过一次：当时以为「装扩展开发 Skill」是给**应用内**的
+          AI 助手用的，于是写成「要用 AI 助手（需账号或自带 API Key）」。
+          那是错的 —— 查 skills.rs / SkillsSection 之后确认：技能包装到
+          **本机 AI 编码助手**（Claude Code / ZCode / Codex / 豆包 等）的 skills 目录，
+          而应用内那个 AI 助手是纯对话（chat.rs 只有 stream_chat，无工具调用、无文件读写），
+          根本不读 skill。所以：不需要平台账号，也不需要在「AI 助手」里配 Key。
+        -->
         <p class="ec-hint-line">
-          需要账号的是另外两件事：<b>市场</b>（安装别人的扩展）与<b>发布</b>（开发者认证）。
-          想<b>快速开发自己的扩展</b>，也可以去「<b>设置 → 扩展 → Skills</b>」安装
-          <b>扩展开发 Skill</b>，让 AI 助手陪你从零写 —— 这条路要用 AI 助手
-          （需账号，或在「AI 助手」里填自己的 API Key）。
+          需要账号的只有两件事：<b>市场</b>（安装别人的扩展）与<b>发布</b>（开发者认证）。
+          自己开发<b>完全不需要账号</b>。
+        </p>
+        <p class="ec-hint-line">
+          想让 AI 帮你写扩展？去「<b>设置 → 扩展 → Skills</b>」把<b>扩展开发 Skill</b>
+          装到<b>本机 AI 编码助手</b>（Claude Code / Codex 等）的 skills 目录，
+          然后对它说「用 m-hub-extension 给我做一个 XX 扩展」即可 ——
+          那种助手能直接读写你的扩展目录，代码当场就落在磁盘上。
           <button class="ec-hint-jump" type="button" @click="emit('openSkills')">点击跳转&gt;&gt;</button>
         </p>
       </div>

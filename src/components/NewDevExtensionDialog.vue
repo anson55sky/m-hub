@@ -58,14 +58,30 @@ function slugOf(s: string): string {
 }
 
 /**
- * id 的本地校验。**只拦一定非法的**，长度/格式边界交给后端 ——
- * 两边规则写全必然漂移，而这里的作用只是「别让用户白填一遍」。
+ * id 的本地校验 —— **口径必须与 Rust 的 `precheck::id_ok` 一致**。
+ *
+ * 为什么前端也要写一份：提交后由后端拒绝的话，用户已经白填了一遍。
+ * 但两份规则必然有漂移风险，所以这里的判据刻意对齐到**逐条相同**
+ * （小写字母 / 数字 / 点 / 下划线 / 连字符；至少含一个点；不以点开头、
+ * 不含连续点；长度 ≤128），并由后端做最终裁决。
+ *
+ * ⚠️ 这条对齐是被真实 bug 逼出来的：脚手架原先放行纯数字 `111`
+ * （它自己那份更严的规则只看首字符），而预检要求反向域名 ——
+ * 用户建得出来，到发布那步才被拦下。现在脚手架直接调预检那个函数，
+ * 前端这层只为「即时反馈」，两者以 `precheck::id_ok` 为真源。
  */
 const idError = computed(() => {
   const v = id.value.trim()
   if (!v) return '扩展 ID 不能为空'
-  if (!/^[a-z0-9]/.test(v)) return '须以小写字母或数字开头'
-  if (!/^[a-z0-9.-]+$/.test(v)) return '只允许小写字母、数字、点和连字符'
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(v)) {
+    return '只允许小写字母、数字、点、下划线与连字符，且须以字母或数字开头'
+  }
+  if (!v.includes('.')) {
+    return '需要是小写反向域名，至少含一个点（如 local.myext）'
+  }
+  if (v.startsWith('.')) return '不能以点开头'
+  if (v.includes('..')) return '不能有连续的点'
+  if (v.length > 128) return '太长了（上限 128 字符）'
   return ''
 })
 
@@ -76,7 +92,9 @@ const canSubmit = computed(
 watch(name, (v) => {
   if (idTouched.value) return
   const slug = slugOf(v)
-  id.value = slug ? `local.${slug}` : ''
+  // 至少给一个带点的可用 id：纯 slug（如 `pomodoro`）不符合反向域名，
+  // 而留空又会让用户不知道该怎么填 —— 直接补成 `local.<slug>`
+  id.value = `local.${slug || 'myext'}`
 })
 
 watch(
