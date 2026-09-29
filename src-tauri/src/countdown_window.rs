@@ -43,7 +43,21 @@ pub fn create_or_focus(
     }
 
     let (pos_x, pos_y) = match (x, y) {
-        (Some(px), Some(py)) => (px, py),
+        (Some(px), Some(py)) => {
+            // 同 sticky_window：恢复落点要**校正**（库里可能有单位错误的旧值，
+            // 也可能被拖出屏幕），详见 lib.rs::sanitize_float_position
+            let (ax, ay) = crate::sanitize_float_position(
+                app, px, py, COUNTDOWN_WIDTH, COUNTDOWN_HEIGHT,
+            );
+            if (ax - px).abs() > 0.5 || (ay - py).abs() > 0.5 {
+                if let Some(state) = app.try_state::<DbState>() {
+                    if let Ok(conn) = state.0.lock() {
+                        let _ = crate::repo::countdown::update_position(&conn, parse_id(&label).unwrap_or(0), ax, ay);
+                    }
+                }
+            }
+            (ax, ay)
+        }
         _ => initial_position(app).unwrap_or((240.0, 200.0)),
     };
 
@@ -78,13 +92,18 @@ pub fn create_or_focus(
         if let tauri::WindowEvent::Moved(_) = event {
             if let Some(id) = parse_id(&moved_win.label()) {
                 if let Ok(pos) = moved_win.outer_position() {
+                    // ⚠️ 换算成**逻辑**像素再落盘（2026-09-29 修）。
+                    // `outer_position()` 是 PhysicalPosition，而恢复侧
+                    // `WindowBuilder::position()` 收逻辑像素 —— 差一个 scale_factor，
+                    // Retina 上等于把坐标翻倍，拖到中间的浮窗下次启动就跑到屏幕右下角。
+                    let scale = moved_win.scale_factor().unwrap_or(1.0).max(0.01);
                     if let Some(state) = app_handle.try_state::<DbState>() {
                         if let Ok(conn) = state.0.lock() {
                             let _ = crate::repo::countdown::update_position(
                                 &conn,
                                 id,
-                                pos.x as f64,
-                                pos.y as f64,
+                                pos.x as f64 / scale,
+                                pos.y as f64 / scale,
                             );
                         }
                     }

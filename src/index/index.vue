@@ -1201,24 +1201,28 @@ provide('showToast', showToast)
  * 不加 contain 的话就是「内容圆了、壁纸还是方的」，圆角处露出窗口外的桌面。
  * `contain: paint` 让本元素成为 fixed 后代的包含块，壁纸随之被裁成同款圆角。
  *
- * `margin: var(--window-shadow-margin)` 是**自绘窗口阴影的容身处**。
+ * 早先这里还有 `margin: var(--window-shadow-margin)`（自绘窗口阴影的容身处）：
  * AppKit 不给透明窗口画系统阴影（约定 69 已实机取色证伪 `setHasShadow`），
  * 而 CSS 阴影只能画在窗口以内 —— 窗口不外扩就没有落影的位置。
- * 外扩由 Rust 侧配平：inner 尺寸 = 可视区 + 2 × margin（lib.rs::WINDOW_SHADOW_MARGIN）。
- * 最大化时这三个 token 一起归零，见 style.css 的 `html[data-window-maximized]`。
+ * 但那圈带子是**透明**的，桌面的壁纸与图标会从窗口四周直接透进来形成一圈
+ * 「玻璃框」。取舍变成「有阴影」与「不漏桌面」二选一，现取后者，
+ * 外扩带连同 `WINDOW_SHADOW_MARGIN` 一起移除（2026-09-29）。
+ * 现在最大化只需把圆角归零，见 style.css 的 `html[data-window-maximized]`。
  */
 .app-shell {
-  /* 高度必须扣掉两倍外扩带：原来 `min-height: 100dvh` 是「至少铺满视口」的意思，
-     带 margin 后 100dvh 比可用高度还大，会把内容顶出窗口下沿。
-     父级（#app）是 `height: 100%`，故用百分比扣减即可，不必再引 100dvh。 */
-  height: calc(100% - var(--window-shadow-margin) * 2);
+  /* 铺满整个窗口：外扩带 2026-09-29 移除后，窗口 inner 尺寸**就是**可视区尺寸，
+     不再有任何 margin / 高度扣减。曾经这里是
+     `height: calc(100% - var(--window-shadow-margin) * 2)` + `margin` ——
+     那圈 32px 透明带会让桌面壁纸从窗口四周直接透进来，形成一圈「玻璃框」。 */
+  height: 100%;
   min-height: 0;
-  margin: var(--window-shadow-margin);
   display: flex;
   flex-direction: column;
   background: var(--app-bg, var(--bg-page-surface));
   border-radius: var(--window-radius);
-  box-shadow: var(--window-shadow);
+  /* 不再有 box-shadow：透明窗口拿不到 AppKit 的系统阴影，而 CSS 阴影画在
+     窗口以内 —— 要让阴影有地方画就必须留透明带，带子又必然漏桌面。
+     「有阴影」与「不漏桌面」在透明窗下二选一，此处选了后者。 */
   overflow: hidden;
   position: relative;
   contain: paint;

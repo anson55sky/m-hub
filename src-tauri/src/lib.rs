@@ -298,28 +298,6 @@ pub fn main_window(app: &tauri::AppHandle) -> Option<tauri::Window<tauri::Wry>> 
     app.get_window("main")
 }
 
-/// 主窗「可视区」四周的透明外扩带宽度（逻辑像素）。
-///
-/// **为什么窗口要比可视区大一圈**：AppKit 对 `opaque = false` 的窗口一律不画
-/// 系统阴影（显式 `setHasShadow(true)` 也无效，2026-09-29 实机取色证实），
-/// 而任何 CSS 阴影只能画在窗口**以内**。不外扩就没有落影的位置。
-/// 外扩带同时是 8 向缩放手柄的容身处（`WindowResizeHandles.vue`）。
-///
-/// **本值牵动四处，必须同步**（`scripts/check-window-margin.mjs` 在 prebuild 锁死）：
-/// ① `src/style.css` 的 `--window-shadow-margin`（.app-shell 的 margin）
-/// ② 本常量（尺寸换算：inner = 可视区 + 2 × 本值）
-/// ③ `tauri.conf.json` 主窗的 `width`/`height`/`minWidth`/`minHeight`（那四项是 **inner** 尺寸）
-/// ④ `config.rs::WindowState::default`（可视区默认尺寸，小屏判断与 ③ 对账都取它）
-///
-/// ⚠️ 凡是**别处也需要同一个默认尺寸**（如小屏适配的基准），一律写
-/// `config::WindowState::default()` 引用，不要再抄一份字面量 —— 抄一份就多一处
-/// 能静默漂移的地方，且构建期守卫覆盖不到。
-///
-/// **存的是「可视区」尺寸，不是窗口尺寸**：`WindowState.width/height` 的语义
-/// 始终是用户看到的应用大小，进 `tauri.conf.json` 的 `config.rs::WindowState::default`
-/// 与本文件的换算都以可视区为准。这样老配置（外扩带引入前写入的裸 inner 尺寸）
-/// 语义不变、无需迁移，代价只是首次启动窗口小了 2×M 再被拉回来。
-pub const WINDOW_SHADOW_MARGIN: f64 = 32.0;
 
 /// 浮窗「首次建窗」的落点：以主窗中心为基准，向右下偏移半个浮窗尺寸 + 少量留白。
 ///
@@ -366,6 +344,75 @@ pub fn centered_on_main(app: &tauri::AppHandle, width: f64, height: f64) -> Opti
     ))
 }
 
+/// 浮窗恢复落点的校正：保证结果**永远在某个屏幕的可见范围内**，否则退回主窗中心。
+///
+/// 入参与返回值都是**逻辑**像素。
+///
+/// # 为什么需要它（2026-09-29）
+///
+/// 便签/倒计时浮窗的落点是从库里读回的**历史值**，而历史值有两个来源的问题：
+///
+/// ① **单位曾经是错的**。落盘时存的是 `outer_position()` —— **物理**像素；
+///    恢复时却喂给只收**逻辑**像素的 `WindowBuilder::position()`。
+///    这与主窗 `WindowState` 是同一个 bug（约定 74），在 Retina（scale 2.0）上
+///    坐标直接翻倍：用户在中间拖好的便签，下次启动就落到屏幕右下角，
+///    得再手动拖回来。已把落盘侧改成存逻辑像素，但**库里已有的旧值仍然是错的**。
+///
+/// ② 用户可能把浮窗拖到了屏幕外、或者摘掉了那块显示器。
+///
+/// 所以光「统一单位」不够 —— 必须再加一道**边界校验**。
+/// 这一道对任何来源的坏值都有效：只要落点不在任何屏幕的工作区里，就地纠正。
+///
+/// 判定用「窗口中心是否落在某块屏的工作区内」：中心在屏上，用户就能看到并抓住它拖回来；
+/// 中心不在屏上则必然够不着，这是**不可恢复**的状态（与主窗飞出屏幕同类）。
+/// 找到最近的屏后把落点夹进去（不是置中，避免把用户靠边的便签拽到屏幕正中）。
+pub fn sanitize_float_position(
+    app: &tauri::AppHandle,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> (f64, f64) {
+    let Ok(monitors) = app.available_monitors() else {
+        // 显示器枚举失败：宁可保留原落点，也不要在信息不足时乱动用户的窗口
+        return (x, y);
+    };
+    // Tauri 的 Monitor 几何是**物理**像素，逐屏除以各自的 scale 换到逻辑
+    let rects: Vec<(f64, f64, f64, f64)> = monitors
+        .iter()
+        .map(|m| {
+            let wa = m.work_area();
+            let s = m.scale_factor().max(0.01);
+            let l = wa.position.x as f64 / s;
+            let t = wa.position.y as f64 / s;
+            (l, t, l + wa.size.width as f64 / s, t + wa.size.height as f64 / s)
+        })
+        .collect();
+    if rects.is_empty() {
+        return (x, y);
+    }
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+    if rects.iter().any(|(l, t, r, b)| cx >= *l && cx <= *r && cy >= *t && cy <= *b) {
+        return (x, y); // 中心在屏上，保持用户拖到的位置
+    }
+    // 中心离哪块屏最近就夹进哪块屏
+    let (l, t, r, b) = rects
+        .iter()
+        .min_by(|a, b2| {
+            let da = (cx - (a.0 + a.2) / 2.0).powi(2) + (cy - (a.1 + a.3) / 2.0).powi(2);
+            let db = (cx - (b2.0 + b2.2) / 2.0).powi(2) + (cy - (b2.1 + b2.3) / 2.0).powi(2);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .copied()
+        .unwrap_or((0.0, 0.0, 1920.0, 1080.0));
+    // 屏幕比窗口还窄时用 .max() 兜住：宁可超屏也不要算出负的可拖动范围
+    let nx = x.clamp(l, (r - w).max(l));
+    let ny = y.clamp(t, (b - h).max(t));
+    log::info!("浮窗落点 ({x},{y}) 不在任何屏幕内，已纠正到 ({nx},{ny})");
+    (nx, ny)
+}
+
 /// [`centered_on_main`] 的纯计算部分（抽出以便单测，见 `window_geometry_tests`）。
 ///
 /// 入参 `px/py/sw/sh` 是主窗的**物理**像素，`width/height` 是浮窗的**逻辑**尺寸，
@@ -385,21 +432,6 @@ pub fn centered_offset(
     (x, y)
 }
 
-/// 可视区尺寸 → 窗口 inner 尺寸（外扩带的 2 倍）
-fn to_window_size(visible_w: f64, visible_h: f64) -> tauri::LogicalSize<f64> {
-    tauri::LogicalSize::new(
-        visible_w + WINDOW_SHADOW_MARGIN * 2.0,
-        visible_h + WINDOW_SHADOW_MARGIN * 2.0,
-    )
-}
-
-/// 窗口 inner 尺寸 → 可视区尺寸（`to_window_size` 的逆；用于落盘前归一）
-fn to_visible_size(inner_w: f64, inner_h: f64) -> tauri::LogicalSize<f64> {
-    tauri::LogicalSize::new(
-        (inner_w - WINDOW_SHADOW_MARGIN * 2.0).max(1.0),
-        (inner_h - WINDOW_SHADOW_MARGIN * 2.0).max(1.0),
-    )
-}
 
 /// 应用启动时恢复上次保存的窗口位置、尺寸与置顶状态
 fn restore_window_state(app: &tauri::App) {
@@ -407,7 +439,8 @@ fn restore_window_state(app: &tauri::App) {
     if let Some(window) = main_window(app.handle()) {
         let ws = &config.window;
         // ws.width/height 是**可视区**尺寸，落进窗口时要补上外扩带（约定 69）
-        let _ = window.set_size(to_window_size(ws.width, ws.height));
+        // 窗口 inner 尺寸**就是**可视区尺寸：外扩带 2026-09-29 移除后没有任何换算
+        let _ = window.set_size(tauri::LogicalSize::new(ws.width, ws.height));
         // ws.x/y 是**逻辑**像素（落盘时已从 physical 换算），故这里用 LogicalPosition
         if let (Some(x), Some(y)) = (ws.x, ws.y) {
             if is_position_on_screen(x, y) {
@@ -428,8 +461,8 @@ fn restore_window_state(app: &tauri::App) {
         // 小屏判断就会静默失准（表现为「换到小屏笔记本上窗口下半截掉出屏幕」）。
         // 写成引用就不存在第五处可漂移。
         let default_size = config::WindowState::default();
-        let want_w = ws.width.max(default_size.width) + WINDOW_SHADOW_MARGIN * 2.0;
-        let want_h = ws.height.max(default_size.height) + WINDOW_SHADOW_MARGIN * 2.0;
+        let want_w = ws.width.max(default_size.width);
+        let want_h = ws.height.max(default_size.height);
         if let Ok(Some(monitor)) = window.current_monitor().or_else(|_| window.primary_monitor()) {
             let scale = monitor.scale_factor();
             let logical_w = monitor.size().width as f64 / scale;
@@ -486,7 +519,8 @@ fn persist_window_state(app: &tauri::AppHandle) {
                 // 才自洽；而且逻辑坐标在「换一块不同 DPI 的显示器」后仍然有意义，
                 // 物理坐标不成立。
                 let scale = window.scale_factor().unwrap_or(1.0).max(f64::MIN_POSITIVE);
-                let visible = to_visible_size(size.width as f64, size.height as f64);
+                // inner 尺寸即可视区尺寸，直接落盘
+                let visible = tauri::LogicalSize::new(size.width as f64, size.height as f64);
                 let _guard = config::lock();
                 let mut cfg = config::load();
                 cfg.window.x = Some(pos.x as f64 / scale);
@@ -1077,9 +1111,34 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
+        .run(|app, event| match event {
+            // 程序坞图标点开（macOS）：`applicationShouldHandleReopen:` 由 Tauri 转成本事件。
+            //
+            // ⚠️ 这一段原先**完全缺失**，症状正是「点红绿灯关闭后，再点程序坞图标
+            // 打不开主页面，必须去点菜单栏/托盘图标才行」。
+            // 原因：点红绿灯走 CloseRequested → prevent_close + 隐藏窗口，
+            // 进程仍在跑但**一个可见窗口都没有**；此时点程序坞图标，系统发的是
+            // Reopen，而不是「启动新进程」。事件没人处理 → 什么都不会发生。
+            //
+            // 光 show_window() 还不够：最后一个窗口隐藏后 NSApplication 处于
+            // 「无可见窗口」状态，系统回焦规则不会自动把本应用拉到前台，
+            // 于是即便窗口 show 了也像是没反应 —— 必须显式 activate 一次。
+            //
+            // `has_visible_windows == true` 时不把主窗拽出来：用户可能只是在点
+            // 程序坞图标想唤起菜单栏、或让已开着的窗口前置，不该顺手改窗口显隐。
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows, ..
+            } => {
+                log::info!("收到程序坞重新打开（has_visible_windows={has_visible_windows}）");
+                if !has_visible_windows {
+                    tray::show_window(app);
+                }
+                // 无论有没有可见窗口都要激活，否则点图标像是完全无响应
+                mac::activate_self();
+            }
             // 宿主退出：停止所有 service 后端进程，避免 Node 子进程残留
-            if let tauri::RunEvent::Exit = event {
+            tauri::RunEvent::Exit => {
                 service::stop_all(app);
                 // 先显式移除托盘图标：set_visible/destroy 那类 API 会 run_on_main_thread 回投到
                 // 事件循环（本回调正在主线程里跑，投回去没人处理，就是当年「退出流程被拖死」的
@@ -1090,34 +1149,8 @@ pub fn run() {
                 // 后进程不消失），清理完成后直接结束进程，保证退出 100% 生效
                 std::process::exit(0);
             }
+            // 其余事件（窗口事件转发、主题变化等）无需在此处理
+            _ => {}
         });
 }
 
-#[cfg(test)]
-mod window_geometry_tests {
-    use super::*;
-
-    /// 外扩带换算的往返必须恒等：落盘存的是可视区、恢复时又要还原回窗口尺寸。
-    /// 一旦两者不是互逆运算，用户每次开关一次应用窗口就会缩水/长大一圈
-    /// （表现是「窗口越用越小」，且不会有任何报错）。
-    #[test]
-    fn visible_window_roundtrip_is_identity() {
-        for (w, h) in [(1400.0, 900.0), (1000.0, 700.0), (2560.0, 1440.0), (333.0, 261.0)] {
-            let win = to_window_size(w, h);
-            assert_eq!(win.width, w + 2.0 * WINDOW_SHADOW_MARGIN, "width {w}x{h}");
-            assert_eq!(win.height, h + 2.0 * WINDOW_SHADOW_MARGIN, "height {w}x{h}");
-            let back = to_visible_size(win.width, win.height);
-            assert!((back.width - w).abs() < 1e-9, "往返 width {w} -> {back:?}");
-            assert!((back.height - h).abs() < 1e-9, "往返 height {h} -> {back:?}");
-        }
-    }
-
-    /// 老配置是在外扩带引入之前写入的裸 inner 尺寸，经 `to_visible_size` 会被
-    /// 扣掉两倍外扩带。必须夹到 ≥1 而不是负数 —— 负尺寸会让 set_size 失败，
-    /// 窗口保持 conf 里的默认尺寸（用户丢掉了自己拖好的几何，且毫无提示）。
-    #[test]
-    fn undersized_legacy_size_clamps_instead_of_going_negative() {
-        let s = to_visible_size(WINDOW_SHADOW_MARGIN, WINDOW_SHADOW_MARGIN);
-        assert!(s.width >= 1.0 && s.height >= 1.0, "夹到 {s:?}");
-    }
-}

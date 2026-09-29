@@ -4,15 +4,15 @@
  *
  * ## 为什么需要它
  *
- * 主窗为了自绘阴影，窗口比可视区大了一圈 `--window-shadow-margin`（约定 69）；
- * 无边框窗口在 macOS 上又没有系统缩放边。两者叠加的结果是**整窗无处可缩**
- * ——所以这圈外扩带必须同时承担缩放热区的职责，否则它就是一片
- * 属于窗口、能吃掉点击、却什么都不做的死区。
+ * 主窗无边框，而无边框窗口在 macOS 上**没有系统缩放边**，所以整窗无处可缩。
+ * ��意早先这里还有第二个理由：主窗当时有一圈 32px 透明外扩带（为了给自绘阴影
+ * 留位置），那圈带子必须同时承担缩放热区职责，否则它就是一片属于窗口、
+ * 能吃掉点击、却什么都不做的死区。外扩带已于 2026-09-29 移除（见
+ * `scripts/check-window-margin.mjs`），本组件的**唯一**理由就是上面那句。
  *
- * 附带解决一个瞄准问题：**看得见的圆角内容边缘并不在窗口边缘**，中间隔着
- * 整整一圈外扩带。若把手柄贴在窗口边上，resize 光标会亮在一圈空白里，
- * 离用户看到的边缘差 32px。所以手柄定位在**内容边**（见 CSS 的
- * `--window-shadow-margin` 偏移），薄薄地压住内容几像素。
+ * 现在手柄直接贴在窗口边缘 —— 这同时修掉了一个瞄准问题：早先手柄要偏移
+ * `--window-shadow-margin` 才能落在「看得见的圆角内容边」上，否则 resize 光标
+ * 会亮在一圈空白里、离用户看到的边缘差 32px。带子没了，偏移也就不需要了。
  *
  * ## 为什么不用 `startResizeDragging`
  *
@@ -28,8 +28,7 @@
  *
  * ## 最大化态
  *
- * 最大化时外扩带归零（`html[data-window-maximized]`，style.css），
- * 窗口就是屏幕四边，没有「边」可拖，隐藏。
+ * 最大化时窗口就是屏幕四边，没有「边」可拖，隐藏。
  * 状态直接读 `<html>` 上那个属性，不另存一份：那个属性由
  * `TitleBar.refreshMaximized()` 写入，是唯一真相源。
  */
@@ -101,65 +100,64 @@ onBeforeUnmount(() => observer?.disconnect())
  *    垂直居中在 ~48px 高的条里，6px 不会碰到）
  *  · 角 16px 是为了让斜向拖拽有舒服的起手区
  *
- * `--window-shadow-margin` 的偏移把定位基准从「窗口边」挪到「**可见内容边**」：
- * 主窗外侧有 32px 透明外扩带，贴窗口边的话光标会亮在空白里。
- * 无该变量的窗口（浮窗）回落到 0px，行为与改动前一致。 */
+ * 定位基准直接是**窗口边**：外扩带 2026-09-29 移除后，窗口边就是用户看得见的
+ * 内容边，不再需要为它加一层偏移。 */
 .wrz {
   position: fixed;
   z-index: 1;
 }
 .wrz-north {
-  top: var(--window-shadow-margin, 0px);
+  top: 0px;
   left: 0;
   right: 0;
   height: 6px;
   cursor: ns-resize;
 }
 .wrz-south {
-  bottom: var(--window-shadow-margin, 0px);
+  bottom: 0px;
   left: 0;
   right: 0;
   height: 6px;
   cursor: ns-resize;
 }
 .wrz-east {
-  right: var(--window-shadow-margin, 0px);
+  right: 0px;
   top: 0;
   bottom: 0;
   width: 6px;
   cursor: ew-resize;
 }
 .wrz-west {
-  left: var(--window-shadow-margin, 0px);
+  left: 0px;
   top: 0;
   bottom: 0;
   width: 6px;
   cursor: ew-resize;
 }
 .wrz-northeast {
-  top: var(--window-shadow-margin, 0px);
-  right: var(--window-shadow-margin, 0px);
+  top: 0px;
+  right: 0px;
   width: 16px;
   height: 16px;
   cursor: nesw-resize;
 }
 .wrz-southwest {
-  bottom: var(--window-shadow-margin, 0px);
-  left: var(--window-shadow-margin, 0px);
+  bottom: 0px;
+  left: 0px;
   width: 16px;
   height: 16px;
   cursor: nesw-resize;
 }
 .wrz-northwest {
-  top: var(--window-shadow-margin, 0px);
-  left: var(--window-shadow-margin, 0px);
+  top: 0px;
+  left: 0px;
   width: 16px;
   height: 16px;
   cursor: nwse-resize;
 }
 .wrz-southeast {
-  bottom: var(--window-shadow-margin, 0px);
-  right: var(--window-shadow-margin, 0px);
+  bottom: 0px;
+  right: 0px;
   width: 16px;
   height: 16px;
   cursor: nwse-resize;

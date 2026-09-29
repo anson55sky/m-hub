@@ -521,6 +521,28 @@ pub fn activate_app(bundle_id: &str) -> bool {
     app.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps)
 }
 
+/// 把**本进程**的应用激活到前台（等价 Windows 的 `SetForegroundWindow(自身 hwnd)`）。
+///
+/// 用途：macOS 上「程序坞图标点开」走的是 `applicationShouldHandleReopen:`，
+/// Tauri 转成 `RunEvent::Reopen`。光 `window.show() + set_focus()` 常常**不够** ——
+/// 最后一个窗口被隐藏后，NSApplication 处于「无可见窗口」状态，
+/// 系统的回焦规则不会自动把本应用拉到前台，于是表现为
+/// **「图标点了没反应，必须先去点菜单栏/托盘图标」**。
+/// 必须显式 activate 一次。
+///
+/// 与 [`activate_app`] 的区别：那个按 bundle id 找**别的**应用（粘贴后归还焦点用），
+/// 这个激活**自己**，不需要知道自己叫什么。
+pub fn activate_self() -> bool {
+    // `currentApplication()` 返回 `Retained<NSRunningApplication>`（不是 Option），
+    // 正常情况下必定非 nil，直接用即可 —— 与 activate_app 里 `apps.iter().next()`
+    // 的写法不同，那边是因为 `runningApplicationsWithBundleIdentifier:` 真会返回空数组。
+    let app = NSRunningApplication::currentApplication();
+    // 与 activate_app 同理：14+ 上系统会自行补焦点，但显式 activate 仍是
+    // 让已运行应用把窗口拉到前台的唯一途径。
+    #[allow(deprecated)]
+    app.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps)
+}
+
 /// 当前所有正在运行的应用。
 ///
 /// 注意 `runningApplications` 这个选择器属于 **NSWorkspace**，但 objc2 的绑定把它

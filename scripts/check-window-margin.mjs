@@ -1,201 +1,146 @@
 /**
- * 校验「窗口阴影外扩带」的四处口径一致（见 AGENTS.md 约定 69）
+ * 守卫：主窗**不允许再有外扩带**，且窗口 inner 尺寸 == 可视区尺寸
  *
- * ## 这个数为什么牵动四处
+ * ## 历史（为什么这个守卫现在「反向」了）
  *
- * 主窗为自绘阴影，窗口要比可视区大一圈 `--window-shadow-margin`（AppKit 不给透明
- * 窗口画系统阴影，而 CSS 阴影只能画在窗口以内）。这同一个数出现在四个地方：
+ * 2026-09-29 之前主窗有一圈 32px 透明外扩带（`--window-shadow-margin` /
+ * `WINDOW_SHADOW_MARGIN`），存在的唯一理由是**给自绘阴影留位置**：
+ * AppKit 对 `transparent: true` 的窗口不画系统阴影（显式 `setHasShadow(true)`
+ * 也无效，实机取色证实），而 CSS 阴影只能画在窗口**以内**，不外扩就无处可画。
  *
- *   ① `src/style.css`          `--window-shadow-margin: 32px`   → .app-shell 的 margin
- *   ② `src-tauri/src/lib.rs`   `WINDOW_SHADOW_MARGIN: f64 = 32.0` → 尺寸换算 inner = 可视区 + 2×它
- *   ③ `tauri.conf.json`        width/height/minWidth/minHeight 是 **inner** 尺寸，各 + 2×它
- *   ④ `config.rs`              `WindowState::default` = 1400×900（可视区），lib.rs 小屏判断**引用**它
+ * 代价是那圈带子**是透明的** —— 桌面壁纸与图标会从窗口四周直接透进来，
+ * 在窗口外面形成一圈明显的「玻璃框」。用户实测：在彩色壁纸上尤其刺眼。
  *
- * ## 为什么必须机械校验
+ * 于是带子被移除，取舍变成一句话：
+ *   **「有阴影」与「不漏桌面」在透明窗下二选一。**
+ * 透明窗拿不到系统阴影，所以选了后者：内容铺满整窗、圆角保留、**没有阴影**。
+ * 若哪天要阴影，唯一干净的路是把窗口改成 opaque 并接受直角 —— 那是设计取舍。
  *
- * ① ② ③ 跨两种语言、三种文件类型，**没有任何编译器或类型系统会把它们关联起来**。
- * 漏改一处的症状不是报错，是「窗口和内容差了一圈」——看起来像边距没对齐，
- * 排查方向会跑到 CSS 上，而真正错的是另外几个文件里的数字。
+ * ## 为什么移除之后还需要守卫
  *
- * ④ 与 ③ 的关系也要锁：`tauri.conf.json` 的初始 inner 尺寸应当正好等于
- * `WindowState::default` 换算后的值。两者不一致时，窗口创建后会被
- * `restore_window_state` 立刻改写（该窗 `visible: false`，看不出），
- * 但会留下一段「尺寸先错后对」的时间窗，且排查时极易误判为闪烁 bug。
+ * 因为「顺手加回一圈带子」是很自然的一次改动（想让窗口有阴影时几乎必然想到它），
+ * 而它的症状又是**静默**的：窗口与内容差一圈，肉眼像「边距没对齐」，
+ * 排查方向会跑到 CSS 上，而真正错的是尺寸换算。
+ * 本守卫把「带子不许回来」以及「inner == visible」这两条钉死：
+ *   ① `src/style.css` 不得再声明 `--window-shadow-margin`
+ *   ② `src-tauri/src/lib.rs` 不得再有 `WINDOW_SHADOW_MARGIN`
+ *   ③ `tauri.conf.json` 的 width/height/minWidth/minHeight 必须**等于**
+ *      `config.rs::WindowState::default`（不再有 2×M 的加法）
+ *   ④ `index.html` 启动欢迎页的 inset 必须是 0、圆角须与 `--window-radius` 一致
  *
- * ## 有一处是「消灭」而不是「校验」
- *
- * ④ 在 lib.rs 那边必须写成 `config::WindowState::default()` 引用、不是字面量。
- * 那里曾硬编码 1400/900 —— 同一组数字的**第五份拷贝**，本守卫覆盖不到，
- * 只改 config.rs 就会让小屏判断静默失准（症状是「换到小屏笔记本上窗口下半截
- * 掉出屏幕」，且在大屏上完全看不出来）。现在写成引用，没有第五处可漂移。
+ * ③ 那条是最有价值的：它把「窗口尺寸」与「落盘尺寸」重新绑在同一个数字上。
+ * 两者一旦分叉（比如有人只改了 conf 的 width），用户拖好的窗口尺寸会在
+ * 下次启动时被改写，且不会有任何报错。
  */
+
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(join(root, p), "utf8");
 
 const problems = [];
-
-// ---- ① CSS token ------------------------------------------------------------
 const css = read("src/style.css");
-const cssMatch = css.match(/--window-shadow-margin:\s*(\d+(?:\.\d+)?)px/);
-if (!cssMatch) {
-  problems.push("src/style.css 找不到 `--window-shadow-margin` 声明");
-}
-const cssMargin = cssMatch ? Number(cssMatch[1]) : NaN;
-
-// ---- ② Rust 常量 ------------------------------------------------------------
 const libRs = read("src-tauri/src/lib.rs");
-const rsMatch = libRs.match(/WINDOW_SHADOW_MARGIN:\s*f64\s*=\s*(\d+(?:\.\d+)?)/);
-if (!rsMatch) {
-  problems.push("src-tauri/src/lib.rs 找不到 `WINDOW_SHADOW_MARGIN` 定义");
-}
-const rsMargin = rsMatch ? Number(rsMatch[1]) : NaN;
-
-if (Number.isFinite(cssMargin) && Number.isFinite(rsMargin) && cssMargin !== rsMargin) {
-  problems.push(
-    `外扩带宽度 CSS=${cssMargin}px ≠ Rust=${rsMargin}px —— 窗口与内容会差一圈（视觉上像边距没对齐）`,
-  );
-}
-
-// ---- ④ WindowState::default（可视区）----------------------------------------
-const configRs = read("src-tauri/src/config.rs");
-const defMatch = configRs.match(
-  /impl Default for WindowState[\s\S]*?width:\s*(\d+(?:\.\d+)?)\s*,\s*\n\s*height:\s*(\d+(?:\.\d+)?)/,
-);
-if (!defMatch) {
-  problems.push("src-tauri/src/config.rs 找不到 WindowState::default 的 width/height");
-}
-const defW = defMatch ? Number(defMatch[1]) : NaN;
-const defH = defMatch ? Number(defMatch[2]) : NaN;
-
-// ---- ③ tauri.conf.json（inner 尺寸）-----------------------------------------
-const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
-// 主窗的 label 省略时 Tauri 默认就是 "main"，故 label 缺失也算；
-// 若 conf 里有多扇窗而主窗没写 label，则无法无歧义识别，直接报错而不是猜第一个
-const allWins = conf.app?.windows ?? [];
-const win =
-  allWins.find((w) => w.label === "main") ??
-  (allWins.length === 1 ? allWins[0] : undefined);
-if (!win) {
-  problems.push(
-    `src-tauri/tauri.conf.json 无法识别主窗（共 ${allWins.length} 扇窗${allWins.map((w) => w.label ?? "<无 label>").join("、")}）——请给主窗显式写 "label": "main"`,
-  );
-} else if (Number.isFinite(defW) && Number.isFinite(defH)) {
-  const band = cssMargin * 2;
-  // width/height：与 Rust 的 WindowState::default 硬对账（真正的跨语言校验）
-  for (const [key, actual, def] of [
-    ["width", win.width, defW],
-    ["height", win.height, defH],
-  ]) {
-    const expected = def + band;
-    if (actual !== expected) {
-      problems.push(
-        `tauri.conf.json main.${key}=${actual}，应为 ${expected}（= WindowState::default ${def} + 2×${cssMargin}）`,
-      );
-    }
-  }
-  // minWidth/minHeight：**没有**对应的 Rust 默认值（最小尺寸只在 conf 里），
-  // 故不对账具体数字，只校验换算后的「可视区最小值」落在合理区间：
-  //   · > 400px —— 低于此布局（220px 侧栏 + 内容）已不可用
-  //   · ≤ 默认值 —— 否则 restore_window_state 一开始就把窗口顶在最小尺寸上
-  // 这两条在 M 被改动而 conf 忘了跟平时也会变红（M 越大越容易触发下限那条）。
-  for (const [key, actual, def] of [
-    ["minWidth", win.minWidth, defW],
-    ["minHeight", win.minHeight, defH],
-  ]) {
-    const visible = actual - band;
-    if (!(visible > 400)) {
-      problems.push(
-        `tauri.conf.json main.${key}=${actual} → 可视区最小 ${visible}px，已 ≤ 400px 下限（布局不可用）`,
-      );
-    }
-    if (visible > def) {
-      problems.push(
-        `tauri.conf.json main.${key}=${actual} → 可视区最小 ${visible}px > 默认 ${def}px，最小值将反过来顶住启动尺寸`,
-      );
-    }
-  }
-}
-
-// ---- index.html 的内联启动页（第 5 处）---------------------------------------
-// 这处**必须硬编码**：`index.html` 的 <style> 在 <head> 里，早于 style.css 加载，
-// 那时 `var(--window-shadow-margin)` 还不存在，var() 解析成 0 → 修等于没修。
-// 代价是它成了第 5 份拷贝，故在这里锁死。
+const confRs = read("src-tauri/src/config.rs");
 const html = read("index.html");
-const splashInset = html.match(/#boot-splash\s*\{[\s\S]*?\binset:\s*(\d+(?:\.\d+)?)px/);
+const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
+const win = conf.app?.windows?.[0];
+
+// ---- ①② 带子不许回来 ---------------------------------------------------
+
+if (/--window-shadow-margin\s*:/.test(css)) {
+  problems.push(
+    "src/style.css 又出现了 `--window-shadow-margin` 声明。\n" +
+      "        外扩带已移除：那圈带子是透明的，会让桌面从窗口四周直接透进来，\n" +
+      "        形成一圈「玻璃框」。要阴影请把窗口改成 opaque 并接受直角。",
+  );
+}
+if (/WINDOW_SHADOW_MARGIN/.test(libRs)) {
+  problems.push(
+    "src-tauri/src/lib.rs 又出现了 `WINDOW_SHADOW_MARGIN`。\n" +
+      "        窗口 inner 尺寸现在**就是**可视区尺寸，任何 ±2×M 的换算都是错的。",
+  );
+}
+
+// ---- ③ conf 的 inner 尺寸必须等于 WindowState::default -------------------
+
+const defaultW = Number(
+  confRs.match(/pub\s+width:\s*([0-9.]+)/)?.[1] ??
+    confRs.match(/fn default\(\)[^{]*\{[\s\S]*?width:\s*([0-9.]+)/)?.[1],
+);
+const defaultH = Number(
+  confRs.match(/pub\s+height:\s*([0-9.]+)/)?.[1] ??
+    confRs.match(/fn default\(\)[^{]*\{[\s\S]*?height:\s*([0-9.]+)/)?.[1],
+);
+
+if (!Number.isFinite(defaultW) || !Number.isFinite(defaultH)) {
+  problems.push("config.rs 里取不到 WindowState::default 的 width/height");
+} else {
+  for (const [key, expected] of [
+    ["width", defaultW],
+    ["height", defaultH],
+  ]) {
+    if (win?.[key] !== expected) {
+      problems.push(
+        `tauri.conf.json 的 ${key} = ${win?.[key]}，应为 ${expected}` +
+          `（= WindowState::default 的可视区尺寸）。\n` +
+          `        两者必须相等：外扩带移除后窗口 inner 尺寸**就是**可视区尺寸。`,
+      );
+    }
+  }
+  // 最小尺寸同理：minWidth/minHeight 是 inner 尺寸，必须等于「可视区下限」
+  const minW = Number(confRs.match(/min_width:\s*([0-9.]+)/)?.[1]);
+  const minH = Number(confRs.match(/min_height:\s*([0-9.]+)/)?.[1]);
+  if (Number.isFinite(minW) && win?.minWidth !== minW) {
+    problems.push(`tauri.conf.json 的 minWidth = ${win?.minWidth}，应为 ${minW}`);
+  }
+  if (Number.isFinite(minH) && win?.minHeight !== minH) {
+    problems.push(`tauri.conf.json 的 minHeight = ${win?.minHeight}，应为 ${minH}`);
+  }
+}
+
+// ---- ④ 启动欢迎页：inset 0 + 圆角与 --window-radius 一致 -------------------
+// index.html 的 <style> 早于 style.css 加载，CSS 变量那时还不存在，
+// 所以这里只能硬编码 —— 也因此必须机械校验它没跟主样式跑偏。
+
+// ⚠️ 单位必须**可选**：`inset: 0` 是合法 CSS 且不带 px。
+// 写成 `\d+px` 会让这条正则整条匹配不上 —— 守卫于是「没发现问题」，
+// 而它恰恰是最该拦的那种（带子加回来时值就是 0 的反面）。
+// 这不是第一次在这个守卫上栽：早先的 box-shadow 版本也有同样的单位假设。
+const splashInset = html.match(/#boot-splash\s*\{[\s\S]*?\binset:\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*;/);
 if (!splashInset) {
   problems.push("index.html 找不到 `#boot-splash` 的 inset 声明");
-} else if (Number(splashInset[1]) !== cssMargin) {
+} else if (Number(splashInset[1]) !== 0) {
   problems.push(
-    `index.html #boot-splash 的 inset=${splashInset[1]}px，应为 ${cssMargin}px（= --window-shadow-margin）。\n` +
-      `        不一致时启动欢迎页的圆角落在窗口角、而主界面圆角落在内容角，\n` +
-      `        启动瞬间会看到一次「形状跳变」（方块缩进去 32px）。`,
-  );
-}
-const splashRadius = html.match(/#boot-splash::before\s*\{[\s\S]*?border-radius:\s*(\d+(?:\.\d+)?)px/);
-const radiusMatch = css.match(/--window-radius:\s*(\d+(?:\.\d+)?)px/);
-if (!splashRadius) {
-  problems.push("index.html 找不到 `#boot-splash::before` 的 border-radius 声明");
-} else if (radiusMatch && Number(splashRadius[1]) !== Number(radiusMatch[1])) {
-  problems.push(
-    `index.html #boot-splash::before 的 border-radius=${splashRadius[1]}px，` +
-      `应为 ${radiusMatch[1]}px（= --window-radius）`,
+    `index.html #boot-splash 的 inset=${splashInset[1]}px，应为 0px。\n` +
+      `        外扩带已移除，欢迎页与主界面都铺满整窗；不内缩的话启动时会看到\n` +
+      `        一次「圆角方块缩进去 Npx」的形状跳变。`,
   );
 }
 
-// ---- 阴影延伸量不得超过外扩带（否则阴影被窗口边缘切平）----------------------
-// box-shadow 的 `offsetY + blur` 决定向下的可见延伸，blur 决定两侧；
-// 超出 --window-shadow-margin 的部分会被窗口边界裁掉，表现为「阴影被削平」。
-//
-// ⚠️ 必须遍历**全部**声明（亮色 + `[data-theme="dark"]` 各自的），不能只看第一处：
-// 暗色阴影是另写一遍的，只查亮色等于放暗色一马过去 —— 而「暗色阴影被切平」
-// 恰恰是浅色阴影看不出来的那个问题。
-if (Number.isFinite(cssMargin)) {
-  const decls = [...css.matchAll(/--window-shadow:\s*([^;]+);/g)];
-  if (!decls.length) {
-    problems.push("src/style.css 找不到 `--window-shadow` 声明");
-  }
-  for (const [, value] of decls) {
-    const v = value.trim();
-    // `none`（最大化态归零）与 `0`（无阴影）天然满足约束，直接跳过
-    if (v === "none" || /^0(px)?(\s+0(px)?)*$/.test(v)) continue;
-    // 形状是 `<offset-x> <offset-y> <blur> <color>`；**偏移量允许无单位**（`0`），
-    // 所以不能要求三段都带 px —— 早期版本因此写错成 `/px$/` 过滤，
-    // 结果 `0 8px 40px …` 只捞到 2 段、整条规则被静默跳过（负例测不出来）。
-    const nums = v
-      .split(/\s+/)
-      .map((p) => p.match(/^(-?[\d.]+)(px)?$/))
-      .filter(Boolean)
-      .map((m) => Number.parseFloat(m[1]));
-    if (nums.length < 3) {
-      // 解析不出来就必须报出来：否则这条规则等于没有，静默放过比不写更糟
-      problems.push(
-        `无法解析 --window-shadow（读到 ${nums.length} 个数值，期望至少 3 个）："${v}"`,
-      );
-      continue;
-    }
-    const [, y, blur] = nums;
-    if (y + blur > cssMargin) {
-      problems.push(
-        `--window-shadow "${v}" 的向下延伸 ${y}+${blur}=${y + blur}px 超过 --window-shadow-margin ${cssMargin}px，阴影会被窗口边缘切平`,
-      );
-    }
-  }
+const cssRadius = Number(css.match(/--window-radius:\s*([0-9.]+)px/)?.[1]);
+const splashRadius = Number(
+  html.match(/#boot-splash::before\s*\{[\s\S]*?border-radius:\s*([0-9.]+)\s*(?:px)?\s*;/)?.[1],
+);
+if (!Number.isFinite(cssRadius)) {
+  problems.push("src/style.css 找不到 `--window-radius`");
+} else if (splashRadius !== cssRadius) {
+  problems.push(
+    `index.html 欢迎页圆角=${splashRadius}px，应为 ${cssRadius}px（= --window-radius）`,
+  );
 }
 
 if (problems.length) {
-  console.error(`[window-margin] 窗口外扩带口径不一致 ${problems.length} 条：`);
+  console.error(`[window-margin] 外扩带已移除，但发现 ${problems.length} 处不一致：`);
   for (const p of problems) console.error(`  ✗ ${p}`);
   console.error(
-    "  改法：改 src/style.css 的 `--window-shadow-margin` 与 src-tauri/src/lib.rs 的\n" +
-      "        `WINDOW_SHADOW_MARGIN` 两处之一后，把另一处与 tauri.conf.json 的\n" +
-      "        width/height/minWidth/minHeight 一起对齐（后两项是 inner 尺寸 = 可视区 + 2×外扩带）。",
+    "\n  背景见本文件顶部注释：外扩带是为了给自绘阴影留位置，但它是透明的，\n" +
+      "  会让桌面从窗口四周透进来形成「玻璃框」。有阴影 / 不漏桌面二选一。",
   );
   process.exit(1);
 }
 console.log(
-  `[window-margin] 外扩带口径一致（${cssMargin}px × 4 处 + 阴影延伸量）`,
+  `[window-margin] 无外扩带（inner == 可视区 ${defaultW}×${defaultH}，欢迎页 inset 0 / 圆角 ${cssRadius}px）`,
 );

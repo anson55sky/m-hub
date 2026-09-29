@@ -66,9 +66,10 @@ pub fn parse_edges(direction: &str) -> Option<Edges> {
 /// 主窗 inner 最小宽度（**逻辑** px）。必须与 `tauri.conf.json` 的 `minWidth` 一致，
 /// 由 `scripts/check-window-min-size.mjs` 在 prebuild 锁死（tao 建窗时用它调
 /// `NSWindow.setMinSize`，这里是那份配置的 Rust 侧镜像）。
-pub const MIN_INNER_W: f64 = 1064.0;
-/// 主窗 inner 最小高度（**逻辑** px），同上，对应 `minHeight`。
-pub const MIN_INNER_H: f64 = 764.0;
+/// 外扩带移除后 inner == 可视区，故直接等于可视区下限 1000。
+pub const MIN_INNER_W: f64 = 1000.0;
+/// 主窗 inner 最小高度（**逻辑** px），同上，对应 `minHeight`（可视区下限 700）。
+pub const MIN_INNER_H: f64 = 700.0;
 
 struct DragStart {
     edges: Edges,
@@ -169,10 +170,11 @@ fn run(window: tauri::Window<tauri::Wry>, s: DragStart) {
     // 这条是单次一行（不是每帧），INFO 级不吵；而缩放是本模块唯一没有事后痕迹的
     // 交互，出问题时没有这条就只能靠猜。
     let (w, h, x, y) = geometry_for(&s, last.unwrap_or(s.cursor));
+    // 全篇物理像素，且窗口 inner 尺寸即可视区尺寸（外扩带已移除），故直接打印
     log::info!(
-        "[window-resize] 缩放结束: 可视区 {}x{} @ ({},{})",
-        (w - crate::WINDOW_SHADOW_MARGIN * 2.0).max(1.0) as i64,
-        (h - crate::WINDOW_SHADOW_MARGIN * 2.0).max(1.0) as i64,
+        "[window-resize] 缩放结束: {}x{} @ ({},{})",
+        w as i64,
+        h as i64,
         x as i64,
         y as i64
     );

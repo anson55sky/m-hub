@@ -28,18 +28,16 @@
       /* 启动欢迎页：内联在 index.html，HTML 一解析即显示（早于 Vue 挂载），数据就绪后由前端淡出移除。
          渐变背景首帧即不透明铺满，盖住后挂载的主界面（否则 Vue 挂载会透过半透明欢迎页闪现）；
          只对文字做淡入，观感平滑且无界面闪现。 */
-      /* ⚠️ inset 是 32px 硬编码值，不是 var(--window-shadow-margin)（2026-09-29 修）：
+      /* inset 是 0、圆角 16px 硬编码，不是 var(--window-radius)（2026-09-29）：
          本段样式在 <head> 里，**早于 style.css 加载**，那时 CSS 变量还不存在，
-         var() 只会解析成 0（无 fallback）→ 修等于没修。
-         这 32 必须与 style.css 的 `--window-shadow-margin` 一致，
-         由 scripts/check-window-margin.mjs 在 prebuild 锁死（已是第 5 处口径）。
-         为什么必须内缩：主窗外侧有 32px 透明外扩带（自绘阴影用，约定 69），
-         欢迎页若按 inset:0 铺满整窗，它的圆角落在**窗口角**上，而真正的主界面
-         圆角落在窗口边缘往里 32px 处 —— 启动时先看到一个铺满整窗的圆角方块，
-         Vue 挂载后内容内缩 32px 出现，肉眼是一次明显的「形状跳变」。 */
+         var() 无 fallback 会解析成 0 → 圆角会变成直角，与主界面不一致。
+         两者必须与 style.css 的 `--window-radius` 保持一致，
+         由 scripts/check-window-margin.mjs 在 prebuild 锁死。
+         （原为 inset:32px 以避开主窗那圈透明外扩带；外扩带已移除，故回到 0。
+           当时若不内缩，启动时会看到「圆角方块缩进去 32px」的一次形状跳变。） */
       #boot-splash {
         position: fixed;
-        inset: 32px;
+        inset: 0;
         z-index: 9999;
         display: flex;
         flex-direction: column;
@@ -55,14 +53,14 @@
          overflow:hidden + border-radius 裁出圆角，直接铺在元素上裁不掉。
          圆角值与主窗 .app-shell 的 --window-radius 一致，启动瞬间方角→圆角
          不会有一次「形状跳变」。 */
-      /* 圆角同样硬编码 12px（理由同上：style.css 尚未加载），
+      /* 圆角同样硬编码 16px（理由同上：style.css 尚未加载），
          须与 --window-radius 一致，由 check-window-margin.mjs 锁 */
       #boot-splash::before {
         content: "";
         position: absolute;
         inset: 0;
         z-index: 0;
-        border-radius: 12px;
+        border-radius: 16px;
         background:
           radial-gradient(1200px 800px at 20% -10%, rgba(255, 255, 255, 0.28), transparent 60%),
           linear-gradient(120deg, #a5b4fc 0%, #93c5fd 33%, #a5f3fc 66%, #fbcfe8 100%);

@@ -37,7 +37,24 @@ pub fn create_or_focus(
     }
 
     let (pos_x, pos_y) = match (x, y) {
-        (Some(px), Some(py)) => (px, py),
+        (Some(px), Some(py)) => {
+            // 恢复落点必须**校正**而不是照搬：库里可能存着单位错误的旧值
+            // （历史 bug：存物理、按逻辑读，Retina 上坐标翻倍），
+            // 也可能被用户拖到屏幕外。详见 lib.rs::sanitize_float_position。
+            let (ax, ay) = crate::sanitize_float_position(app, px, py, STICKY_WIDTH, STICKY_HEIGHT);
+            // 顺手把纠正后的值写回库：否则每次启动都要重新纠正一次，
+            // 而且一旦用户把它拖到某块不存在的屏上，坏值会一直留着。
+            if (ax - px).abs() > 0.5 || (ay - py).abs() > 0.5 {
+                if let Some(state) = app.try_state::<DbState>() {
+                    if let Ok(conn) = state.0.lock() {
+                        let _ = crate::repo::detached_sticky::update_position(
+                            &conn, slot, ax, ay,
+                        );
+                    }
+                }
+            }
+            (ax, ay)
+        }
         _ => initial_position(app).unwrap_or((200.0, 200.0)),
     };
 
@@ -68,7 +85,12 @@ pub fn create_or_focus(
     let win = builder.build()?;
     crate::win_taskbar::apply(&win);
 
-    // 移动时持久化位置（存逻辑坐标，与恢复时的 position 一致）
+    // 移动时持久化位置。⚠️ 必须换算成**逻辑**像素（2026-09-29 修）。
+    // `outer_position()` 返回的是 PhysicalPosition（tauri 文档明写），
+    // 而恢复侧走 `WindowBuilder::position()`，后者收**逻辑**像素。
+    // 两者差一个 scale_factor，于是 Retina 上拖到中间的便签下次启动就落到
+    // 屏幕右下角（坐标翻倍），得再手动拖回来。
+    // 注释原先写着「存逻辑坐标」—— 那是错的，代码一直存的是物理。
     let app_handle = app.clone();
     let moved_win = win.clone();
     win.on_window_event(move |event| {
@@ -79,13 +101,14 @@ pub fn create_or_focus(
                 .parse::<i64>()
                 .unwrap_or(0);
             if let Ok(pos) = moved_win.outer_position() {
+                let scale = moved_win.scale_factor().unwrap_or(1.0).max(0.01);
                 if let Some(state) = app_handle.try_state::<DbState>() {
                     if let Ok(conn) = state.0.lock() {
                         let _ = crate::repo::detached_sticky::update_position(
                             &conn,
                             slot,
-                            pos.x as f64,
-                            pos.y as f64,
+                            pos.x as f64 / scale,
+                            pos.y as f64 / scale,
                         );
                     }
                 }

@@ -39,10 +39,42 @@ const appWindow = isTauri() ? getCurrentWindow() : null
 
 // ---- 窗口拖动：data-tauri-drag-region 只对 mousedown 的精确目标生效，
 // 点击标题栏内的子元素（svg/span）时不触发；改用 startDragging 统一处理
+//
+// ---- 双击最大化：自己判双击，不靠 @dblclick（2026-09-29 修） ----
+//
+// 原先只有 mousedown → startDragging，没有任何双击处理，所以标题栏双击毫无反应。
+// 这里**不用 `@dblclick`**：macOS 的 startDragging 走
+// `performWindowDragWithEvent:`，那是一个**原生的模态拖拽会话**，会接管鼠标；
+// 双击的第二次按下/抬起是否还能回到 webview 并不保证（实测与 tao 的时序有关）。
+// 而 mousedown 是在 startDragging **之前**就收到的，所以从 mousedown 流里
+// 自己判双击是确定性的：两次按下间隔够近、位置够近 → 判为双击，
+// 此时**不**再调 startDragging（否则第二次按下会先把窗口拖动一下，手感很抖）。
+const DOUBLE_CLICK_MS = 400
+const DOUBLE_CLICK_SLOP = 5
+let lastDownAt = 0
+let lastDownX = 0
+let lastDownY = 0
+
 function onDragStart(e: MouseEvent) {
   if (!appWindow || e.button !== 0) return
   const target = e.target as HTMLElement
   if (target.closest('button')) return
+
+  const now = performance.now()
+  const isDouble =
+    now - lastDownAt < DOUBLE_CLICK_MS &&
+    Math.abs(e.clientX - lastDownX) <= DOUBLE_CLICK_SLOP &&
+    Math.abs(e.clientY - lastDownY) <= DOUBLE_CLICK_SLOP
+  lastDownAt = now
+  lastDownX = e.clientX
+  lastDownY = e.clientY
+
+  if (isDouble) {
+    // 清掉时间戳：否则连续三击会被算成「双击 + 双击」而连续切换两次最大化
+    lastDownAt = 0
+    toggleMaximize()
+    return
+  }
   appWindow.startDragging()
 }
 
@@ -51,8 +83,8 @@ const isMaximized = ref(false)
 let unlistenResize: (() => void) | null = null
 
 // 最大化时必须把 `data-window-maximized` 写到 <html>：主窗为自绘阴影比可视区
-// 大了一圈（`--window-shadow-margin`），最大化时那圈若还在，屏幕四边会露出
-// 一条透出桌面的缝。style.css 据此把外扩带/圆角/阴影三个 token 一起归零。
+// 最大化时若还留着圆角，屏幕四角会露出四个小小的桌面色缺口，
+// style.css 据此把 --window-radius 归零（外扩带与阴影已随外扩带一并移除）。
 // **这里是该属性的唯一写方。** Rust 侧刻意不再 eval 一份，两个理由：
 //   ① 双写方会出现两边状态不一致的窗口期（一边归零一边没归零 = 缝闪一下）
 //   ② 启动期那次 eval 会打在**加载中的空白文档**上 —— 真正页面一换就没了，

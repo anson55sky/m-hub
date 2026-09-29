@@ -277,58 +277,60 @@ m-hub/
     **这条编译期完全看不出来、类型检查全绿，只能实机看见**，故有构建期守卫
     `scripts/check-rounded-window.mjs`（`npm run build` 的 prebuild 会跑，违规直接失败）。
     小而定位的下拉 / 气泡 / tooltip **不受此限**（它们内缩，永远碰不到窗口边缘）。
-    ⚠️ **第五条（2026-09-29 修，是第四条自己引出的）：加了外扩带之后，
-    `inset: 0` 从「正确」变成了「错」** —— 内容圆角落在**窗口边缘往里 32px** 处，
-    而 `inset: 0` 的遮罩圆角落在窗口角，于是每条边距内缩出 32px 的**方形遮罩**盖在
-    透明带上，开弹窗时四个角各冒出一块方角（实测：遮罩 1000×700@(0,0)
-    vs 内容 936×636@(32,32)）。
-    故主窗的四个全出血层（`.modal-mask` / `.img-lightbox` / `.md-lightbox` /
-    `.drop-overlay`）一律改用 **`inset: var(--window-shadow-margin, 0px)`**：
-    最大化时该 token 归零自动回到 `inset:0`（无需另写分支），
-    浮窗没有外扩带、token 缺省 0、行为不变。
-    ⚠️ 守卫的 `inset` 判定**必须同时认这两种写法** —— 只认 `inset: 0` 的话，
-    改用 ② 的规则会**静默失去检查**（「守卫不报错」≠「没问题」）。
-    圆角值是独立 token `--window-radius`（12px，与 `--radius-lg` 同值，让「窗」与「窗里的卡」
-    属于同一套圆角语言）；启动欢迎页 `#boot-splash::before` 也要同款圆角，否则启动瞬间有一次形状跳变。
+    ⚠️ **第五条（2026-09-29 加、同日又作废，见下方「阴影」段）：外扩带存在期间，
+    `inset: 0` 一度从「正确」变成「错」** —— 内容圆角落在**窗口边缘往里 32px** 处，
+    而 `inset: 0` 的遮罩圆角落在窗口角，四条边各内缩出 32px 的**方形遮罩**盖在
+    透明带上（实测：遮罩 1000×700@(0,0) vs 内容 936×636@(32,32)）。
+    当时把四个全出血层改成 `inset: var(--window-shadow-margin, 0px)` 解决。
+    **外扩带现已整体移除**（理由见下），故这 15 处**全部改回 `inset: 0`**，
+    守卫的 `inset` 判定也**只认 `inset: 0`** 一种 —— 故意不认那个 token：
+    一旦有人又用上，本守卫应当把它当「铺满但未声明圆角」处理，而不是默默放过
+    （「守卫不报错」≠「没问题」）。
+    圆角值是独立 token `--window-radius`（**16px**，与 `--radius-lg` 同值，让「窗」与
+    「窗里的卡」属于同一套圆角语言）；启动欢迎页 `#boot-splash::before` 也要同款圆角，
+    否则启动瞬间有一次形状跳变（它硬编码 16px，由 `check-window-margin.mjs` 锁）。
 
-    **阴影：AppKit 不给透明窗口画系统阴影，只能自绘（2026-09-29 实机取色证实 + 实施）。**
-    实测窗口边缘外 70px→0px 的桌面像素**完全平坦**（Δ≤2，纯 PNG 噪声）；
-    已试过并**证伪**的修法是显式 `NSWindow::setHasShadow(true)` —— 无任何变化。
-    根因是 AppKit 对 `opaque = false` 的窗口一律不画阴影，与 `hasShadow` 属性无关
-    （tao 那边默认就是 true、只在为 false 时才显式关掉，所以不是「没打开」）。
-    于是改为**「窗口比可视区大一圈」**：外扩带 `--window-shadow-margin`(32px)、
-    `.app-shell` 用 `margin` + CSS `box-shadow`，靠内容自己画。**这条连带三个产品行为，
-    改外扩带时三个必须一起看：**
-    - **尺寸语义**：`WindowState.width/height` 存的是**可视区**、不是窗口尺寸。
-      落盘前 `to_visible_size()` 扣掉两倍外扩带，恢复时 `to_window_size()` 加回去
-      （互逆，有 `window_geometry_tests` 锁）。老配置是外扩带引入前写的裸 inner 尺寸，
-      语义不变、**无需迁移**，代价只是首次启动窗口小了 2×M 再被拉回来。
-      ⚠️ 小屏适配的 1400×900 基准要按**窗口**尺寸比（含外扩带），不是可视区 ——
-      可视区放得下但窗口框超出屏幕，一样会被菜单栏/Dock 吃掉下半截。
-    - **最大化**：`html[data-window-maximized]` 把外扩带/圆角/阴影三个 token **一起归零**。
-      不归零的话屏幕最外圈会亮起一条**透出桌面**的缝（窗口之外没有「窗外」可透）。
-      唯一写方是 `TitleBar.vue` 的 `refreshMaximized()`（它本来就在跟踪该状态，
-      `onMounted` + `onResized` 恰好覆盖「启动即最大化」与「运行期切换」两条路径）；
-      **Rust 侧刻意不再 eval 一份** —— 双写方会出现状态不一致的窗口期，且启动期那次
-      eval 会打在加载中的空白文档上、真正页面一换就没了。
-    - **边缘点击**：外扩带对内容是「死区」（属于窗口、能吃掉点击却不渲染什么），
-      且**看得见的圆角内容边缘并不在窗口边缘**、差着整整一圈，瞄准「窗框」的人会一直落空。
-      故 `WindowResizeHandles.vue` 用 8 向隐形手柄把它变成缩放热区（手法同 `TodoFloat.vue`，
-      边 14px / 角 22px，**卡在 14px 是为了不压到圆角内容边缘抢卡片点击**）。
-      它必须由 index.vue 作为 `.app-shell` 的**兄弟**渲染 —— 壳上有 `contain: paint`，
-      放壳内会被自己的裁切剪掉。最大化态隐藏（窗口就是屏幕四边，与系统 zoom 打架）。
+    **阴影：外扩带已于 2026-09-29 整体移除，窗口现在没有阴影**（结论反转，务必读完再改）：
+    - **当初为什么有**：实测 AppKit 对 `opaque = false` 的窗口**一律不画系统阴影** ——
+      窗口边缘外 70px→0px 的桌面像素完全平坦（Δ≤2，纯 PNG 噪声）；显式
+      `NSWindow::setHasShadow(true)` 也**证伪**（无任何变化，根因与 `hasShadow` 属性无关）。
+      而 CSS 阴影只能画在窗口**以内**，于是只能「窗口比可视区大一圈 32px 透明带」，
+      用 `.app-shell` 的 `margin` + `box-shadow` 自绘。
+    - **为什么移除**：那圈带子是**透明**的 —— 桌面的壁纸与图标会从窗口四周**直接透进来**，
+      形成一圈明显的「玻璃框」（用户实测：在彩色壁纸上尤其刺眼，就是这一圈）。
+    - **结论一句话**：**「有阴影」与「不漏桌面」在透明窗下二选一**。现取后者：
+      内容铺满整窗、圆角 16px、**没有阴影**。想要阴影，唯一干净的路是把窗口改成
+      opaque（不透明）并接受直角 —— 那是设计取舍，不该由「画得出来但会露桌面」的
+      折中方案来承担。
+    - **随之消失的机制**（都别再引用）：`--window-shadow-margin`、
+      `WINDOW_SHADOW_MARGIN`、`to_window_size()` / `to_visible_size()`、
+      `window_geometry_tests`、`.app-shell` 的 margin/高度扣减/`box-shadow`、
+      全出血层的 `inset: var(--window-shadow-margin, 0px)`（15 处，已全部回到 `inset: 0`）、
+      resize 手柄为「对准内容边」而加的偏移。
+    - **窗口尺寸语义变了**：`WindowState.width/height` 与窗口 inner 尺寸**现在是同一个东西**。
+      落盘直接存 `inner_size()`、恢复直接 `set_size()`，不再有任何换算。
+      `tauri.conf.json` 的 `width/height/minWidth/minHeight`（1400/900/1000/700）
+      必须与 `config.rs::WindowState::default` **相等**（以前是 `+2×外扩带`）。
+      老配置存的是「可视区」语义，与现在一致，**无需迁移**。
+    - **最大化**：`html[data-window-maximized]` 现在只把 `--window-radius` 归零
+      （铺满屏幕就该是直角，否则四角露出桌面色缺口）。
+      唯一写方仍是 `TitleBar.vue` 的 `refreshMaximized()`；**Rust 侧刻意不再 eval 一份** ——
+      双写方会出现状态不一致的窗口期，且启动期那次 eval 会打在加载中的空白文档上。
+    - **边缘点击**：外扩带曾是「看得见的圆角内容边缘与窗口边缘之间的死区」，
+      故 `WindowResizeHandles.vue` 用 8 向隐形手柄把窗口边缘变成缩放热区 ——
+      这条**与外扩带无关、仍然必需**（无边框窗口在 macOS 上没有系统缩放边）。
+      现在手柄直接贴窗口边缘（偏移已删）。它必须由 index.vue 作为 `.app-shell` 的
+      **兄弟**渲染 —— 壳上有 `contain: paint`，放壳内会被自己的裁切剪掉。
+      最大化态隐藏（窗口就是屏幕四边，与系统 zoom 打架）。
 
-    **同一个外扩带宽度出现在四个地方，跨两种语言三种文件类型，没有任何编译器会把它们
-    关联起来**，故有构建期守卫 `scripts/check-window-margin.mjs`（prebuild 跑）：
-    ① `style.css` 的 `--window-shadow-margin` ② `lib.rs::WINDOW_SHADOW_MARGIN`
-    ③ `tauri.conf.json` 的 width/height/minWidth/minHeight（那四项是 **inner** 尺寸）
-    ④ `config.rs::WindowState::default`。漏改一处的症状不是报错，是「窗口与内容差了一圈」，
-    看起来像边距没对齐，排查方向会跑到 CSS 上而真正错的是另外几个文件里的数字。
-    守卫还额外校验「阴影向下延伸量 (`offsetY + blur`) 不得超过外扩带」，否则阴影被窗口边缘切平。
-    ⚠️ **凡别处也需要同一个默认尺寸（小屏判断的 1400×900 基准），一律写
-    `config::WindowState::default()` 引用、不要再抄字面量** —— 抄一份就多一处能静默漂移
-    的地方（症状是「换到小屏笔记本上窗口下半截掉出屏幕」，大屏上完全看不出来），
-    且构建期守卫覆盖不到。能消灭的重复就不要只去校验它。
+    **「外扩带不许回来」由 `scripts/check-window-margin.mjs` 守住**（prebuild 跑，语义已反转）：
+    ① `style.css` 不得再声明 `--window-shadow-margin` ② `lib.rs` 不得再有
+    `WINDOW_SHADOW_MARGIN` ③ `tauri.conf.json` 的四项尺寸必须**等于**
+    `config.rs::WindowState::default` ④ `index.html` 欢迎页 `inset` 须为 0、
+    圆角须与 `--window-radius` 一致。**四条都验过负例。**
+    配套 `scripts/check-window-min-size.mjs` 锁 `MIN_INNER_W/H` ⇄ `minWidth/minHeight`
+    （tauri 只有 setter 没有 getter，Rust 侧只能写镜像），并拒绝 `minWidth > width`
+    这种「一创建就小于自己 minSize」的配错。
 
 70. **macOS 移植的七个静默失效点（2026-09-29 全面排查后一次修完；判据见 P9）：**
     共同形态是**「上游换了数据源，下游的匹配代码没跟着换」**。单测全绿、
@@ -435,6 +437,23 @@ m-hub/
       backing scale，而 tao 的 `outer_position()` 用「窗口所在屏」的 scale ——
       混合 DPI 多显示器下两者不在同一坐标系。修法是「几何比较全用全局点空间，
       只在最终 `set_position` 时换算」（`clipboard.rs::anchor_position` 已是这个范式）。
+75. **改 CSS 注释是高风险编辑，必须机械校验配平**（2026-09-29 一天内踩了两次）：
+    - 两次都是**漏写收尾符**，后果都是「后面一段规则被整段当成注释吃掉」：
+      ① `style.css` 的 `html[data-window-maximized]` 被吞 → **最大化时圆角不再归零**，
+         构建是绿的、功能少了一块；② `index/index.vue` 的 `.app-shell` 被吞 →
+         构建报 `CssSyntaxError: Missing opening {`。
+    - 为什么危险：**症状离原因很远**（少一个收尾符，表现为「圆角没归零」），
+      **而且常常是静默的**（解析器不会告诉你「你少写了一个收尾符」，
+      它只是把后面吃掉）。本工程 CSS 注释密度极高（几乎每个 token 都带「为什么」），
+      所以「编辑注释」是高频操作，不能靠人眼。
+    - 守卫 `scripts/check-css-comment-balance.mjs`（prebuild 跑）：扫全部 `.css`、
+      `index.html`、以及每个 `.vue` 的 `<style>` 块，做字符级配平检查并**指出行号**。
+      两种真实故障都用删除收尾符的方式复现过，均能拦下。
+    - ⚠️ **写这个守卫时它自己先犯了同一个错**：文档注释里写了注释符号的字面形式，
+      当场把脚本自己的注释提前闭合、脚本根本跑不起来。
+      写这类说明时，**不要在注释里出现该符号的字面形式**。
+    - 同类推论：改动 CSS 后，除了问「构建是否绿」，还要问
+      **「我有没有让某条规则凭空消失」** —— 绿不等于没坏。
 
 
 ---

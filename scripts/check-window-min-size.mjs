@@ -39,61 +39,41 @@ const problems = [];
 const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
 const rust = read("src-tauri/src/window_resize.rs");
 
-// ---- ① Rust 镜像常量 ⇄ tauri.conf.json -------------------------------------
+// ---- 最小尺寸的合法性与镜像常量 ⇄ tauri.conf.json ---------------------------，且与窗口最小值逻辑一致 -------
+// 外扩带已于 2026-09-29 移除（见 check-window-margin.mjs），故这里不再有
+// 「min = 可视区下限 + 2×外扩带」这层换算。剩下的不变量是：
+// 最小尺寸必须为正、且不得大于默认尺寸（否则窗口一创建就小于 minSize）。
 
-const numConst = (name) => {
-  const m = rust.match(new RegExp(`pub const ${name}: f64 = ([0-9.]+);`));
-  if (!m) {
-    problems.push(`window_resize.rs 里找不到 \`pub const ${name}: f64\``);
-    return null;
-  }
-  return Number(m[1]);
-};
-
-for (const [name, key] of [
-  ["MIN_INNER_W", "minWidth"],
-  ["MIN_INNER_H", "minHeight"],
-]) {
-  const rustVal = numConst(name);
-  const confVal = conf.app?.windows?.[0]?.[key];
-  if (rustVal === null || confVal === undefined) continue;
-  if (rustVal !== confVal) {
+const win = conf.app?.windows?.[0];
+const minW = win?.minWidth;
+const minH = win?.minHeight;
+if (!Number.isFinite(minW) || !Number.isFinite(minH) || minW <= 0 || minH <= 0) {
+  problems.push(`tauri.conf.json 的 minWidth/minHeight 非法: ${minW}×${minH}`);
+} else {
+  if (minW > win.width) {
     problems.push(
-      `window_resize.rs 的 ${name} = ${rustVal}，但 tauri.conf.json 的 ${key} = ${confVal}。\n` +
-        `        Rust 侧是 AppKit 下限的镜像（tauri 只给了 setter、没有 getter，\n` +
-        `        读不到真实值，只能写一份）。两者不一致时，拖拽夹取用的下限与\n` +
-        `        AppKit 实际生效的下限不同：往西/往北拖到底窗口会猛地窜一下。`,
+      `minWidth(${minW}) > width(${win.width}) —— 窗口一创建就小于自己的 minSize，\n` +
+        `        AppKit 会立刻把它撑到 minWidth，用户看到的初始尺寸与配置不符`,
     );
   }
-}
-
-// ---- ② minWidth/minHeight = 可视区最小值 + 2 × 外扩带 -----------------------
-// 数值直接引用约定 69 的四个口径点，避免这里再写第五份拷贝。
-
-const style = read("src/style.css");
-const libRs = read("src-tauri/src/lib.rs");
-
-const cssMargin = Number(style.match(/--window-shadow-margin:\s*([0-9.]+)px/)?.[1]);
-const rustMargin = Number(libRs.match(/WINDOW_SHADOW_MARGIN: f64 = ([0-9.]+)/)?.[1]);
-
-if (!Number.isFinite(cssMargin) || !Number.isFinite(rustMargin)) {
-  problems.push("取不到 --window-shadow-margin / WINDOW_SHADOW_MARGIN");
-} else if (cssMargin !== rustMargin) {
-  problems.push(
-    `--window-shadow-margin(${cssMargin}) 与 WINDOW_SHADOW_MARGIN(${rustMargin}) 不一致`,
-  );
-} else {
-  const m = cssMargin;
-  // 可视区最小值 1000×700（config.rs::WindowState 的下限约定）
-  const expectW = 1000 + 2 * m;
-  const expectH = 700 + 2 * m;
-  const minW = conf.app?.windows?.[0]?.minWidth;
-  const minH = conf.app?.windows?.[0]?.minHeight;
-  if (minW !== expectW) {
-    problems.push(`tauri.conf.json 的 minWidth = ${minW}，应为 ${expectW}（= 1000 + 2×${m}）`);
+  if (minH > win.height) {
+    problems.push(`minHeight(${minH}) > height(${win.height}) —— 同上`);
   }
-  if (minH !== expectH) {
-    problems.push(`tauri.conf.json 的 minHeight = ${minH}，应为 ${expectH}（= 700 + 2×${m}）`);
+  // Rust 侧 window_resize 的镜像常量必须与之一致（tauri 只有 setter 没有 getter，
+  // 读不到真实下限，只能写一份；两者不一致时往西/往北拖到底窗口会猛地窜一下）
+  for (const [name, key] of [
+    ["MIN_INNER_W", "minWidth"],
+    ["MIN_INNER_H", "minHeight"],
+  ]) {
+    const m = rust.match(new RegExp(`pub const ${name}: f64 = ([0-9.]+);`));
+    if (!m) {
+      problems.push(`window_resize.rs 里找不到 \`pub const ${name}: f64\``);
+    } else if (Number(m[1]) !== conf.app?.windows?.[0]?.[key]) {
+      problems.push(
+        `window_resize.rs 的 ${name} = ${m[1]}，但 tauri.conf.json 的 ${key} = ${conf.app.windows[0][key]}。\n` +
+          `        Rust 侧是 AppKit 下限的镜像（tauri 只给了 setter、没有 getter）。`,
+      );
+    }
   }
 }
 
@@ -102,11 +82,11 @@ if (problems.length) {
   for (const p of problems) console.error(`  ✗ ${p}`);
   console.error(
     "\n  改法：改 tauri.conf.json 的 minWidth/minHeight 后，把 window_resize.rs 的\n" +
-      "        MIN_INNER_W/MIN_INNER_H 同步；改最小可视区则还要同步 config.rs。\n" +
-      "        推导关系见 AGENTS.md 约定 69（外扩带 32px，tauri.conf 记的是 inner 尺寸）。",
+      "        MIN_INNER_W/MIN_INNER_H 同步（tauri 没有 min size 的 getter，\n" +
+      "        Rust 侧只能写一份镜像）。",
   );
   process.exit(1);
 }
 console.log(
-  `[window-min-size] 最小尺寸口径一致（${conf.app?.windows?.[0]?.minWidth}×${conf.app?.windows?.[0]?.minHeight} ⇄ MIN_INNER_W/H，外扩带 ${cssMargin}px 已计入）`,
+  `[window-min-size] 最小尺寸口径一致（${conf.app?.windows?.[0]?.minWidth}×${conf.app?.windows?.[0]?.minHeight} ⇄ MIN_INNER_W/H）`,
 );

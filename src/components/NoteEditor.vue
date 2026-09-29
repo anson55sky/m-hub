@@ -1499,7 +1499,7 @@ function onEditorAreaMouseDown(e: MouseEvent) {
   position: fixed;
   /* 图片灯箱同理（见 check-rounded-window.mjs） */
   border-radius: var(--window-radius);
-  inset: var(--window-shadow-margin, 0px);
+  inset: 0px;
   z-index: 200;
   display: flex;
   align-items: center;
