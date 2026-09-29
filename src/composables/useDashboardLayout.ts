@@ -262,15 +262,51 @@ export function dashFitState(p: DashPlacement): { level: DashFitLevel; label: st
   return { level: 'mid', label: `紧凑可读 · 推荐 ${vd.idealW}×${vd.idealH}` }
 }
 
-/** 推荐布局：沿用改动前的 8 模块模板（历史习惯布局） */
+/**
+ * 推荐布局：按「注意力优先级」重排（2026-09-29）。
+ *
+ * ## 为什么重排
+ *
+ * 旧模板把**最不可操作**的信息放在了最显眼的位置：时钟（4×3，`big` 变体
+ * 含天气 + 每日语录）占据左上第一格，而真正要动手的待办被挤在最右 3 列。
+ * 仪表盘的左上角应该是「今天需要你处理的东西」，不是装饰。
+ *
+ * 另有三处尺寸与模块自己声明的 ideal 严重不符（ideal 见 DASH_MODULES）：
+ *   · `prompts` 5×8 = 40 格，而 ideal 是 4×3 = 12 格 —— **超配 3.3 倍**。
+ *     提示词列表绝大多数时候是空的，于是这块地长期空着（实测截图里
+ *     「暂无提示词」占了一大片）。
+ *   · `sticky1/2` 各 2×6，宽度压在 min 上，而便签是**要写字**的，
+ *     2/12 宽度（≈190px）写长文本非常挤。
+ *   · `todo` 3×12，宽度压在 min 上、纵向却是 ideal 的 2.4 倍。
+ *
+ * ## 新的三段式
+ *
+ *   第 1 段（y 0-4）  今天要处理的事：待办 / 倒计时 占左侧 8 列，
+ *                     时钟与天气缩到右侧各 2 列 —— 它们是「环境信息」，
+ *                     该看得见但不该占地。时钟改 `minimal`（只留时间），
+ *                     天气独立成 `now` 简版；语录砍掉（纯装饰）。
+ *   第 2 段（y 5-11） 记录与工具：系统资源 / 提示词 左侧，便签 1、2 各占 4 列
+ *                     —— 宽度从 2 翻倍到 4，写字不再憋屈。
+ *   第 3 段（y 12-14）最近使用：通栏。
+ *
+ * ## 不变量
+ *
+ * 三段互不重叠、每段列宽合计恰好 12、总行数仍是 15（与旧模板一致，
+ * 免得「重置布局」把窗口高度需求也一起改了）。每个模块的 w/h 都 ≥ 其 min。
+ * 这三条由构建期守卫 `scripts/check-dash-preset.mjs` 机械校验（prebuild 会跑）。
+ */
 const PRESET: DashPlacement[] = [
-  { id: 'clock', variant: 'big', x: 0, y: 0, w: 4, h: 3 },
-  { id: 'countdown', variant: 'list', x: 4, y: 0, w: 5, h: 4 },
-  { id: 'todo', variant: 'list', x: 9, y: 0, w: 3, h: 12 },
-  { id: 'sysmon', variant: 'monitor', x: 0, y: 3, w: 4, h: 3 },
-  { id: 'prompts', variant: 'list', x: 4, y: 4, w: 5, h: 8 },
-  { id: 'sticky1', variant: 'note', x: 0, y: 6, w: 2, h: 6 },
-  { id: 'sticky2', variant: 'note', x: 2, y: 6, w: 2, h: 6 },
+  // 第 1 段：今天要处理的事
+  { id: 'todo', variant: 'list', x: 0, y: 0, w: 4, h: 5 },
+  { id: 'countdown', variant: 'list', x: 4, y: 0, w: 4, h: 5 },
+  { id: 'clock', variant: 'minimal', x: 8, y: 0, w: 2, h: 3 },
+  { id: 'weather', variant: 'now', x: 10, y: 0, w: 2, h: 3 },
+  // 第 2 段：记录与工具
+  { id: 'sysmon', variant: 'monitor', x: 0, y: 5, w: 4, h: 3 },
+  { id: 'prompts', variant: 'list', x: 0, y: 8, w: 4, h: 4 },
+  { id: 'sticky1', variant: 'note', x: 4, y: 5, w: 4, h: 7 },
+  { id: 'sticky2', variant: 'note', x: 8, y: 5, w: 4, h: 7 },
+  // 第 3 段：通栏
   { id: 'recent', variant: 'bar', x: 0, y: 12, w: 12, h: 3 },
 ]
 
