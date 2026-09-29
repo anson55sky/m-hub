@@ -264,54 +264,58 @@ export function dashFitState(p: DashPlacement): { level: DashFitLevel; label: st
 }
 
 /**
- * 推荐布局：按「注意力优先级」重排（2026-09-29）。
+ * 推荐布局：**四个横段**，逐行铺满 12 列、每段高度一致（2026-09-29 重排两次）。
  *
- * ## 为什么重排
+ * ## 「整齐」在这里是可校验的，不是一句形容词
  *
- * 旧模板把**最不可操作**的信息放在了最显眼的位置：时钟（4×3，`big` 变体
- * 含天气 + 每日语录）占据左上第一格，而真正要动手的待办被挤在最右 3 列。
- * 仪表盘的左上角应该是「今天需要你处理的东西」，不是装饰。
+ * 上一版被我按「注意力优先级」重排过，结果用户看着不整齐。复盘下来是两处
+ * 具体的错，不是审美分歧：
  *
- * 另有三处尺寸与模块自己声明的 ideal 严重不符（ideal 见 DASH_MODULES）：
- *   · `prompts` 5×8 = 40 格，而 ideal 是 4×3 = 12 格 —— **超配 3.3 倍**。
- *     提示词列表绝大多数时候是空的，于是这块地长期空着（实测截图里
- *     「暂无提示词」占了一大片）。
- *   · `sticky1/2` 各 2×6，宽度压在 min 上，而便签是**要写字**的，
- *     2/12 宽度（≈190px）写长文本非常挤。
- *   · `todo` 3×12，宽度压在 min 上、纵向却是 ideal 的 2.4 倍。
+ *  · **没铺满**。各段高度是我随手写的，`clock`/`weather` 只占 3 行而 `todo` 占 5 行，
+ *    于是行 3–4 右侧空了 4 列 —— 截图里就是时钟卡片下面那片空洞。
+ *  · **同段高度不一致**。`clock(2×3)` 和 `todo(4×5)` 都在 y=0，顶边齐、底边却错开；
+ *    更糟的是第一版空卡片「按模块逐个上吸」时，`countdown` 占着 y=0–4，于是
+ *    `sticky1` 挪不动而 `sticky2` 能挪到 y=3 —— **两张便签一高一低**，最刺眼的一处。
+ *    现在改成**整段折叠 + 各段重排**（见 dashLayoutGeometry.ts），部分折叠在手工
+ *    栅格上必然制造空洞与错边，所以不做。
  *
- * ## 新的三段式
+ * 所以这两条现在都由 `scripts/check-dash-preset.mjs` 守着（逐行覆盖必须是 12/12、
+ * 同一 y 内各模块高度必须相同）。
  *
- *   第 1 段（y 0-4）  今天要处理的事：待办 / 倒计时 占左侧 8 列，
- *                     时钟与天气缩到右侧各 2 列 —— 它们是「环境信息」，
- *                     该看得见但不该占地。时钟改 `minimal`（只留时间），
- *                     天气独立成 `now` 简版；语录砍掉（纯装饰）。
- *   第 2 段（y 5-11） 记录与工具：系统资源 / 提示词 左侧，便签 1、2 各占 4 列
- *                     —— 宽度从 2 翻倍到 4，写字不再憋屈。
- *   第 3 段（y 12-14）最近使用：通栏。
+ * ## 四段的分工
  *
- * ## 不变量
+ *   第 1 段 y 0-2   环境：时钟 / 天气 / 系统资源 —— 「该看得见但不该占地」。
+ *                     三者都不参与空卡片降级（天气断网时显示 `----` 占位而非空白，
+ *                     它**有**合理的空态，不是「空」）。
+ *   第 2 段 y 3-6   行动：待办 / 倒计时 / 提示词 —— 真正要动手的三样。整段降级。
+ *   第 3 段 y 7-11  记录：便签 ×2 / 速记概览 —— 要写字的地方，故给足 5 行。
+ *   第 4 段 y 12-14 最近使用：通栏。
  *
- * 三段互不重叠、每段列宽合计恰好 12、总行数仍是 15（与旧模板一致，
- * 免得「重置布局」把窗口高度需求也一起改了）。每个模块的 w/h 都 ≥ 其 min。
- * 这三条由构建期守卫 `scripts/check-dash-preset.mjs` 机械校验（prebuild 会跑）。
+ * ## 尺寸依据
+ *
+ * 每个模块都取自己 variant 声明的 min 或 ideal（见 DASH_MODULES）：
+ * `clock` 4×3、`sysmon` 4×3、`countdown` 4×4、`notes` 4×3、`recent` 12×3 都正好是
+ * ideal；`todo` 4×4 比 ideal(4×5) 略矮、`prompts` 4×4 比 ideal(4×3) 略高，
+ * 是为了凑出 4 行的一段 —— 上一版把 `prompts` 放到 5×8（40 格 vs ideal 12 格，
+ * 超配 3.3 倍、长期空着）才是真问题，这一点已改掉。
  */
 const PRESET: DashPlacement[] = [
-  // 第 1 段：今天要处理的事
-  { id: 'todo', variant: 'list', x: 0, y: 0, w: 4, h: 5 },
-  { id: 'countdown', variant: 'list', x: 4, y: 0, w: 4, h: 5 },
-  { id: 'clock', variant: 'minimal', x: 8, y: 0, w: 2, h: 3 },
-  { id: 'weather', variant: 'now', x: 10, y: 0, w: 2, h: 3 },
-  // 第 2 段：记录与工具
-  { id: 'sysmon', variant: 'monitor', x: 0, y: 5, w: 4, h: 3 },
-  { id: 'prompts', variant: 'list', x: 0, y: 8, w: 4, h: 4 },
-  { id: 'sticky1', variant: 'note', x: 4, y: 5, w: 4, h: 7 },
-  { id: 'sticky2', variant: 'note', x: 8, y: 5, w: 4, h: 7 },
-  // 第 3 段：通栏
+  // 第 1 段：环境（不参与降级）
+  { id: 'clock', variant: 'big', x: 0, y: 0, w: 4, h: 3 },
+  { id: 'weather', variant: 'now', x: 4, y: 0, w: 4, h: 3 },
+  { id: 'sysmon', variant: 'monitor', x: 8, y: 0, w: 4, h: 3 },
+  // 第 2 段：行动（整段参与降级）
+  { id: 'todo', variant: 'list', x: 0, y: 3, w: 4, h: 4 },
+  { id: 'countdown', variant: 'list', x: 4, y: 3, w: 4, h: 4 },
+  { id: 'prompts', variant: 'list', x: 8, y: 3, w: 4, h: 4 },
+  // 第 3 段：记录（便签不参与降级：空着才该让人写字）
+  { id: 'sticky1', variant: 'note', x: 0, y: 7, w: 4, h: 5 },
+  { id: 'sticky2', variant: 'note', x: 4, y: 7, w: 4, h: 5 },
+  { id: 'notes', variant: 'overview', x: 8, y: 7, w: 4, h: 5 },
+  // 第 4 段：通栏
   { id: 'recent', variant: 'bar', x: 0, y: 12, w: 12, h: 3 },
 ]
 
-/** 默认布局：首次启动/空布局回退到推荐模板（不再空白） */
 function defaultPlacements(): DashPlacement[] {
   return PRESET.map((p) => ({ ...p }))
 }
@@ -747,7 +751,7 @@ export function useDashboardLayout() {
     beginEdit,
     commitEdit,
     cancelEdit,
-    /** 渲染用有效版面（空模块已压扁 + 空洞已上吸） */
+    /** 渲染用有效版面（整段折叠后各段重排，无空洞、无错边） */
     effectivePlacements: computed(() => effective.value.placements),
     /** 当前处于降级状态的模块 id 集合（渲染单行条用） */
     collapsedIds,

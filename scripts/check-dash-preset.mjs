@@ -95,7 +95,7 @@ for (let i = 0; i < items.length; i++) {
   }
 }
 
-// ---- ② 每行列覆盖 ≤ 12
+// ---- ② 每一行都必须铺满（这是「整齐」的可校验形式）
 const totalRows = Math.max(...items.map((i) => i.y + i.h));
 for (let y = 0; y < totalRows; y++) {
   const used = new Set();
@@ -106,13 +106,55 @@ for (let y = 0; y < totalRows; y++) {
   }
   if (used.size > GRID_COLS) {
     problems.push(`第 ${y} 行覆盖了 ${used.size} 列，超过栅格的 ${GRID_COLS} 列`);
-  }
-  if (used.size === 0) {
-    problems.push(`第 ${y} 行没有任何模块（布局里有整行空洞）`);
+  } else if (used.size < GRID_COLS) {
+    // 找出这一行缺了哪几段，好让人一眼看出空洞在哪
+    const gaps = [];
+    let run = null;
+    for (let x = 0; x < GRID_COLS; x++) {
+      if (!used.has(x)) {
+        if (!run) run = [x, x];
+        else run[1] = x;
+      } else if (run) {
+        gaps.push(run[0] === run[1] ? `第 ${run[0]} 列` : `第 ${run[0]}–${run[1]} 列`);
+        run = null;
+      }
+    }
+    if (run) {
+      gaps.push(run[0] === run[1] ? `第 ${run[0]} 列` : `第 ${run[0]}–${run[1]} 列`);
+    }
+    problems.push(
+      `第 ${y} 行只覆盖 ${used.size}/${GRID_COLS} 列，${gaps.join("、")} 是空的。\n` +
+        `        留一格空在版面上就是一块看得见的洞 —— 用户说的「不够整齐」多半指这个。\n` +
+        `        修法：调各段的 y/h 让每段高度一致，段与段依次紧贴铺满 12 列。`,
+    );
   }
 }
 
-// ---- ③ 不小于 variant 声明的 min
+// ---- ③ 同一 y 上的模块高度必须一致
+{
+  const byY = new Map();
+  for (const i of items) {
+    if (!byY.has(i.y)) byY.set(i.y, []);
+    byY.get(i.y).push(i);
+  }
+  for (const [y, band] of [...byY.entries()].sort((a, b) => a[0] - b[0])) {
+    const hs = [...new Set(band.map((i) => i.h))];
+    if (hs.length > 1) {
+      problems.push(
+        `y=${y} 这一排有 ${hs.length} 种不同高度（${hs.join(" / ")}）：` +
+          `${band.map((i) => `${i.id}(${i.w}×${i.h})`).join(" ")}\n` +
+          `        顶边齐、底边错开，就是「不整齐」。\n` +
+          `        修法：同一排的模块给同一个 h（整段折叠也依赖这条）。`,
+      );
+    }
+    const width = band.reduce((n, i) => n + i.w, 0);
+    if (width !== GRID_COLS) {
+      problems.push(`y=${y} 这一排宽度合计 ${width}，应为 ${GRID_COLS}`);
+    }
+  }
+}
+
+// ---- ④ 不小于 variant 声明的 min
 for (const i of items) {
   const def = mins.get(`${i.id}/${i.variant}`);
   if (!def) {
@@ -126,7 +168,7 @@ for (const i of items) {
   }
 }
 
-// ---- ④ 总行数不变
+// ---- ⑤ 总行数不变
 if (totalRows !== EXPECTED_ROWS) {
   problems.push(
     `总行数 ${totalRows}，应为 ${EXPECTED_ROWS}。\n` +
@@ -144,6 +186,8 @@ if (problems.length) {
   );
   process.exit(1);
 }
+const bandCount = new Set(items.map((i) => i.y)).size;
 console.log(
-  `[dash-preset] 默认布局合法（${items.length} 模块 / ${GRID_COLS} 列 / ${totalRows} 行，无重叠、均不小于 min）`,
+  `[dash-preset] 默认布局整齐（${items.length} 模块 / ${bandCount} 段 / ${totalRows} 行：\n` +
+    `          逐行铺满 ${GRID_COLS}/${GRID_COLS}、同段等高、无重叠、均不小于 min）`,
 );

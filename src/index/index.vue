@@ -418,7 +418,7 @@ function titleProps(p: DashPlacement): { title?: string; hideTitle: boolean } {
 // 卡片占格比例不变 → 不滚动、不留白、不因缩放而错位
 const dashGridRows = computed(() => {
   let m = 1
-  // 用有效版面而非保存布局：否则空模块压扁了、栅格高度却没跟着缩，
+  // 用有效版面而非保存布局：否则整段折叠了、栅格高度却没跟着缩，
   // 底部会留下一截没有任何模块的空行（看起来像布局出错）。
   for (const p of layout.effectivePlacements.value) {
     m = Math.max(m, p.y + p.h)
@@ -1057,8 +1057,9 @@ provide('showToast', showToast)
           >
             <!--
               渲染用 `layout.effectivePlacements` 而不是 `placements`：
-              空内容模块被压扁到 1 行、并由上吸消掉空洞（见
-              composables/dashLayoutGeometry.ts）。保存的布局不受影响，
+              空内容模块被压扁到 1 行、各段随后重排（见
+              composables/dashLayoutGeometry.ts）。是**整段**折叠而非逐个折叠：
+              部分折叠在手工栅格上必然留下空洞与错边。保存的布局不受影响，
               模块一有内容就长回原样。
             -->
             <div
