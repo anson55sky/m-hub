@@ -85,17 +85,41 @@ pub fn slugify(name: &str) -> String {
 /// 字段顺序与 spec §4 对齐；注释无法进 JSON，所以「各字段什么意思」
 /// 放在同目录的 README.md 里（见 [`readme`]）。
 pub fn manifest_json(id: &str, name: &str, kind: &str) -> String {
-    let entry_key = kind;
+    // `openIn` 只列**真的有 entry 兜底**的形态。
+    //
+    // 原先两种形态都写 `"openIn": ["view"]`，而 module 骨架的 entry 只有
+    // `{"module": …}` —— 于是扩展设置里的「打开方式」会给用户一个 view 选项，
+    // 点了才报「扩展 X 没有 view 入口」。而 openIn 正是后端
+    // `entry.get(surface).or_else(|| entry.get("view"))` 的输入，
+    // 列一个没有 entry 的形态等于**承诺一个必然失败的操作**。
+    //
+    // 所以：view 形态可开成 view；module 形态只能待在工作台那一格，就不列。
+    // ⚠️ 这两个变量别都叫 open_in：切片叫 `open_modes`、字符串叫 `open_in`，
+    // 否则 format! 里的 `{open_in}` 会绑到那个 &[&str] 上（它不实现 Display，
+    // 编译期就报）。曾在这里卡了一次。
+    let open_modes: &[&str] = if kind == "view" { &["view"] } else { &[] };
+    let open_in = if open_modes.is_empty() {
+        "[]".to_string()
+    } else {
+        format!(
+            "[{}]",
+            open_modes
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     format!(
         r#"{{
   "id": "{id}",
   "name": {name},
   "version": "0.1.0",
   "runtime": "web",
-  "kind": "{entry_key}",
-  "surfaces": ["{entry_key}"],
-  "openIn": ["view"],
-  "entry": {{ "{entry_key}": "./index.html" }},
+  "kind": "{kind}",
+  "surfaces": ["{kind}"],
+  "openIn": {open_in},
+  "entry": {{ "{kind}": "./index.html" }},
   "permissions": []
 }}
 "#,
@@ -425,6 +449,25 @@ mod tests {
         panic!("连续 10000 次都建不出临时目录");
     }
 
+    /// 把一份真实骨架写到 `target/scaffold-sample/`，供人眼检查。
+    ///
+    /// `#[ignore]`：不进常规测试跑（它有副作用、要写盘），只在需要时手动跑：
+    ///     cargo test --lib ext_scaffold -- --ignored --nocapture
+    /// 存在的理由是「别用复述代替实物」—— 描述骨架长什么样很容易，写错也不报错；
+    /// 而骨架是要被复制几十次的模板，看一眼真实产物比读注释可靠。
+    #[test]
+    #[ignore]
+    fn dump_sample_scaffold() {
+        let out = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/scaffold-sample");
+        let _ = std::fs::remove_dir_all(&out);
+        let s = create(&out, "local.pomodoro", "番茄钟", "module").unwrap();
+        println!("已生成：{}", s.dir.display());
+        for f in &s.files {
+            println!("  - {f}");
+        }
+    }
+
     #[test]
     fn id_rules() {
         assert!(validate_id("local.my-ext").is_ok());
@@ -447,6 +490,35 @@ mod tests {
     fn dir_name_comes_from_id_last_segment() {
         assert_eq!(dir_name_from_id("local.my-ext"), "my-ext");
         assert_eq!(dir_name_from_id("local"), "local");
+    }
+
+    /// `openIn` 里的每个形态都必须有对应的 `entry` 键。
+    ///
+    /// 这条是上面那个 bug 的一般化：后端按 `entry.get(surface).or_else(entry.get("view"))`
+    /// 解析入口，所以 `openIn` 列一个没有 entry 的形态 = 承诺一个必然失败的打开操作。
+    /// 症状是「设置里能选、点了报错」，隔了好几层才看得出是 manifest 的问题。
+    #[test]
+    fn open_in_never_promises_an_unbacked_surface() {
+        for kind in KINDS {
+            let m: serde_json::Value =
+                serde_json::from_str(&manifest_json("local.x", "名", kind)).unwrap();
+            let entry = m["entry"].as_object().expect("entry 必须是对象");
+            let open_in = m["openIn"].as_array().expect("openIn 必须是数组");
+            for v in open_in {
+                let surface = v.as_str().unwrap();
+                assert!(
+                    entry.contains_key(surface),
+                    "{kind} 骨架的 openIn 列了「{surface}」，但 entry 里没有这个键 —— \
+                     用户会在设置里选到它、点下去才报「没有 {surface} 入口」。entry 现有：{:?}",
+                    entry.keys().collect::<Vec<_>>()
+                );
+            }
+            // 反向也成立：surfaces 里的每个形态都该有 entry
+            for v in m["surfaces"].as_array().unwrap() {
+                let surface = v.as_str().unwrap();
+                assert!(entry.contains_key(surface), "surfaces 的「{surface}」缺 entry");
+            }
+        }
     }
 
     /// 生成的 manifest 必须能被**真实解析器**读进去 —— 用 serde_json 而不是字符串比较。
