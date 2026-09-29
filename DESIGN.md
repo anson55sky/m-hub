@@ -156,11 +156,14 @@ m-hub 是一个安静、可靠的本地桌面工作台：用户打开它是为�
 - `contain: paint` 不是优化而是必需：壁纸层是 `position: fixed; inset: 0`，
   fixed 默认相对视口定位、**不受祖先 `overflow`/`border-radius` 裁剪**；
   不加它就是「内容圆了、壁纸是方的」，圆角处直接露出桌面。
-- 任何 **全出血** 瞬态层（`position: fixed; inset: 0` 的遮罩 / 灯箱 / 拖拽遮罩）
-  都必须自带 `border-radius: var(--window-radius)`：它们 Teleport 到 `body`、绕开了
+- 任何 **全出血** 瞬态层（遮罩 / 灯箱 / 拖拽遮罩）都必须自带
+  `border-radius: var(--window-radius)`：它们 Teleport 到 `body`、绕开了
   `.app-shell`，否则开弹窗那一帧会用方形遮罩把圆角盖回去。构建期由
   `scripts/check-rounded-window.mjs` 守卫。小而定位的下拉 / 气泡 / tooltip 不受此限
-  （它们内缩，碰不到窗口边缘）。见 AGENTS.md 约定 69。
+  （它们内缩，碰不到窗口边缘）。
+- 主窗的这类层还要用 **`inset: var(--window-shadow-margin, 0px)`** 而非 `inset: 0`：
+  加了外扩带后内容圆角在窗口边缘往里 32px 处，`inset: 0` 会让遮罩圆角落在窗口角，
+  四个角各冒出一块方角。最大化时 token 归零即自动回到 `inset: 0`。见 AGENTS.md 约定 69。
 - **窗口阴影靠自绘，窗口比可视区大一圈** `--window-shadow-margin`(32px)。
   AppKit 不给透明窗口画系统阴影（`setHasShadow(true)` 无效，已实机取色证伪），
   而 CSS 阴影只能画在窗口以内 —— 不外扩就没有落影的位置。

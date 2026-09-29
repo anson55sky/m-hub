@@ -923,7 +923,7 @@ function cardAccentStyle(r: Resource) {
   position: fixed;
   /* 拖拽遮罩同理：拖拽时整窗变方形是最扎眼的一次（见 check-rounded-window.mjs） */
   border-radius: var(--window-radius);
-  inset: 0;
+  inset: var(--window-shadow-margin, 0px);
   z-index: 250;
   background: color-mix(in srgb, var(--brand-500) 10%, transparent);
   display: flex;

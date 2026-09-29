@@ -151,7 +151,18 @@ fn run(window: tauri::Window<tauri::Wry>, s: DragStart) {
         }
         std::thread::sleep(TICK);
     }
-    log::debug!("[window-resize] 缩放结束: {}x{} @ ({},{})", s.w, s.h, s.x, s.y);
+    // 记**结束**几何，不是起始的 —— 原先打的是 s.w/s.h/s.x/s.y（拖拽开始时的值），
+    // 对诊断毫无用处：用户报「窗口大小不对」时，日志里显示的是拖之前的大小。
+    // 这条是单次一行（不是每帧），INFO 级不吵；而缩放是本模块唯一没有事后痕迹的
+    // 交互，出问题时没有这条就只能靠猜。
+    let (w, h, x, y) = geometry_for(&s, last.unwrap_or(s.cursor));
+    log::info!(
+        "[window-resize] 缩放结束: 可视区 {}x{} @ ({},{})",
+        (w - crate::WINDOW_SHADOW_MARGIN * 2.0).max(1.0) as i64,
+        (h - crate::WINDOW_SHADOW_MARGIN * 2.0).max(1.0) as i64,
+        x as i64,
+        y as i64
+    );
 }
 
 /// 拖拽到 `cursor` 时的新几何：`(宽, 高, x, y)`。

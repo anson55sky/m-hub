@@ -271,12 +271,23 @@ m-hub/
     —— 壁纸层是 `position: fixed; inset: 0`，fixed 元素默认相对**视口**定位，
     **不会被祖先的 `overflow` + `border-radius` 裁剪**；不加 `contain: paint`
     就是「内容圆了、壁纸还是方的」，圆角处露出桌面。
-    ⚠️ **第四条：任何 `position: fixed; inset: 0` 的全出血层（遮罩 / 灯箱 / 拖拽遮罩）
-    都必须自己声明 `border-radius: var(--window-radius)`** —— 它们 Teleport 到 `body`、
+    ⚠️ **第四条：任何全出血层（遮罩 / 灯箱 / 拖拽遮罩）都必须自己声明
+    `border-radius: var(--window-radius)`** —— 它们 Teleport 到 `body`、
     绕开了 `.app-shell`，开弹窗那一帧会用方形遮罩把圆角盖回去，表现为「窗口方了一下又圆回来」。
     **这条编译期完全看不出来、类型检查全绿，只能实机看见**，故有构建期守卫
     `scripts/check-rounded-window.mjs`（`npm run build` 的 prebuild 会跑，违规直接失败）。
     小而定位的下拉 / 气泡 / tooltip **不受此限**（它们内缩，永远碰不到窗口边缘）。
+    ⚠️ **第五条（2026-09-29 修，是第四条自己引出的）：加了外扩带之后，
+    `inset: 0` 从「正确」变成了「错」** —— 内容圆角落在**窗口边缘往里 32px** 处，
+    而 `inset: 0` 的遮罩圆角落在窗口角，于是每条边距内缩出 32px 的**方形遮罩**盖在
+    透明带上，开弹窗时四个角各冒出一块方角（实测：遮罩 1000×700@(0,0)
+    vs 内容 936×636@(32,32)）。
+    故主窗的四个全出血层（`.modal-mask` / `.img-lightbox` / `.md-lightbox` /
+    `.drop-overlay`）一律改用 **`inset: var(--window-shadow-margin, 0px)`**：
+    最大化时该 token 归零自动回到 `inset:0`（无需另写分支），
+    浮窗没有外扩带、token 缺省 0、行为不变。
+    ⚠️ 守卫的 `inset` 判定**必须同时认这两种写法** —— 只认 `inset: 0` 的话，
+    改用 ② 的规则会**静默失去检查**（「守卫不报错」≠「没问题」）。
     圆角值是独立 token `--window-radius`（12px，与 `--radius-lg` 同值，让「窗」与「窗里的卡」
     属于同一套圆角语言）；启动欢迎页 `#boot-splash::before` 也要同款圆角，否则启动瞬间有一次形状跳变。
 

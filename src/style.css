@@ -1173,7 +1173,15 @@ html[data-wallpaper-clear='1'] .cc-badge.interval {
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; } }
 .modal-mask { position: fixed;
   /* 全出血遮罩必须与窗口同款圆角：主窗口本体透明，弹到 body 的方形遮罩会把圆角盖回去。构建期由 check-rounded-window.mjs 守住 */
-  border-radius: var(--window-radius); inset: 0; z-index: 100; background: var(--scrim); display: flex; align-items: center; justify-content: center; animation: mask-in .18s ease-out; }
+  border-radius: var(--window-radius); inset: var(--window-shadow-margin, 0px); z-index: 100;
+  /* ⚠️ inset 用 --window-shadow-margin 而不是 0（2026-09-29 修）：
+     主窗外侧有 32px 透明外扩带（自绘阴影用，见约定 69），内容圆角落在
+     窗口边缘**往里 32px** 处。若遮罩按 `inset: 0` 铺满整窗，它的圆角就落在
+     窗口角上，于是每条边距内缩出 32px 的**方形遮罩**盖在透明带上 ——
+     开弹窗那一下，四个圆角各冒出一块方角。实测确认（遮罩 1000x700@(0,0)
+     vs 内容 936x636@(32,32)）。
+     最大化时该 token 归零（html[data-window-maximized]），自动回到 inset:0，
+     无需另写分支。浮窗没有外扩带，token 缺省 0，行为不变。 */ background: var(--scrim); display: flex; align-items: center; justify-content: center; animation: mask-in .18s ease-out; }
 @keyframes mask-in { from { opacity: 0; } to { opacity: 1; } }
 .modal-card { width: 400px; max-width: calc(100vw - 48px); background: var(--bg-card-solid); border: 1px solid var(--border-soft); border-radius: var(--radius-xl); box-shadow: var(--shadow-dock); padding: 24px; animation: card-in .2s cubic-bezier(.16, 1, .3, 1); }
 @keyframes card-in { from { opacity: 0; transform: translateY(10px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }

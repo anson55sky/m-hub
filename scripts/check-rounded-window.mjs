@@ -74,14 +74,21 @@ for (const file of files) {
   for (const { text, where } of styleBlocks(src, relative(root, file))) {
     for (const r of rules(text)) {
       if (!/position\s*:\s*fixed/.test(r.body)) continue;
-      // 铺满窗口：inset:0 / inset: 0 / 四个方向全 0
-      const fullBleed = /inset\s*:\s*0\s*[;}]/.test(r.body);
+      // 铺满「可视区」：两种写法都要认
+      //   ① inset: 0                                —— 铺满整个窗口
+      //   ② inset: var(--window-shadow-margin, 0px)  —— 铺满去掉外扩带后的可视区
+      //      （约定 69：主窗外侧有 32px 透明带，遮罩若铺满整窗，圆角会落在
+      //        窗口角而不是内容角 → 四个角各冒出一块方角。2026-09-29 实测）
+      // ⚠️ ② 必须一并纳入：只认 ① 的话，改用 ② 的规则会**静默失去检查**。
+      // 「守卫不报错」与「没问题」是两回事，这种沉默正是本守卫存在的理由。
+      const fullWindow = /inset\s*:\s*0\s*[;}]/.test(r.body);
+      const fullContent = /inset\s*:\s*var\(\s*--window-shadow-margin/.test(r.body);
       const fourSides =
         /top\s*:\s*0/.test(r.body) &&
         /right\s*:\s*0/.test(r.body) &&
         /bottom\s*:\s*0/.test(r.body) &&
         /left\s*:\s*0/.test(r.body);
-      if (!fullBleed && !fourSides) continue;
+      if (!fullWindow && !fullContent && !fourSides) continue;
       if (/border-radius\s*:/.test(r.body)) continue;
       // 透明且纯事件拦截的层画不出方角（如 .pop-mask），不算问题
       if (/background\s*:\s*transparent/.test(r.body) && !/backdrop-filter/.test(r.body)) {
@@ -96,7 +103,8 @@ if (problems.length) {
   console.error(`[rounded-window] 全出血瞬态层缺圆角 ${problems.length} 条：`);
   for (const p of problems) console.error(`  ✗ ${p}`);
   console.error(
-    "  规则：position:fixed + inset:0 的层必须同时声明 border-radius（用 var(--window-radius)），\n" +
+    "  规则：position:fixed + inset:0（或 inset:var(--window-shadow-margin,0px)）的层\n" +
+      "        必须同时声明 border-radius（用 var(--window-radius)），\n" +
       "        否则弹窗/灯箱打开的那一帧会用方形遮罩把主窗口的圆角盖回去。\n" +
       "        小而定位的下拉、气泡、tooltip 不受此限（它们碰不到窗口边缘）。",
   );
