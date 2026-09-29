@@ -1,0 +1,44 @@
+{
+  "name": "m-hub",
+  "private": true,
+  "version": "0.7.2",
+  "type": "module",
+  "scripts": {
+    "test:security": "node --test tests/security.test.mjs",
+    "dev": "vite",
+    "prebuild": "node scripts/gen-settings-index.mjs && node scripts/check-settings-css.mjs",
+    "check:settings-css": "node scripts/check-settings-css.mjs",
+    "build": "vue-tsc -b && vite build",
+    "gen:settings-index": "node scripts/gen-settings-index.mjs",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:test": "pwsh -NoProfile -File scripts/cargo-test.ps1"
+  },
+  "dependencies": {
+    "@internationalized/date": "^3.12.3",
+    "@milkdown/crepe": "^7.22.1",
+    "@milkdown/kit": "^7.22.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "dompurify": "^3.4.15",
+    "lucide-vue-next": "^0.577.0",
+    "marked": "^18.0.7",
+    "reka-ui": "^2.10.3",
+    "tailwindcss": "^4.3.3",
+    "vue": "^3.5.40"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^24.13.3",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/tsconfig": "^0.9.1",
+    "typescript": "~6.0.2",
+    "unplugin-auto-import": "^21.0.0",
+    "unplugin-vue-components": "^32.1.0",
+    "vite": "^8.2.0",
+    "vue-tsc": "^3.3.8"
+  }
+}

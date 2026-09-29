@@ -1,0 +1,65 @@
+/**
+ * 设置项索引（**自动生成，请勿手改**）
+ *
+ * 用途：设置页搜索框。设置页只挂载当前大类，其它大类的设置项不在 DOM 里，
+ * 所以搜索需要一份独立索引 —— 它由 SettingsView.vue 的模板提取而来，不会随实现漂移。
+ *
+ * 生成：npm run gen:settings-index（npm run build 前会自动跑）
+ */
+export type SettingsIndexEntry = { section: string; title: string }
+
+export const SETTINGS_INDEX: SettingsIndexEntry[] = [
+  { section: 'account', title: '用 GitHub 登录' },
+  { section: 'account', title: '用邮箱验证码登录' },
+  { section: 'account', title: 'AI 额度' },
+  { section: 'account', title: '兑换邀请码' },
+  { section: 'account', title: '扩展开发者' },
+  { section: 'account', title: '我的设备' },
+  { section: 'appearance', title: '侧边栏展开功能' },
+  { section: 'appearance', title: '主题模式' },
+  { section: 'appearance', title: '主题配色' },
+  { section: 'appearance', title: '强调色' },
+  { section: 'appearance', title: '应用壁纸' },
+  { section: 'appearance', title: '壁纸蒙版' },
+  { section: 'appearance', title: '沉浸模式' },
+  { section: 'appearance', title: '背景模糊' },
+  { section: 'appearance', title: '卡片玻璃透明度' },
+  { section: 'data', title: '数据存储路径' },
+  { section: 'data', title: '数据备份' },
+  { section: 'data', title: '数据恢复' },
+  { section: 'extensions', title: 'service 运行时策略' },
+  { section: 'extensions', title: '我的扩展' },
+  { section: 'ai', title: '以独立窗口打开 AI 对话' },
+  { section: 'ai', title: 'AI 对话面板透明度' },
+  { section: 'ai', title: 'AI 对话面板位置' },
+  { section: 'suda', title: '网页默认打开方式' },
+  { section: 'suda', title: '内嵌面板显示工具栏' },
+  { section: 'suda', title: '小类管理' },
+  { section: 'clipboard', title: '保留策略' },
+  { section: 'clipboard', title: '保留条数上限' },
+  { section: 'clipboard', title: '保留天数' },
+  { section: 'clipboard', title: '记录行为' },
+  { section: 'clipboard', title: '粘贴方式' },
+  { section: 'clipboard', title: '暂停记录' },
+  { section: 'clipboard', title: '操作' },
+  { section: 'clipboard', title: '清空历史' },
+  { section: 'online', title: '联网功能' },
+  { section: 'online', title: '天气城市' },
+  { section: 'mem', title: '隐藏窗口时降低内存占用' },
+  { section: 'general', title: '开机自动启动' },
+  { section: 'general', title: '通知驻留时长' },
+  { section: 'ball', title: '桌面悬浮球' },
+  { section: 'ball', title: '悬浮球贴边自动隐藏' },
+  { section: 'ball', title: '与主窗口同时显示' },
+  { section: 'ball', title: '静止时保持转动' },
+  { section: 'ball', title: '环形菜单按钮' },
+  { section: 'shortcut', title: '全局快捷键' },
+  { section: 'shortcut', title: '剪贴板呼出快捷键' },
+  { section: 'shortcut', title: '搜索呼出快捷键' },
+  { section: 'shortcut', title: 'AI 对话呼出快捷键' },
+  { section: 'skills', title: '检测到的助手目录' },
+  { section: 'workbench', title: '自定义布局' },
+  { section: 'workbench', title: '倒计时到点提示音' },
+  { section: 'workbench', title: '时钟卡片语录' },
+  { section: 'workbench', title: '名言来源' },
+]

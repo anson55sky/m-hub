@@ -1,0 +1,141 @@
+[package]
+name = "app"
+version = "0.7.2"
+description = "本地个人效率工作台"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+# preserve_order：发布时回写扩展 manifest.json 必须保持原键序（bump_manifest_in_dir），
+# 否则 serde_json 默认的 BTreeMap 会把键按字母重排，开发者的 manifest diff 一片狼藉
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+# macos-private-api：本工程**每一个**浮窗（剪贴板/通知/倒计时/便签/提示词/待办/
+# 悬浮球/对话/扩展）都是 `decorations:false + transparent(true)` 的无边框圆角小窗，
+# 而 Tauri 在 macOS 上默认**不编译** `transparent()`：tao 会把 NSWindow 置成
+# `opaque=false` + 透明背景色，但 WKWebView 仍照旧刷自己的白底，于是窗口里是一块
+# 白方块、只有圆角外是透明的——整套 Bento 圆角设计直接塌掉。
+# 去掉白底靠的是 WKWebView 上的私有 KVC 键 `drawsBackground`，没有公开替代品。
+#
+# 取舍：开启后过不了 Mac App Store 的静态分析（私有 API），因此 m-hub 走
+# **自签分发**（.app / .dmg），不上架。若将来必须上架，唯一出路是放弃透明浮窗、
+# 改用系统原生窗口外观——那是一次设计级返工，不是配置项。
+tauri = { version = "2.11.3", features = ["protocol-asset", "tray-icon", "unstable", "macos-private-api"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-log = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+opener = "0.7"
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+dirs = "6"
+chrono = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls", "multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = { version = "0.3", features = ["io"] }
+percent-encoding = "2"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "client"] }
+http-body-util = "0.1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# 内置 Node 运行时的分发包解压（仅 macOS 用：Node 在 macOS 上发 .tar.gz 而非 .zip）。
+# flate2 只开 rust_backend（miniz_oxide），不引入系统 zlib，头less/CI 也能编。
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native", "sync-secret-service"] }
+sha2 = "0.10"
+getrandom = "0.3"
+ed25519-dalek = "2"
+base64 = "0.22"
+semver = "1"
+sysinfo = "0.32"
+# 剪贴板图片快照的转码（保存图片 / 粘贴回写）：BMP/PNG/TIFF 三个编解码。
+# tiff 是 macOS 必需——系统截图与「预览」往剪贴板放的原生格式就是
+# `public.tiff`，缺了它 mac 上复制截图会被判成「未知格式」而无法入库。
+image = { version = "0.25", default-features = false, features = ["bmp", "png", "tiff"] }
+
+# ---- Windows 专属 ----
+# 以下依赖全部只在 Windows 平台参与编译：剪贴板走 CF_* / WM_CLIPBOARDUPDATE、
+# 悬浮球与通知走 Win32 窗口样式与 SetWindowPos、WebView 内存级别走 WebView2 COM、
+# 开机自启走 HKCU Run 键、图标提取走 GDI。macOS 对应实现见 src/mac/ 下的模块
+# （NSPasteboard 轮询 / NSPanel + CGEvent / WKWebView 无对应能力故降级 /
+# LaunchAgent plist / NSWorkspace 图标）。放在 target 段而非通用段，是为了让
+# macOS 构建的依赖图里根本不存在 windows-sys。
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.52"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# WebView2 内存级别联动（webview_mem.rs）：与 tauri/wry 锁定的同版本，保证 COM
+# 类型同源可 cast（ICoreWebView2_19::SetMemoryUsageTargetLevel）
+webview2-com = "0.38.2"
+windows-core = "0.61"
+
+# ---- macOS 专属 ----
+# objc2 系列：AppKit / Foundation 的类型安全绑定。版本与 tauri 2.11 锁定的
+# objc2 0.6 / objc2-app-kit 0.3 同源，保证 NSObject 类型可跨 crate cast。
+# core-graphics：光标全局坐标与显示器工作区（悬浮球贴边 / 通知定位）。
+# plist：LaunchAgent 自启 plist 与 .app bundle 的 Info.plist 解析。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSGeometry",
+    "NSString",
+    "NSURL",
+    "NSValue",
+    "NSThread",
+    "NSRunLoop",
+    "NSDate",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSEvent",
+    "NSImage",
+    "NSMenu",
+    "NSPasteboard",
+    "NSPanel",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSWindow",
+    "NSWorkspace",
+] }
+core-graphics = "0.25"
+plist = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
