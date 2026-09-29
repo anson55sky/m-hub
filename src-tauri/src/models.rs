@@ -48,6 +48,11 @@ pub struct SearchResult {
     pub resources: Vec<Resource>,
     pub notes: Vec<Note>,
     pub todos: Vec<Todo>,
+    /// 提示词片段（2026-09-29 补）。此前搜不到 —— 而提示词正是最需要被「找回来」的东西：
+    /// 它存在的意义就是复用，用过一次就忘了才要来搜。
+    pub snippets: Vec<Snippet>,
+    /// 倒计时（2026-09-29 补）。只按名称匹配。
+    pub countdowns: Vec<Countdown>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -23,7 +23,7 @@ import WindowResizeHandles from '../components/WindowResizeHandles.vue'
 import { useStore } from '../stores/workbench'
 import { isTauri, tauriApi } from '../api/tauri'
 import { convertFileSrc } from '@tauri-apps/api/core'
-import type { Countdown, ExtensionEntry, Note, Resource, Todo } from '../api/tauri'
+import type { Countdown, ExtensionEntry, Note, Resource, Snippet, Todo } from '../api/tauri'
 import { playChime } from '../utils/chime'
 import { shortcutLabel } from '../utils/platform'
 import { FileText, FolderOpen, LayoutDashboard, ListTodo, MessageSquare, Puzzle, Settings, ChevronLeft, ChevronRight, AppWindow, PanelRight } from 'lucide-vue-next'
@@ -707,6 +707,47 @@ function onOpenTodo(t: Todo) {
   activeView.value = 'dashboard'
 }
 
+/**
+ * 从全局搜索跳到某条提示词（2026-09-29）。
+ *
+ * 走「打开提示词管理」而不是新造一个详情弹窗：管理面板已经能编辑/复制，
+ * 再做一个只读详情就是第二套渲染同一份数据的地方，改一处忘一处。
+ * 但要先把标题带过去并高亮，否则用户点完不知道跳到了哪一条。
+ */
+const promptHighlightId = ref<number | null>(null)
+function onOpenSnippet(s: Snippet) {
+  searchVisible.value = false
+  promptHighlightId.value = s.id
+  openPromptManage()
+}
+
+/** 关闭提示词管理时清掉高亮标记：否则下次从别处打开面板，
+ *  上次搜的那一条还亮着，看起来像「莫名其妙被选中」。 */
+function onClosePromptManage() {
+  promptManageVisible.value = false
+  promptHighlightId.value = null
+}
+
+/**
+ * 从全局搜索跳到某个倒计时（2026-09-29）。
+ *
+ * 倒计时没有独立视图，它就是工作台上的一张卡。所以这里把视图切到工作台；
+ * 卡片本身在不在版面上由用户自己决定，所以额外提示一句 ——
+ * 静默切到一个看不到任何变化的界面，是最差的处理。
+ */
+function onOpenCountdown(c: Countdown) {
+  searchVisible.value = false
+  if (activeView.value !== 'dashboard') activeView.value = 'dashboard'
+  if (!layout.placements.value.some((p) => p.id === 'countdown')) {
+    showToast(
+      `「${c.name}」在工作台版面上没有倒计时卡片，需要先加上`,
+      { label: '去添加', onClick: openLayoutEditor },
+    )
+  } else {
+    showToast(`已切到工作台：${c.name}`)
+  }
+}
+
 function onSearchKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
@@ -1179,10 +1220,13 @@ provide('showToast', showToast)
       @open-resource="onOpenResource"
       @open-note="onOpenNote"
       @open-todo="onOpenTodo"
+      @open-snippet="onOpenSnippet"
+      @open-countdown="onOpenCountdown"
     />
     <PromptManageDialog
       :visible="promptManageVisible"
-      @close="promptManageVisible = false"
+      :highlight-id="promptHighlightId"
+      @close="onClosePromptManage"
     />
     <SudaCustomEditDialog
       v-if="sudaCustomEditId"

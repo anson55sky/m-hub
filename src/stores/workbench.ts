@@ -16,6 +16,7 @@ import {
   type ResourceSubcategory,
   type SudaCustomModuleConfig,
   type Snippet,
+  type SearchResult,
   type Sticky,
   type SystemInfo,
   type Tag,
@@ -516,7 +517,14 @@ export function useStore() {
   }
 
   async function searchAll(keyword: string) {
-    if (!isTauri()) return { resources: [] as Resource[], notes: [] as Note[], todos: [] as Todo[] }
+    if (!isTauri()) {
+      // 浏览器预览没有后端，返回**结构完整**的空结果：少一个字段的话，
+      // 用到它的模板会在运行时炸 `undefined.map`，而这里正是它该冒出来的地方。
+      const empty: SearchResult = {
+        resources: [], notes: [], todos: [], snippets: [], countdowns: [],
+      }
+      return empty
+    }
     return tauriApi.searchAll(keyword)
   }
 

@@ -780,6 +780,10 @@ export interface SearchResult {
   resources: Resource[]
   notes: Note[]
   todos: Todo[]
+  /** 提示词片段（2026-09-29 补齐，此前搜不到） */
+  snippets: Snippet[]
+  /** 倒计时（2026-09-29 补齐，只按名称匹配） */
+  countdowns: Countdown[]
 }
 
 export interface NoteTagRow {

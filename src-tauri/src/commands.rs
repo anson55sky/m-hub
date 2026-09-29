@@ -1320,17 +1320,25 @@ pub fn search_all(state: State<'_, DbState>, keyword: String) -> Result<SearchRe
     let resources = resource::search(&conn, &keyword).map_err(err_str)?;
     let notes = note::search(&conn, &keyword).map_err(err_str)?;
     let todos = todo::search(&conn, &keyword).map_err(err_str)?;
+    // 2026-09-29 补齐：此前全局搜索只覆盖三类，提示词与倒计时搜不到。
+    // 提示词尤其该能搜 —— 它就是为「复用」存在的，用完忘了才要来搜。
+    let snippets = snippet::search(&conn, &keyword).map_err(err_str)?;
+    let countdowns = countdown::search(&conn, &keyword).map_err(err_str)?;
     log::debug!(
-        "全局搜索「{}」: 资源 {} 条, 笔记 {} 条, 待办 {} 条",
+        "全局搜索「{}」: 资源 {} 条, 笔记 {} 条, 待办 {} 条, 提示词 {} 条, 倒计时 {} 条",
         keyword,
         resources.len(),
         notes.len(),
-        todos.len()
+        todos.len(),
+        snippets.len(),
+        countdowns.len()
     );
     Ok(SearchResult {
         resources,
         notes,
         todos,
+        snippets,
+        countdowns,
     })
 }
 

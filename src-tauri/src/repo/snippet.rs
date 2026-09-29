@@ -13,6 +13,22 @@ pub fn list(conn: &Connection) -> Result<Vec<Snippet>> {
     rows.collect()
 }
 
+/// 关键词搜索（全局搜索用）。标题与内容都匹配，与 todo::search 同一套语义。
+///
+/// 上限 20：全局搜索是「跳过去」而不是「读完」，给太多结果反而让人滑不到底。
+/// 排序沿用 list 的口径（置顶优先、其次复制次数）—— 常用片段该排在前面。
+pub fn search(conn: &Connection, keyword: &str) -> Result<Vec<Snippet>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, content, is_pinned, copy_count, last_copied_at, created_at, updated_at
+         FROM snippets
+         WHERE title LIKE '%' || ?1 || '%' OR content LIKE '%' || ?1 || '%'
+         ORDER BY is_pinned DESC, copy_count DESC, last_copied_at DESC, id DESC
+         LIMIT 20",
+    )?;
+    let rows = stmt.query_map(params![keyword], row_to_snippet)?;
+    rows.collect()
+}
+
 pub fn get(conn: &Connection, id: i64) -> Result<Snippet> {
     conn.query_row(
         "SELECT id, title, content, is_pinned, copy_count, last_copied_at, created_at, updated_at

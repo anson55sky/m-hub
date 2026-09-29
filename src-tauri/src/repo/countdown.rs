@@ -30,6 +30,25 @@ pub fn list(conn: &Connection) -> Result<Vec<Countdown>> {
     rows.collect()
 }
 
+/// 关键词搜索（全局搜索用）。只匹配名称。
+///
+/// 只搜 `name` 不搜时间字段：倒计时的「时间」是数字，用户不会拿「3」去搜它，
+/// 搜了只会返回一堆无关条目。上限 20，与 snippet::search 一致。
+/// 排序沿用 list（未结束在前）—— 搜出来就该先看到还在跑的。
+pub fn search(conn: &Connection, keyword: &str) -> Result<Vec<Countdown>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, repeat_mode, end_at, total_ms, interval_minutes,
+                paused, paused_remaining_ms, finished, floated, float_x, float_y,
+                created_at, updated_at
+         FROM countdowns
+         WHERE name LIKE '%' || ?1 || '%'
+         ORDER BY finished ASC, end_at ASC, id DESC
+         LIMIT 20",
+    )?;
+    let rows = stmt.query_map(params![keyword], row_to_countdown)?;
+    rows.collect()
+}
+
 pub fn get(conn: &Connection, id: i64) -> Result<Countdown> {
     conn.query_row(
         "SELECT id, name, repeat_mode, end_at, total_ms, interval_minutes,

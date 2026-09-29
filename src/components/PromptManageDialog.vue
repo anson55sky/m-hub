@@ -15,7 +15,14 @@ import { useFocusTrap } from '../composables/useFocusTrap'
 import { useStore } from '../stores/workbench'
 import type { Snippet } from '../api/tauri'
 
-const props = defineProps<{ visible: boolean }>()
+/**
+ * `highlightId`：从全局搜索跳进来时，要高亮的那一条（2026-09-29）。
+ *
+ * 为什么需要：搜索结果点「提示词」打开的是**管理面板**（不新造详情弹窗，
+ * 免得同一份数据有两套渲染）。但面板列的是全部提示词，不指认的话用户
+ * 点完不知道自己在找哪条，得自己再翻一遍。
+ */
+const props = defineProps<{ visible: boolean; highlightId?: number | null }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const cardRef = ref<HTMLElement | null>(null)
@@ -192,7 +199,7 @@ watch(
               v-for="s in store.state.snippets"
               :key="s.id"
               class="pm-row"
-              :class="{ editing: editingId === s.id }"
+              :class="{ editing: editingId === s.id, 'is-highlighted': props.highlightId === s.id }"
             >
               <template v-if="editingId === s.id">
                 <div class="pm-form">
@@ -344,6 +351,14 @@ watch(
   margin: 0 -6px;
   padding: 0 6px;
 }
+/* 搜索跳转的高亮态。用左侧竖条 + 极淡底色，而不是加粗字号 ——
+   加粗会改变行高、让整列跟着抖一下。 */
+.pm-row.is-highlighted {
+  background: var(--brand-50, rgba(120, 120, 255, 0.08));
+  box-shadow: inset 2px 0 0 var(--brand-500, #5b5bf5);
+  border-radius: var(--radius-sm, 8px);
+}
+
 .pm-row {
   display: flex;
   align-items: center;

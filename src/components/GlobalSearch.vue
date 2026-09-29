@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from 'vue'
 import { Search } from 'lucide-vue-next'
-import type { Note, Resource, Todo } from '../api/tauri'
+import type { SearchResult, Resource, Note, Todo, Snippet, Countdown } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { useFocusTrap } from '../composables/useFocusTrap'
 import { markdownPlainText } from '../utils/markdown'
@@ -16,6 +16,9 @@ const emit = defineEmits<{
   (e: 'openResource', r: Resource): void
   (e: 'openNote', n: Note): void
   (e: 'openTodo', t: Todo): void
+  /** 2026-09-29 新增：搜索结果里点提示词/倒计时 */
+  (e: 'openSnippet', s: Snippet): void
+  (e: 'openCountdown', c: Countdown): void
 }>()
 
 const store = useStore()
@@ -31,29 +34,57 @@ const store = useStore()
 const searchShortcutLabel = computed(() => shortcutLabel('search', store.state.config.search_shortcut))
 
 const keyword = ref('')
-const results = ref<{ resources: Resource[]; notes: Note[]; todos: Todo[] }>({
+/**
+ * 用共享的 `SearchResult` 而不是就地写一份字段列表。
+ * 就地写的那份是**第二份拷贝**：后端加了字段，前端这个 ref 不会跟着变，
+ * 报错会以「Property 'snippets' does not exist」的形式出现在**用到它的那行**，
+ * 而不是出现在真正该改的地方。
+ */
+const EMPTY_RESULTS: SearchResult = {
   resources: [],
   notes: [],
   todos: [],
-})
+  snippets: [],
+  countdowns: [],
+}
+const results = ref<SearchResult>({ ...EMPTY_RESULTS })
 const searched = ref(false)
 const inputRef = ref<HTMLInputElement | null>(null)
 const cardRef = ref<HTMLElement | null>(null)
 
 useFocusTrap(toRef(props, 'visible'), cardRef, inputRef)
 
+type ResultType = 'resource' | 'note' | 'todo' | 'snippet' | 'countdown'
+
 interface FlatItem {
-  type: 'resource' | 'note' | 'todo'
+  type: ResultType
   key: string
+  /** 分组名，渲染用。放在数据里而不是模板里拼，模板就不用重复写五遍分组标题 */
+  group: string
   resource?: Resource
   note?: Note
   todo?: Todo
+  snippet?: Snippet
+  countdown?: Countdown
 }
 
+/**
+ * 把五类结果拍平成一条有序列表。
+ *
+ * 之所以要有这个「拍平」层：模板此前对每一组都在手写
+ * `results.resources.length + results.notes.length + idx` 这种**累加偏移**
+ * 来算 `activeIndex`。加一组结果就得把这五个表达式全改一遍，
+ * 而漏改一处不会报错 —— 只会让键盘上下键在某一组里选错条目。
+ * 改成「模板只遍历 flatResults，索引就是 `i`」之后，
+ * 新增一类结果只需要在**这一个**数组里加一行。
+ */
 const flatResults = computed<FlatItem[]>(() => [
-  ...results.value.resources.map((r) => ({ type: 'resource' as const, key: 'r' + r.id, resource: r })),
-  ...results.value.notes.map((n) => ({ type: 'note' as const, key: 'n' + n.id, note: n })),
-  ...results.value.todos.map((t) => ({ type: 'todo' as const, key: 't' + t.id, todo: t })),
+  ...results.value.resources.map((r) => ({ type: 'resource' as const, group: '速达', key: 'r' + r.id, resource: r })),
+  ...results.value.notes.map((n) => ({ type: 'note' as const, group: '速记', key: 'n' + n.id, note: n })),
+  ...results.value.todos.map((t) => ({ type: 'todo' as const, group: '待办', key: 't' + t.id, todo: t })),
+  // 2026-09-29 新增：提示词与倒计时此前搜不到
+  ...results.value.snippets.map((s) => ({ type: 'snippet' as const, group: '提示词', key: 's' + s.id, snippet: s })),
+  ...results.value.countdowns.map((c) => ({ type: 'countdown' as const, group: '倒计时', key: 'c' + c.id, countdown: c })),
 ])
 
 const activeIndex = ref(-1)
@@ -70,12 +101,22 @@ function scrollActiveIntoView() {
     ?.scrollIntoView({ block: 'nearest' })
 }
 
+/** 鼠标点某一条：先把 activeIndex 移到它，再走与回车相同的打开逻辑。
+ *  写成「复用 openActive」而不是各自 emit，是为了让点击与回车**不可能**分叉。 */
+function openActiveAt(i: number) {
+  activeIndex.value = i
+  openActive()
+}
+
 function openActive() {
   const item = flatResults.value[activeIndex.value]
   if (!item) return
   if (item.type === 'resource' && item.resource) emit('openResource', item.resource)
   else if (item.type === 'note' && item.note) emit('openNote', item.note)
   else if (item.type === 'todo' && item.todo) emit('openTodo', item.todo)
+  // 2026-09-29 新增两类
+  else if (item.type === 'snippet' && item.snippet) emit('openSnippet', item.snippet)
+  else if (item.type === 'countdown' && item.countdown) emit('openCountdown', item.countdown)
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -108,7 +149,7 @@ watch(
   (v) => {
     if (v) {
       keyword.value = ''
-      results.value = { resources: [], notes: [], todos: [] }
+      results.value = { ...EMPTY_RESULTS }
       searched.value = false
       activeIndex.value = -1
     }
@@ -119,7 +160,7 @@ watch(keyword, (kw) => {
   if (searchTimer) clearTimeout(searchTimer)
   const trimmed = kw.trim()
   if (!trimmed) {
-    results.value = { resources: [], notes: [], todos: [] }
+    results.value = { ...EMPTY_RESULTS }
     searched.value = false
     return
   }
@@ -158,72 +199,78 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           </div>
 
           <div class="search-results" role="listbox" aria-label="搜索结果">
-            <!-- 资源 -->
-            <template v-if="results.resources.length > 0">
-              <p class="result-group-title" role="presentation">速达</p>
-              <div
-                v-for="(r, idx) in results.resources"
-                :key="'r' + r.id"
-                class="result-item"
-                :class="{ active: idx === activeIndex }"
-                :data-search-key="'r' + r.id"
-                role="option"
-                :aria-selected="idx === activeIndex"
-                @click="emit('openResource', r)"
-                @mouseenter="activeIndex = idx"
+            <!--
+              单一数据源：遍历 flatResults，分组靠「上一条的 group 与当前不同」来插标题。
+              此前每组各写一遍模板，并在 activeIndex 上手写累加偏移
+              （results.resources.length + results.notes.length + idx …）——
+              加一组结果要改五处，漏一处不会报错，只会让键盘选中错行。
+            -->
+            <template v-for="(item, i) in flatResults" :key="item.key">
+              <p
+                v-if="i === 0 || flatResults[i - 1].group !== item.group"
+                class="result-group-title"
+                role="presentation"
               >
-                <span class="result-badge" :class="r.kind">
-                  {{ kindText(r.kind) }}
-                </span>
-                <span class="result-name" :title="r.name">{{ r.name }}</span>
-                <span class="result-sub">{{ r.target }}</span>
-              </div>
-            </template>
-
-            <!-- 笔记 -->
-            <template v-if="results.notes.length > 0">
-              <p class="result-group-title" role="presentation">速记</p>
+                {{ item.group }}
+              </p>
               <div
-                v-for="(n, idx) in results.notes"
-                :key="'n' + n.id"
                 class="result-item"
-                :class="{ active: results.resources.length + idx === activeIndex }"
-                :data-search-key="'n' + n.id"
+                :class="{ active: i === activeIndex }"
+                :data-search-key="item.key"
                 role="option"
-                :aria-selected="results.resources.length + idx === activeIndex"
-                @click="emit('openNote', n)"
-                @mouseenter="activeIndex = results.resources.length + idx"
+                :aria-selected="i === activeIndex"
+                @click="openActiveAt(i)"
+                @mouseenter="activeIndex = i"
               >
-                <span class="result-badge note-badge">笔记</span>
-                <span class="result-name" :title="n.title">{{ n.title }}</span>
-                <span class="result-sub">
-                  {{ markdownPlainText(n.content, 60) }}
-                </span>
-              </div>
-            </template>
-
-            <!-- 待办 -->
-            <template v-if="results.todos.length > 0">
-              <p class="result-group-title" role="presentation">待办</p>
-              <div
-                v-for="(t, idx) in results.todos"
-                :key="'t' + t.id"
-                class="result-item"
-                :class="{ active: results.resources.length + results.notes.length + idx === activeIndex }"
-                :data-search-key="'t' + t.id"
-                role="option"
-                :aria-selected="results.resources.length + results.notes.length + idx === activeIndex"
-                @click="emit('openTodo', t)"
-                @mouseenter="activeIndex = results.resources.length + results.notes.length + idx"
-              >
-                <span class="result-badge todo-badge">{{ t.done ? '已完成' : '待完成' }}</span>
-                <span class="result-name" :title="t.title">{{ t.title }}</span>
-                <span class="result-sub">{{ ['普通', '重要', '紧急'][t.priority] ?? '普通' }}优先级</span>
+                <!-- 速达 -->
+                <template v-if="item.resource">
+                  <span class="result-badge" :class="item.resource.kind">
+                    {{ kindText(item.resource.kind) }}
+                  </span>
+                  <span class="result-name" :title="item.resource.name">
+                    {{ item.resource.name }}
+                  </span>
+                  <span class="result-sub">{{ item.resource.target }}</span>
+                </template>
+                <!-- 速记 -->
+                <template v-else-if="item.note">
+                  <span class="result-badge note-badge">笔记</span>
+                  <span class="result-name" :title="item.note.title">{{ item.note.title }}</span>
+                  <span class="result-sub">{{ markdownPlainText(item.note.content, 60) }}</span>
+                </template>
+                <!-- 待办 -->
+                <template v-else-if="item.todo">
+                  <span class="result-badge todo-badge">
+                    {{ item.todo.done ? '已完成' : '待完成' }}
+                  </span>
+                  <span class="result-name" :title="item.todo.title">{{ item.todo.title }}</span>
+                  <span class="result-sub">
+                    {{ ['普通', '重要', '紧急'][item.todo.priority] ?? '普通' }}优先级
+                  </span>
+                </template>
+                <!-- 提示词（2026-09-29 新增） -->
+                <template v-else-if="item.snippet">
+                  <span class="result-badge">提示词</span>
+                  <span class="result-name" :title="item.snippet.title">
+                    {{ item.snippet.title }}
+                  </span>
+                  <span class="result-sub">{{ item.snippet.content }}</span>
+                </template>
+                <!-- 倒计时（2026-09-29 新增） -->
+                <template v-else-if="item.countdown">
+                  <span class="result-badge">倒计时</span>
+                  <span class="result-name" :title="item.countdown.name">
+                    {{ item.countdown.name }}
+                  </span>
+                  <span class="result-sub">
+                    {{ item.countdown.finished ? '已结束' : '进行中' }}
+                  </span>
+                </template>
               </div>
             </template>
 
             <!-- 状态 -->
-            <div v-if="searched && results.resources.length === 0 && results.notes.length === 0 && results.todos.length === 0" class="empty-state">
+            <div v-if="searched && flatResults.length === 0" class="empty-state">
               <span style="font-size: 1.625rem">🔍</span>
               <p>未找到「{{ keyword.trim() }}」相关内容</p>
             </div>
@@ -232,7 +279,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               class="empty-state"
               style="padding: 24px 16px"
             >
-              <p style="color: var(--text-4)">输入关键词检索速达资源、速记与待办</p>
+              <p style="color: var(--text-4)">
+                检索速达、速记、待办、提示词与倒计时
+              </p>
               <div class="shortcut-hints">
                 <span><kbd>Ctrl</kbd> + <kbd>K</kbd> 唤起搜索</span>
                 <span><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd> 显示/隐藏窗口</span>
