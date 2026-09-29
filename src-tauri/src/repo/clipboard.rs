@@ -161,12 +161,16 @@ pub fn cleanup_with(conn: &Connection, max_items: i64, ttl_days: i64) -> Result<
         doomed.push(p?);
     }
 
-    conn.execute(
+    // 两条 DELETE 必须同事务（2026-09-29 补），而且它们**不是独立的**：
+    // 第二条的 `OFFSET ?1` 是「跳过最新的 max_items 条后全删」，这个集合是在
+    // 第一条（TTL 清理）**已经生效**的前提下算出来的。分开提交时若第一条成功、
+    // 第二条失败，历史就被按错误的边界裁掉了 —— 而且不可逆（删掉的就是历史记录）。
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "DELETE FROM clipboard_history WHERE is_pinned = 0 AND updated_at < ?1",
         params![cutoff],
     )?;
-
-    conn.execute(
+    tx.execute(
         "DELETE FROM clipboard_history WHERE id IN (
            SELECT id FROM clipboard_history
            ORDER BY updated_at DESC, id DESC
@@ -174,7 +178,12 @@ pub fn cleanup_with(conn: &Connection, max_items: i64, ttl_days: i64) -> Result<
          )",
         params![max_items],
     )?;
+    tx.commit()?;
 
+    // 删磁盘文件**必须在 commit 之后**。`doomed` 是提交前按「即将删除」算出的，
+    // 若先删文件再提交、而提交失败回滚了，就会留下「记录还在、图片没了」的行
+    // —— 用户点开一条有缩略图的历史，图片却是裂的，且因为记录还在、后续清理
+    // 不会再来删这个孤儿文件，永久残留。
     for p in doomed {
         let _ = std::fs::remove_file(&p);
     }
@@ -442,5 +451,71 @@ mod tests {
         let all = list(&conn, None, 50, 0).unwrap();
         assert_eq!(all[0].source_app.as_deref(), Some("B"));
         assert_eq!(all[0].image_path.as_deref(), Some("C:/img/a.png"));
+    }
+
+    /// `cleanup_with` 的整体行为：按 max_items 裁剪、联动删掉被裁掉记录的图片文件、
+    /// 且个别文件已不存在时不能整个失败。
+    ///
+    /// ## 这条测试**验不到**什么（别把它当守卫用）
+    ///
+    /// 加事务时定下的关键顺序约束是「图片文件必须在 commit **之后**才 unlink」
+    /// —— `doomed` 是提交前算出的，若先删文件再提交、而提交失败回滚，就会留下
+    /// 「记录还在、图片没了」的行（用户看到裂图，且记录还在、后续清理不会再删
+    /// 这个孤儿文件，永久残留）。
+    ///
+    /// 但**本测试证明不了这一点**：我把 unlink 挪到 commit 之前跑过，
+    /// 这条用例照样通过 —— 因为无论顺序如何，成功路径结束时文件都没了。
+    /// 要区分这两种顺序必须在两者之间注入一次提交失败，而当前代码没有可注入的
+    /// 故障点。所以这条只是 `cleanup_with` 的行为回归，**顺序约束靠的是代码里
+    /// 那段注释与 review，不是它**。若日后 `cleanup_with` 引入依赖注入或返回错误
+    /// 的分支，那时才补得上一条真正能区分顺序的用例。
+    #[test]
+    fn cleanup_removes_image_files_only_after_commit() {
+        let conn = setup();
+        // 两条图片记录 + 一个真实存在的文件；另有两条纯文本
+        let dir = std::env::temp_dir().join("mhub_clip_cleanup_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("a.png");
+        std::fs::write(&img, b"x").unwrap();
+
+        insert_image(&conn, "h1", img.to_str().unwrap(), None).unwrap();
+        insert_image(&conn, "h2", "does-not-exist.png", None).unwrap();
+        insert(&conn, "文本一", None, None).unwrap();
+        insert(&conn, "文本二", None, None).unwrap();
+        assert_eq!(count(&conn).unwrap(), 4);
+
+        // max_items=2 → 只留最新 2 条（文本一/文本二），两条图片记录被裁掉
+        cleanup_with(&conn, 2, 3650).unwrap();
+
+        let left = list(&conn, None, 50, 0).unwrap();
+        assert_eq!(left.len(), 2, "应按 max_items 裁到 2 条");
+        assert!(
+            !img.exists(),
+            "图片文件应在提交后被删除（否则回滚会留下「记录在、图片没了」的行）"
+        );
+        // 不存在的路径被删也不应报错（整个清理流程不能因为一个孤儿文件就失败）
+        assert!(cleanup_with(&conn, 2, 3650).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 置顶的记录不参与任何一条清理（TTL 与超量都跳过它）。
+    /// 加事务后要确认两条 DELETE 都没把 pin 住的记录误删。
+    #[test]
+    fn cleanup_keeps_pinned_items() {
+        let conn = setup();
+        insert(&conn, "会被裁掉", None, None).unwrap();
+        insert(&conn, "置顶保留", None, None).unwrap();
+        let pinned = list(&conn, None, 50, 0)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.content == "置顶保留")
+            .unwrap();
+        toggle_pin(&conn, pinned.id).unwrap();
+
+        cleanup_with(&conn, 1, 3650).unwrap();
+        let left = list(&conn, None, 50, 0).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].content, "置顶保留");
     }
 }

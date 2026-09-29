@@ -1108,9 +1108,14 @@ pub fn set_countdown_card_visible(
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let changed = if visible {
         let ids = countdown::list_auto_paused_ids(&conn).map_err(err_str)?;
+        // 整批恢复必须同事务（2026-09-29 补）：原先逐条独立提交，中途失败会留下
+        // 「一部分倒计时解冻、一部分仍 auto_paused=1」的混合状态 —— 而这个状态
+        // 没有任何界面能表达出来，用户要来回切两次卡片可见性才会偶然收敛。
+        let tx = conn.unchecked_transaction().map_err(err_str)?;
         for id in &ids {
-            countdown::resume(&conn, *id).map_err(err_str)?;
+            countdown::resume(&tx, *id).map_err(err_str)?;
         }
+        tx.commit().map_err(err_str)?;
         let resumed = !ids.is_empty();
         if resumed {
             log::info!("倒计时卡片回到工作台，恢复 {} 个倒计时", ids.len());

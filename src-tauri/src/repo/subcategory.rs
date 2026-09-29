@@ -151,13 +151,20 @@ pub fn delete(conn: &mut Connection, id: i64) -> Result<(), String> {
 
 /// 组内拖拽排序：按传入 id 顺序写 sort_order
 pub fn reorder(conn: &Connection, kind: &str, ids: &[i64]) -> rusqlite::Result<()> {
+    // 整批排序必须是**一个**事务（2026-09-29 补）。原先逐条独立提交，
+    // 拖拽排序写到一半失败（例如 ids 里有已被删掉的 id、或中途被取消）
+    // 就留下「半新半旧」的顺序：用户看到的分类顺序是乱的，而且
+    // `default_name()` 的兜底排序（ORDER BY is_default DESC, sort_order ASC）
+    // 也跟着一起错，后续新建的资源会被挂到错误的小类上。
+    // 同文件的 rename / delete 早就用了事务，只有这里漏了。
+    let tx = conn.unchecked_transaction()?;
     for (idx, id) in ids.iter().enumerate() {
-        conn.execute(
+        tx.execute(
             "UPDATE resource_subcategories SET sort_order = ?1 WHERE id = ?2 AND kind = ?3",
             params![idx as i64, id, kind],
         )?;
     }
-    Ok(())
+    tx.commit()
 }
 
 pub fn set_default(conn: &Connection, id: i64) -> Result<(), String> {
@@ -168,17 +175,22 @@ pub fn set_default(conn: &Connection, id: i64) -> Result<(), String> {
             |r| r.get(0),
         )
         .map_err(|_| format!("NOT_FOUND: 小类 {id} 不存在"))?;
-    conn.execute(
+    // 两条 UPDATE 必须同事务（2026-09-29 补）：它们表达的是「先清掉旧的默认、
+    // 再把新的设为默认」这一个原子操作。分开提交时若第二条失败，该大类就
+    // **一个默认小类都没有** —— 而 `default_name()` 靠 ORDER BY 兜底不会崩，
+    // 于是用户看不到任何报错，只发现新建的资源全被挂到了「排序最前」那个小类。
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
         "UPDATE resource_subcategories SET is_default = 0 WHERE kind = ?1",
         params![kind],
     )
     .map_err(|e| e.to_string())?;
-    conn.execute(
+    tx.execute(
         "UPDATE resource_subcategories SET is_default = 1 WHERE id = ?1",
         params![id],
     )
     .map_err(|e| e.to_string())?;
-    Ok(())
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// 大类的默认小类名：is_default=1 的行优先，否则取排序最前的行；该大类还没有小类时 None。

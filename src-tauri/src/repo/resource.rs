@@ -20,15 +20,21 @@ pub fn create(
     let id = conn.last_insert_rowid();
     // ADR 0012 决策 3：新建未指定小类 → 自动归入该大类的默认小类；
     // 该大类还没有任何小类时保持 NULL（「未归类」）。编辑时显式置 NULL 不走这里。
+    //
+    // 两条写必须同事务（2026-09-29 补）。原先分开提交，第二条失败时
+    // 资源已落库但 category 为 NULL —— 界面上显示「未归类」，不报错也不崩溃，
+    // 但那条 ADR 决策就是没生效，而用户完全无从察觉是哪一步出的问题。
+    let tx = conn.unchecked_transaction()?;
     if category.is_none() {
         let kind_str = kind_to_str(&kind);
-        if let Some(default_cat) = super::subcategory::default_name(conn, &kind_str)? {
-            conn.execute(
+        if let Some(default_cat) = super::subcategory::default_name(&tx, &kind_str)? {
+            tx.execute(
                 "UPDATE resources SET category = ?1 WHERE id = ?2",
                 params![default_cat, id],
             )?;
         }
     }
+    tx.commit()?;
     get(conn, id)
 }
 
