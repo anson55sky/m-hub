@@ -18,6 +18,7 @@
     "check:rounded-window": "node scripts/check-rounded-window.mjs",
     "check:css-comments": "node scripts/check-css-comment-balance.mjs",
     "check:dash-preset": "node scripts/check-dash-preset.mjs",
+    "verify:dash-compact": "node --experimental-strip-types scripts/verify-dash-compact.ts",
     "check:window-margin": "node scripts/check-window-margin.mjs",
     "check:window-min-size": "node scripts/check-window-min-size.mjs",
     "check:shortcuts": "node scripts/check-default-shortcuts.mjs",

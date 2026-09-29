@@ -17,6 +17,7 @@ import RecentBar from '../components/RecentBar.vue'
 import ClockCard from '../components/ClockCard.vue'
 import WeatherCard from '../components/WeatherCard.vue'
 import StickyCard from '../components/StickyCard.vue'
+import DashCollapsedBar from '../components/DashCollapsedBar.vue'
 import CountdownCard from '../components/CountdownCard.vue'
 import WindowResizeHandles from '../components/WindowResizeHandles.vue'
 import { useStore } from '../stores/workbench'
@@ -416,11 +417,54 @@ function titleProps(p: DashPlacement): { title?: string; hideTitle: boolean } {
 // 卡片占格比例不变 → 不滚动、不留白、不因缩放而错位
 const dashGridRows = computed(() => {
   let m = 1
-  for (const p of layout.placements.value) {
+  // 用有效版面而非保存布局：否则空模块压扁了、栅格高度却没跟着缩，
+  // 底部会留下一截没有任何模块的空行（看起来像布局出错）。
+  for (const p of layout.effectivePlacements.value) {
     m = Math.max(m, p.y + p.h)
   }
   return m
 })
+
+/** 各模块压扁后单行条上的提示语 */
+const COLLAPSED_HINT: Record<string, string> = {
+  prompts: '还没有提示词片段',
+  todo: '今天没有待办',
+  todo_overview: '没有待办',
+  countdown: '还没有倒计时',
+  notes: '还没有速记',
+  recent: '还没有最近使用',
+  resources: '速达是空的',
+}
+
+/** 单行条上的加号：复用各模块**已有的**打开入口，不新造跳转路径 */
+function onCollapsedAction(id: string) {
+  switch (id) {
+    case 'prompts':
+      openPromptManage()
+      break
+    case 'todo':
+    case 'todo_overview':
+    case 'calendar':
+      openTodo()
+      break
+    case 'notes':
+      openNotes()
+      break
+    case 'recent':
+    case 'resources':
+    case 'suda1':
+    case 'suda2':
+    case 'suda3':
+    case 'suda4':
+      openSuda()
+      break
+    default:
+      // countdown 的内容只能在它自己的卡片里加（没有独立的列表视图），
+      // 而卡片此刻正被压成一条 —— 所以这里退回工作台并把提示交给 toast，
+      // 而不是静默无反应。
+      showToast('倒计时要在卡片上点「+」添加')
+  }
+}
 
 function dashCellStyle(p: DashPlacement) {
   return {
@@ -952,14 +996,29 @@ provide('showToast', showToast)
               '--dash-rows': dashGridRows,
             }"
           >
+            <!--
+              渲染用 `layout.effectivePlacements` 而不是 `placements`：
+              空内容模块被压扁到 1 行、并由上吸消掉空洞（见
+              composables/dashLayoutGeometry.ts）。保存的布局不受影响，
+              模块一有内容就长回原样。
+            -->
             <div
-              v-for="p in layout.placements.value"
+              v-for="p in layout.effectivePlacements.value"
               :key="p.id"
               class="dash-cell"
+              :class="{ 'is-collapsed': layout.collapsedIds.value.has(p.id) }"
               :style="dashCellStyle(p)"
             >
+              <DashCollapsedBar
+                v-if="layout.collapsedIds.value.has(p.id)"
+                :title="dashPlacementTitle(p)"
+                :hint="COLLAPSED_HINT[p.id] ?? '还没有内容'"
+                :action-label="`在${dashPlacementTitle(p)}里添加`"
+                @action="onCollapsedAction(p.id)"
+              />
               <component
                 :is="dashCardComponent(p.id)"
+                v-else
                 v-bind="dashCardProps(p)"
                 @go-suda="activeView = 'suda'"
               />

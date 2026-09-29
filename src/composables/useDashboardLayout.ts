@@ -2,6 +2,7 @@ import { computed, ref, watch } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, tauriApi } from '../api/tauri'
 import { useStore } from '../stores/workbench'
+import { effectiveLayout } from './dashLayoutGeometry'
 
 /**
  * 工作台自定义布局（设置页两栏编辑器 + 主界面渲染共用）
@@ -683,6 +684,54 @@ function clear() {
   persistIfIdle()
 }
 
+/**
+ * 某个模块当前是否「没有内容」。
+ *
+ * 只覆盖 `dashLayoutGeometry::DEGRADABLE_IDS` 里那几个列表型模块 ——
+ * 其余模块（时钟/天气/资源/便签/速达槽/扩展）不参与降级，理由见该文件。
+ *
+ * 「空」的判定刻意保守，只认**长度为零**：
+ *   · 待办只算未完成项 —— 全勾掉了也算「今天没什么要做的」，压扁是对的；
+ *   · 便签/笔记不参与，没有「空」的语义（打开就能写）。
+ * 不做的判定：不看「内容很少就降级」—— 阈值是主观的，会让版面在用户
+ * 增删之间反复跳动，比空着更难用。只在**真的零条**时降级。
+ */
+function moduleIsEmpty(id: string, state: ReturnType<typeof useStore>['state']): boolean {
+  switch (id) {
+    case 'prompts':
+      return state.snippets.length === 0
+    case 'todo':
+    case 'todo_overview':
+      return state.todos.every((t) => t.done)
+    case 'countdown':
+      return state.countdowns.length === 0
+    case 'notes':
+      return state.notes.length === 0
+    case 'recent':
+    case 'resources':
+      return state.resources.length === 0
+    default:
+      return false
+  }
+}
+
+/**
+ * 渲染用的「有效版面」：保存布局不动，按当前内容量派生一份。
+ *
+ * 这是**派生**而不是改写 —— 用户在布局编辑器里排的坐标一个都不会被改，
+ * 空模块一旦有了内容就立刻长回原来的大小。这样降级才敢做：
+ * 它随时可逆，不会把人排好的版面弄丢。
+ */
+const effective = computed(() => {
+  const state = store.state
+  return effectiveLayout(placements.value, (id) => moduleIsEmpty(id, state))
+})
+
+/** 供 index.vue 渲染用：哪些模块当前处于降级状态 */
+const collapsedIds = computed(
+  () => new Set(effective.value.placements.filter((p) => p.h <= 1).map((p) => p.id)),
+)
+
 export function useDashboardLayout() {
   return {
     placements,
@@ -698,5 +747,11 @@ export function useDashboardLayout() {
     beginEdit,
     commitEdit,
     cancelEdit,
+    /** 渲染用有效版面（空模块已压扁 + 空洞已上吸） */
+    effectivePlacements: computed(() => effective.value.placements),
+    /** 当前处于降级状态的模块 id 集合（渲染单行条用） */
+    collapsedIds,
+    /** 本次是否真的压扁过（供调用方决定要不要给用户一个提示） */
+    layoutCompacted: computed(() => effective.value.compacted),
   }
 }
