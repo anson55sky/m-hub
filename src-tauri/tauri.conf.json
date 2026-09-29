@@ -25,6 +25,7 @@
         "visible": false,
         "decorations": false,
         "shadow": true,
+        "transparent": true,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --js-flags=--scavenger_max_new_space_capacity_mb=8 --disk-cache-size=33554432"
       }
     ],

@@ -263,6 +263,33 @@ m-hub/
 
 68. **capability 的 `windows` 字段匹配的是窗口 label，多 webview 窗口的子 webview 必须用 `webviews` 字段（2026-09-26 实测）：** Tauri v2 ACL 的 `resolve_access` 按「webview label 匹配 capability 的 `webviews` 模式 ∨ **窗口** label 匹配 `windows` 模式」放行插件命令（应用自身的 `#[tauri::command]` 不经此门）。速达独立浏览器是唯一的多 webview 窗口（window `suda-web-0` + 子 webview `suda-web-0-chrome`/`-content`），曾把 `suda-web-*-chrome` 写进 `windows` 数组——它永远匹配不上窗口 label `suda-web-0`，而 capability 又没声明 `webviews`，结果 chrome 页的 `plugin:event|listen` 被 ACL 拒绝：`listen()` reject → `onMounted` 在第一个 `await listen` 处静默中断 → 后续监听全部没注册 → chrome 页永远收不到 tab/地址栏同步事件，独立窗口打开网页永远显示「此窗口当前没有打开的页面」空态（挂载时的 `suda_browser_state` 拉取能成功是因为应用命令不走 ACL，反而把症状捂严实了：只有 chrome 页恰好晚于首次打开挂载时才会被拉取掩盖成「正常」）。修复：capability 拆成 `windows`（原样，不含 suda）+ `"webviews": ["suda-web-*-chrome"]`——content 子 webview 两边都匹配不上，维持「外站页面零 IPC」铁律（约定 44 的 capabilities 口径）。**今后给多 webview 窗口的子 webview 配权限一律用 `webviews` 字段**；症状自查：怀疑权限问题时在目标 webview 里 `listen('x', () => {})` 看是否报 `not allowed on window ...`（错误信息里「allowed on」列表会把 capability 的 windows 模式全列出来，对照窗口 label 一眼定位）。改动 capability 后 `tauri dev` 会自动重编译重启（capability 编译期烘进二进制）。
 
+69. **主窗口圆角：窗口透明 + 页面底色在 `.app-shell` 上 + 全出血层一律同款圆角（构建期有守卫）：**
+    主窗本体是**透明**的（`tauri.conf.json` 的 `transparent: true` + `decorations: false`），
+    圆角靠 `index.vue` 的 `.app-shell` 裁出来。三处缺一不可：
+    ① **窗口透明**（否则圆角处漏出窗口的方底色）；② **页面底色在 `.app-shell` 上而不是 `body`**
+    （`body` 铺满视口、是矩形，留在那里圆角就白做了）；③ **`.app-shell` 上有 `contain: paint`**
+    —— 壁纸层是 `position: fixed; inset: 0`，fixed 元素默认相对**视口**定位，
+    **不会被祖先的 `overflow` + `border-radius` 裁剪**；不加 `contain: paint`
+    就是「内容圆了、壁纸还是方的」，圆角处露出桌面。
+    ⚠️ **第四条：任何 `position: fixed; inset: 0` 的全出血层（遮罩 / 灯箱 / 拖拽遮罩）
+    都必须自己声明 `border-radius: var(--window-radius)`** —— 它们 Teleport 到 `body`、
+    绕开了 `.app-shell`，开弹窗那一帧会用方形遮罩把圆角盖回去，表现为「窗口方了一下又圆回来」。
+    **这条编译期完全看不出来、类型检查全绿，只能实机看见**，故有构建期守卫
+    `scripts/check-rounded-window.mjs`（`npm run build` 的 prebuild 会跑，违规直接失败）。
+    小而定位的下拉 / 气泡 / tooltip **不受此限**（它们内缩，永远碰不到窗口边缘）。
+    圆角值是独立 token `--window-radius`（12px，与 `--radius-lg` 同值，让「窗」与「窗里的卡」
+    属于同一套圆角语言）；启动欢迎页 `#boot-splash::before` 也要同款圆角，否则启动瞬间有一次形状跳变。
+    ⚠️ **代价：透明窗口在 macOS 上没有系统阴影，且这个改不回来**（2026-09-29 实机取色证实）。
+    实测窗口边缘外 70px→0px 的桌面像素**完全平坦**（Δ≤2，纯 PNG 噪声）。
+    已试过并**证伪**的修法：显式 `NSWindow::setHasShadow(true)` —— 无任何变化。
+    根因是 AppKit 对 `opaque = false` 的窗口一律不画阴影，与 `hasShadow` 属性无关；
+    tao 那边 `has_shadow` 默认就是 true、只在为 false 时才显式关掉，所以不是「没打开」。
+    **唯一可行的修法是「窗口比内容大一圈」**：窗口外扩 N px、`.app-shell` 用
+    `margin: N` + CSS `box-shadow`，靠内容自己画阴影。**本版没做**——它会连带改掉
+    ① 窗口持久化尺寸与 `restore_window_state` 的屏内可容判断 ② 最大化/缩放时屏幕四边
+    会出现一圈透明缝（得再为「最大化态去掉 margin」加分支）③ 透明边框会吃掉靠近窗口边缘的点击。
+    这三条都是产品行为决策，不能顺手改。要加就按这三条一起改，别只加 margin。
+
 ---
 
 ## 平台约定（macOS 移植，**先读这一节再改任何代码**）

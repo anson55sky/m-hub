@@ -42,11 +42,16 @@
         user-select: none;
         font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
       }
+      /* 渐变铺在 ::before 上（不是 #boot-splash 自身）：只有独立的一层才能被
+         overflow:hidden + border-radius 裁出圆角，直接铺在元素上裁不掉。
+         圆角值与主窗 .app-shell 的 --window-radius 一致，启动瞬间方角→圆角
+         不会有一次「形状跳变」。 */
       #boot-splash::before {
         content: "";
         position: absolute;
         inset: 0;
         z-index: 0;
+        border-radius: 12px;
         background:
           radial-gradient(1200px 800px at 20% -10%, rgba(255, 255, 255, 0.28), transparent 60%),
           linear-gradient(120deg, #a5b4fc 0%, #93c5fd 33%, #a5f3fc 66%, #fbcfe8 100%);

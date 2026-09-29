@@ -146,6 +146,26 @@ m-hub 是一个安静、可靠的本地桌面工作台：用户打开它是为�
 - **Motion**: 150ms 背景与颜色变化，不做入场编舞。
 - **主题切换**：不在侧栏/标题栏，位于设置「外观」区（模式/预设/强调色三轴）。
 
+### Window frame（主窗口本体）
+
+- 主窗口**本体透明**（`decorations: false` + `transparent: true`），圆角由根容器
+  `.app-shell` 裁出：`--window-radius`(12px) + `overflow: hidden` + `contain: paint`。
+  12px 与 `--radius-lg` 同值，让「窗」与「窗里的卡」属于同一套圆角语言。
+- 页面底色（`--app-bg` / 渐变预设）**必须画在 `.app-shell` 上，不能画在 `body`**：
+  `body` 铺满视口、是矩形，留在那里圆角处会漏出方底色。
+- `contain: paint` 不是优化而是必需：壁纸层是 `position: fixed; inset: 0`，
+  fixed 默认相对视口定位、**不受祖先 `overflow`/`border-radius` 裁剪**；
+  不加它就是「内容圆了、壁纸是方的」，圆角处直接露出桌面。
+- 任何 **全出血** 瞬态层（`position: fixed; inset: 0` 的遮罩 / 灯箱 / 拖拽遮罩）
+  都必须自带 `border-radius: var(--window-radius)`：它们 Teleport 到 `body`、绕开了
+  `.app-shell`，否则开弹窗那一帧会用方形遮罩把圆角盖回去。构建期由
+  `scripts/check-rounded-window.mjs` 守卫。小而定位的下拉 / 气泡 / tooltip 不受此限
+  （它们内缩，碰不到窗口边缘）。见 AGENTS.md 约定 69。
+- 启动欢迎页 `#boot-splash::before` 同款圆角，避免启动瞬间「方 → 圆」跳变。
+- **已知代价：主窗没有系统阴影。** 透明窗口在 macOS 上拿不到 AppKit 阴影
+  （`setHasShadow(true)` 无效，已实机取色证伪）。浅色桌面 + 浅色窗口时缺少视觉分隔。
+  补法是「窗口外扩 + CSS box-shadow」，代价见 AGENTS.md 约定 69，**尚未实施**。
+
 ### Glass card（基础卡片）
 
 - 常驻表面统一使用 `--frost-surface` 伪毛玻璃底色（烘焙渐变 + 半透明基底）+ `--frost-edge` 顶部高光 + `--shadow-card` + `--radius-lg`(12px)，内部控件 `--radius-md`(8px)。

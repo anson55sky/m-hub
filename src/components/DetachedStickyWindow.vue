@@ -255,6 +255,8 @@ function onDragEnd() {
 /* 关闭确认弹窗 */
 .fs-mask {
   position: fixed;
+  /* 便签浮窗关闭确认遮罩同理 */
+  border-radius: var(--window-radius);
   inset: 0;
   z-index: 100;
   background: var(--scrim);

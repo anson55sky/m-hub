@@ -518,6 +518,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 }
 .md-lightbox {
   position: fixed;
+  /* 截图灯箱同理（见 check-rounded-window.mjs） */
+  border-radius: var(--window-radius);
   inset: 0;
   z-index: 220;
   display: flex;

@@ -433,18 +433,14 @@ pub fn run() {
                     Err(e) => log::warn!("开机自启动自愈失败: {e}"),
                 }
             }
-            let mut dark = config.theme_mode == "dark";
-            if config.theme_mode == "system" {
-                dark = matches!(
-                    main_window(app.handle()).and_then(|w| w.theme().ok()),
-                    Some(tauri::Theme::Dark)
-                );
-            }
-            let bg = if dark {
-                tauri::window::Color(18, 19, 27, 255) // --bg-page 暗色 #12131b
-            } else {
-                tauri::window::Color(236, 239, 246, 255) // --bg-page 亮色 #eceff6
-            };
+            // 主窗本体是**透明**的（tauri.conf 的 transparent:true，窗口圆角靠
+            // .app-shell 的 border-radius 裁出，约定 69），因此窗口/webview 侧的底色
+            // 必须是全透明 —— 这里是过去**唯一**能把圆角填成不透明矩形的地方：
+            // 哪怕 CSS 侧全对，只要这里 alpha=255，圆角处就会是一块纯色方角。
+            //
+            // 亮/暗的底色由 CSS 侧的 `--app-bg` / `.app-shell` 承担（那里本来就在
+            // 画渐变），窗口层只需要「什么都不画」。
+            let bg = tauri::window::Color(0, 0, 0, 0);
             if let Some(window) = main_window(app.handle()) {
                 let _ = window.set_background_color(Some(bg));
                 // WebviewWindow::set_background_color 原本同时铺窗口与 webview 两侧底色，

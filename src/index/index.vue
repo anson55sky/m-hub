@@ -1142,6 +1142,9 @@ provide('showToast', showToast)
 /* 应用壁纸层：z-index -1 加入根层叠上下文负相位，盖过 body 渐变、垫在全部内容之下 */
 .wallpaper-layer {
   position: fixed;
+  /* 父级 .app-shell 的 contain:paint 已会裁到圆角，这里再声明一次是为了让
+   「全出血层必须圆角」这条不变量自洽，不依赖对父级的具体实现 */
+  border-radius: var(--window-radius);
   inset: 0;
   z-index: -1;
   overflow: hidden;
@@ -1174,14 +1177,27 @@ provide('showToast', showToast)
     radial-gradient(1200px 900px at 55% 118%, var(--glow-c), transparent 55%);
 }
 
+/* 根容器 —— 同时是「主窗口的窗口本体」。
+ *
+ * 页面底色（--app-bg / 渐变预设）从 body 搬到了这里，因为只有带 border-radius
+ * 的元素才能把圆角外的像素裁掉；body 是铺满视口的矩形，留在那里会漏出方角。
+ * 对应 tauri.conf.json 主窗的 `transparent: true`。
+ *
+ * `contain: paint` 是**必需**的，不是优化：壁纸层是 `position: fixed`（inset:0），
+ * 而 fixed 元素默认相对视口定位，**不会被祖先的 overflow/border-radius 裁剪**——
+ * 不加 contain 的话就是「内容圆了、壁纸还是方的」，圆角处露出窗口外的桌面。
+ * `contain: paint` 让本元素成为 fixed 后代的包含块，壁纸随之被裁成同款圆角。
+ */
 .app-shell {
   min-height: 100dvh;
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: transparent;
+  background: var(--app-bg, var(--bg-page-surface));
+  border-radius: var(--window-radius);
   overflow: hidden;
   position: relative;
+  contain: paint;
 }
 
 .app-body {

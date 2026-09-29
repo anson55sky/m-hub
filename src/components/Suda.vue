@@ -904,6 +904,8 @@ function cardAccentStyle(r: Resource) {
 /* 拖拽导入遮罩 */
 .drop-overlay {
   position: fixed;
+  /* 拖拽遮罩同理：拖拽时整窗变方形是最扎眼的一次（见 check-rounded-window.mjs） */
+  border-radius: var(--window-radius);
   inset: 0;
   z-index: 250;
   background: color-mix(in srgb, var(--brand-500) 10%, transparent);

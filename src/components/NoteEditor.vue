@@ -1497,6 +1497,8 @@ function onEditorAreaMouseDown(e: MouseEvent) {
 /* 图片预览灯箱（Teleport 到 body，瞬态表面允许 backdrop-filter） */
 .img-lightbox {
   position: fixed;
+  /* 图片灯箱同理（见 check-rounded-window.mjs） */
+  border-radius: var(--window-radius);
   inset: 0;
   z-index: 200;
   display: flex;

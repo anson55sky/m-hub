@@ -777,6 +777,8 @@ onBeforeUnmount(() => {
 <style scoped>
 .fb-root {
   position: fixed;
+  /* 与窗口同款圆角：环形菜单展开时外沿本就是圆的，方角容器会露出直角 */
+  border-radius: var(--window-radius);
   inset: 0;
   pointer-events: none;
   transition: opacity 0.09s ease;

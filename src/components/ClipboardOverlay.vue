@@ -939,6 +939,8 @@ function fileName(item: ClipboardItem): string {
 /* 图片预览 */
 .cb-preview {
   position: fixed;
+  /* 剪贴板浮层图片预览同理（浮窗本体也是透明的） */
+  border-radius: var(--window-radius);
   inset: 0;
   z-index: 300;
   display: flex;
