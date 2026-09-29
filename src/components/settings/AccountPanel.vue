@@ -55,8 +55,20 @@ function authErrorText(e: unknown): { text: string; raw: string } {
   if (raw.startsWith('GITHUB_UNAVAILABLE')) {
     return { text: '登录服务暂时连不上 GitHub，请稍后再试（服务端网络问题，与你的网络无关）', raw }
   }
+  if (raw.startsWith('SERVER_ADDRESS_INVALID')) {
+    // 服务地址本身不可解析 —— 归因明确写清「不是你的网络」，否则用户会去查自己的网
+    return {
+      text:
+        '登录服务地址无法解析（域名不存在）。这不是你的网络问题，重试也不会好 —— ' +
+        '该服务当前不可用，登录与验证码等功能需要先有一个可用的服务地址。',
+      raw,
+    }
+  }
+  if (raw.startsWith('SERVER_TIMEOUT')) {
+    return { text: '登录服务没有响应（域名能解析，但服务无响应，可能已停机）', raw }
+  }
   if (raw.startsWith('NETWORK_ERROR')) {
-    return { text: '连不上登录服务器，请检查网络后重试', raw }
+    return { text: '连不上登录服务器（域名能解析，但连接失败）。可稍后重试。', raw }
   }
   // 轮询阶段的两个常见结果：用户在 GitHub 页点了「取消」，或等待窗口过期
   if (raw.includes('access_denied')) return { text: '你取消了 GitHub 授权', raw }

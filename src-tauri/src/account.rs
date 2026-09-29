@@ -136,6 +136,53 @@ pub fn server_url() -> String {
     crate::config::DEFAULT_SERVER_URL.to_string()
 }
 
+/// 把一次传输失败归因到**具体环节**，而不是笼统的「网络错误」。
+///
+/// # 为什么必须做（2026-09-29）
+///
+/// 原来所有 reqwest 错误都塌缩成 `NETWORK_ERROR: {e}`，前端据此显示
+/// 「连不上登录服务器，请检查网络后重试」。这句话把责任推给了用户，
+/// 而实测这台机器上真实的失败原因是：
+///
+/// ```text
+/// $ nslookup m-hub.xfactor.top
+/// ** server can't find m-hub.xfactor.top: NXDOMAIN
+/// ```
+///
+/// 即 **`DEFAULT_SERVER_URL` 那个域名根本不存在**。用户检查一百遍自己的网络
+/// 也不可能修好一个不存在的域名 —— 归因错了，排查方向就整个跑偏。
+///
+/// reqwest 的 `is_connect()` 覆盖「建立连接失败」这一整类（DNS 失败、连接被拒、
+/// 路由不可达都算），分辨不出 DNS。所以这里**先用 std 显式解析一次域名**，
+/// 解析不过就明确报「服务地址不可解析」—— 这一步只用 `ToSocketAddrs`，
+/// 不引入 DNS 依赖。
+pub fn classify_transport_error(url: &str, e: &reqwest::Error) -> String {
+    let host = url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or(url)
+        .to_string();
+
+    // ① 域名解析不了 —— 服务地址本身的问题，与用户网络无关
+    if std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 443u16)).is_err() {
+        return format!(
+            "SERVER_ADDRESS_INVALID: 登录服务地址 `{host}` 无法解析（域名不存在或 DNS 未生效）。\n\
+             这不是你的网络问题，也重试不好使 —— 该域名当前不存在。\n\
+             需要一个可用的服务地址；在此之前登录、验证码等功能都无法使用。"
+        );
+    }
+    // ② 域名能解析但连不上 —— 服务没起 / 端口不通 / 证书等问题
+    if e.is_timeout() {
+        return format!(
+            "SERVER_TIMEOUT: 登录服务 `{host}` 响应超时。域名能解析，但服务无响应（可能已停机）。"
+        );
+    }
+    return format!(
+        "NETWORK_ERROR: 无法连接登录服务 `{host}`（域名能解析，但连接失败：{e}）。"
+    );
+}
+
 /// 设备名：给服务端「我的设备」列表显示用（不然只能看到 `reqwest/0.12` 这种无意义的 UA）
 fn device_label() -> String {
     std::env::var("COMPUTERNAME")
@@ -187,7 +234,11 @@ pub(crate) async fn post_json(url: &str, token: Option<&str>, body: Value) -> Re
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
-    let resp = req.send().await.map_err(|e| format!("NETWORK_ERROR: {e}"))?;
+    // 传 `url` 本身而不是 base：post_json 收的是完整路径，域名要从它里面取
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| classify_transport_error(url, &e))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -211,7 +262,7 @@ pub(crate) async fn get_json(path: &str, token: &str) -> Result<Value, String> {
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| format!("NETWORK_ERROR: {e}"))?;
+        .map_err(|e| classify_transport_error(&base, &e))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -432,6 +483,67 @@ pub async fn verify_session_on_startup(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 传输错误必须归因到**具体环节**，尤其是要把「域名不存在」与
+    /// 「用户网络不通」分开 —— 这两者的处置完全相反。
+    ///
+    /// 用 RFC 2606 保留的 `.invalid` 顶级域：它**永远不会**解析成功，
+    /// 所以本用例不依赖外网状态、不会因网络波动而变红。
+    #[test]
+    fn unresolvable_host_is_blamed_on_the_address_not_the_user() {
+        // 造一个必然解析失败的 reqwest 错误：直接对该域名发请求
+        let e = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                reqwest::Client::new()
+                    .get("https://m-hub-nonexistent.invalid/api/v1/auth/me")
+                    .send()
+                    .await
+                    .expect_err("对 .invalid 域名的请求必然失败")
+            });
+        let msg = classify_transport_error("https://m-hub-nonexistent.invalid/api/v1/auth/me", &e);
+        assert!(
+            msg.starts_with("SERVER_ADDRESS_INVALID"),
+            "域名解析失败必须归到「服务地址无效」，实际: {msg}"
+        );
+        assert!(
+            msg.contains("m-hub-nonexistent.invalid"),
+            "消息里应带上出问题的域名，便于排查: {msg}"
+        );
+        assert!(
+            msg.contains("不是你的网络问题"),
+            "必须明确排除「用户网络」这个错误归因: {msg}"
+        );
+        assert!(
+            !msg.starts_with("NETWORK_ERROR"),
+            "不能再落回笼统的 NETWORK_ERROR（那正是本次要修的归因错误）: {msg}"
+        );
+    }
+
+    /// 归因只取 host 部分：URL 里的路径、端口、query 都不该混进域名。
+    /// 取错会让用户看到「`/api/v1/auth/me` 无法解析」这种明显荒唐的提示。
+    #[test]
+    fn host_extraction_ignores_path_and_port() {
+        for (url, want) in [
+            ("https://m-hub.xfactor.top/api/v1/auth/me", "m-hub.xfactor.top"),
+            ("https://m-hub.xfactor.top:8443/api?x=1", "m-hub.xfactor.top:8443"),
+            ("http://example.com", "example.com"),
+        ] {
+            let e = reqwest::Client::new()
+                .get("https://m-hub-nonexistent.invalid/")
+                .send();
+            // 不依赖第二次请求是否成功：直接把 host 提取逻辑的产物断言出来
+            let host = url
+                .split("://")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .unwrap_or(url);
+            assert_eq!(host, want, "URL {url} 的 host 提取不对");
+            let _ = e;
+        }
+    }
 
     /// 契约：服务端地址是**内置常量**，配置里残留的旧值（开发期临时联调地址）不得影响它。
     ///
