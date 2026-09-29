@@ -69,6 +69,28 @@ pub struct AppConfig {
     #[serde(default)]
     pub wallpaper_path: String,
 
+    // ---- 免打扰（2026-09-29 新增）----
+    /// 免打扰：开启期间**不弹**通知窗。默认关。
+    ///
+    /// 为什么要有：悬浮球、待办提醒、倒计时是三个**各自独立**触发的通道，
+    /// 用户没法用一处开关把���们一起静音。缺这个开关时它就会天天烦人，
+    /// 而用户唯一的办法是退出应用 —— 那等于把工具关掉了。
+    #[serde(default)]
+    pub dnd_enabled: bool,
+    /// 免打扰是否自动在「每天这个时段」开启（如 22:00–8:00 睡觉时段）。
+    ///
+    /// 默认 **false**：时段一旦默认打开，通知就会在 22:00–08:00 之间**静默地**
+    /// 不再弹出 —— 而用户从没要求过这件事，且要靠自己发现「提醒怎么不响了」。
+    /// 新增的功能默认都应当是「什么都没变」，要行为改变必须由用户显式打开。
+    #[serde(default)]
+    pub dnd_scheduled: bool,
+    /// 免打扰时段：起始小时（0–23，本地时区）。
+    #[serde(default = "default_dnd_start_hour")]
+    pub dnd_start_hour: i64,
+    /// 免打扰时段：结束小时（0–23，本地时区）。start > end 表示跨零点。
+    #[serde(default = "default_dnd_end_hour")]
+    pub dnd_end_hour: i64,
+
     // ---- 自动备份（2026-09-29 新增）----
     /// 自动备份的目标目录（绝对路径）。空 = 不做自动备份。
     ///
@@ -351,6 +373,18 @@ fn default_chat_panel_side() -> String {
     "right".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_dnd_start_hour() -> i64 {
+    22
+}
+
+fn default_dnd_end_hour() -> i64 {
+    8
+}
+
 fn default_auto_backup_hours() -> i64 {
     24
 }
@@ -369,10 +403,6 @@ fn default_chat_window_width() -> f64 {
 
 fn default_chat_window_height() -> f64 {
     640.0
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_wallpaper_veil() -> f64 {
@@ -448,6 +478,10 @@ impl Default for AppConfig {
             theme_preset: "indigo".to_string(),
             accent_color: None,
             wallpaper_path: String::new(),
+            dnd_enabled: false,
+            dnd_scheduled: false,
+            dnd_start_hour: default_dnd_start_hour(),
+            dnd_end_hour: default_dnd_end_hour(),
             auto_backup_dir: String::new(),
             auto_backup_hours: default_auto_backup_hours(),
             auto_backup_keep: default_auto_backup_keep(),

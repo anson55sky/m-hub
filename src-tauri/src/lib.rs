@@ -12,6 +12,7 @@ mod credentials;
 mod countdown_ticker;
 mod countdown_window;
 mod db;
+mod dnd;
 mod extension;
 mod ext_protocol;
 mod floating_ball;
@@ -979,6 +980,8 @@ pub fn run() {
             commands::backup_data,
             commands::restore_data,
             commands::get_auto_backup_config,
+            commands::get_dnd_config,
+            commands::set_dnd_config,
             commands::set_auto_backup_config,
             commands::get_data_path,
             commands::change_data_dir,

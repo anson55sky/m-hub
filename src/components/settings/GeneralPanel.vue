@@ -163,6 +163,56 @@ function commitNoticeDuration() {
     })
 }
 
+// ---- 免打扰（2026-09-29 新增）----
+// 为什么放在「常规」而不是「通知」：没有独立的通知分区，而免打扰正是通知的反面。
+// 显示「当前是否静音」而不是只显示开关：时段生效时两者会不一致，只显示开关的话
+// 用户会看到「免打扰：关」却发现通知真没弹出来（设置本身没错，是时段在起作用）。
+const dndEnabled = ref(false)
+const dndScheduled = ref(false)
+const dndStart = ref(22)
+const dndEnd = ref(8)
+const dndActiveNow = ref(false)
+const dndSaving = ref(false)
+
+const HOUR_LABELS = Array.from({ length: 24 }, (_, h) => ({
+  v: h,
+  label: `${String(h).padStart(2, '0')}:00`,
+}))
+
+async function loadDnd() {
+  if (!isTauri()) return
+  try {
+    const c = await tauriApi.getDndConfig()
+    dndEnabled.value = c.enabled
+    dndScheduled.value = c.scheduled
+    dndStart.value = c.startHour
+    dndEnd.value = c.endHour
+    dndActiveNow.value = c.activeNow
+  } catch (e) {
+    showToast(`读取免打扰设置失败：${String(e)}`)
+  }
+}
+
+/** 立即生效：改完就重新问一次后端当前状态，不靠本地推算（时段边界逻辑在 Rust 侧） */
+async function saveDnd() {
+  if (!isTauri() || dndSaving.value) return
+  dndSaving.value = true
+  try {
+    const r = await tauriApi.setDndConfig(
+      dndEnabled.value,
+      dndScheduled.value,
+      Number(dndStart.value),
+      Number(dndEnd.value),
+    )
+    dndActiveNow.value = r.activeNow
+    showToast(dndActiveNow.value ? '免打扰已生效' : '免打扰已关闭')
+  } catch (e) {
+    showToast(`设置失败：${String(e)}`)
+  } finally {
+    dndSaving.value = false
+  }
+}
+
 // ---- 开机自启动 ----
 // macOS 上自启动项叫「登录项」（系统设置 → 通用 → 登录项），托盘叫「菜单栏」。
 // 文案里出现别的平台的词 = 用户去设置里找不到对应开关。
@@ -249,6 +299,8 @@ onMounted(async () => {
 
   noticeSeconds.value = Math.round((store.state.config.notice_duration_ms ?? 5000) / 1000)
 
+  void loadDnd()
+
   void refreshAutostartStatus()
 
 })
@@ -301,6 +353,78 @@ onMounted(async () => {
               />
               <span class="num-unit">秒</span>
             </div>
+          </div>
+
+          <!-- 免打扰（2026-09-29 新增）。
+               开关复用本面板既有的 `.toggle` 模式（含 role="switch" + aria-checked），
+               而不是另造一个按钮：另造的话读屏用户拿不到开关语义，
+               且两份「开关长什么样」日后必然分叉。 -->
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">
+                免打扰
+                <span v-if="dndActiveNow" class="dnd-now">当前静音中</span>
+              </span>
+              <span class="setting-desc">
+                静音待办提醒、倒计时等右下角弹窗。静音期间的通知**仍会被记下**，
+                解除后可以在通知窗里看到夜里错过的内容
+              </span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="dndEnabled"
+              :class="{ on: dndEnabled }"
+              @click="dndEnabled = !dndEnabled"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">定时免打扰</span>
+              <span class="setting-desc">
+                每天在固定时段静音（如 22:00–08:00）。与上面的开关是「或」的关系：
+                手动开启则任何时候都静音
+              </span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="dndScheduled"
+              :class="{ on: dndScheduled }"
+              @click="dndScheduled = !dndScheduled"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          <div v-if="dndScheduled" class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">静音时段</span>
+              <span class="setting-desc">起止相同视为「未启用」，不会变成全天静音</span>
+            </div>
+            <div class="dnd-range">
+              <select v-model.number="dndStart" class="dnd-select" aria-label="静音开始小时">
+                <option v-for="h in HOUR_LABELS" :key="'s' + h.v" :value="h.v">{{ h.label }}</option>
+              </select>
+              <span class="dnd-dash">至</span>
+              <select v-model.number="dndEnd" class="dnd-select" aria-label="静音结束小时">
+                <option v-for="h in HOUR_LABELS" :key="'e' + h.v" :value="h.v">{{ h.label }}</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-desc">修改后需点保存才生效</span>
+            </div>
+            <button class="ghost-btn dnd-save" :disabled="dndSaving" @click="saveDnd">
+              {{ dndSaving ? '保存中…' : '保存' }}
+            </button>
           </div>
         </section>
 

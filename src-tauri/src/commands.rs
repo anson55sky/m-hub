@@ -4057,3 +4057,47 @@ pub fn set_auto_backup_config(
     }
     Ok(())
 }
+
+// ---------- 免打扰 ----------
+
+/// 读取免打扰设置（含**当前是否正处于静音中**）。
+///
+/// 返回「当前是否静音」而不只是配置，是为了让 UI 显示**实际状态**而不是
+/// 「你设的那个开关」—— 两者在时段生效时会不一致，只显示配置的话用户会看到
+/// 「免打扰：关」却发现通知真的没弹出来。
+#[tauri::command]
+pub fn get_dnd_config() -> Result<serde_json::Value, String> {
+    let c = crate::config::load();
+    Ok(serde_json::json!({
+        "enabled": c.dnd_enabled,
+        "scheduled": c.dnd_scheduled,
+        "startHour": c.dnd_start_hour,
+        "endHour": c.dnd_end_hour,
+        "activeNow": crate::dnd::active(),
+    }))
+}
+
+/// 改免打扰设置。
+///
+/// `activeNow` 按改完之后的配置重算，让前端立刻显示新状态 —— 否则要等下一次
+/// 通知推送才知道有没有生效。
+#[tauri::command]
+pub fn set_dnd_config(
+    enabled: bool,
+    scheduled: bool,
+    start_hour: i64,
+    end_hour: i64,
+) -> Result<serde_json::Value, String> {
+    {
+        let _guard = crate::config::lock();
+        let mut c = crate::config::load();
+        c.dnd_enabled = enabled;
+        c.dnd_scheduled = scheduled;
+        // 夹到 0–23：配置是从 UI 来的，但配置 JSON 也可能被手改。
+        // 越界值会让 `in_window` 的区间判断给出看似随机（实为 rem_euclid）的结果。
+        c.dnd_start_hour = start_hour.rem_euclid(24);
+        c.dnd_end_hour = end_hour.rem_euclid(24);
+        crate::config::save(&c)?;
+    }
+    Ok(serde_json::json!({ "activeNow": crate::dnd::active() }))
+}

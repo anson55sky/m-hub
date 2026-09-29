@@ -90,6 +90,15 @@ fn build_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 /// 推送一条通知：确保窗口存在 → 先定位并无激活显示 → emit `notice-new` 给前端渲染。
 /// `kind` 供前端选图标/配色（"countdown" | "todo" | "info" ...）。
 pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
+    // 免打扰判定放在**所有**通知的必经之路上，而不是各调用方自己判。
+    // 放在别处的话，每加一个通知源就要记得加一次判断，而漏一次是静默的
+    // （「免打扰开着但它还是弹」）。
+    //
+    // 注意语义是「静默」不是「丢弃」：卡片仍然 emit 出去，只是**不弹窗**。
+    // 用户早上解除免打扰后应当能看到夜里错过的东西；全丢等于「提醒消失了」，
+    // 那是比打扰更糟的失败。
+    let silent = crate::dnd::active();
+
     let win = match ensure_window(app) {
         Ok(w) => w,
         Err(e) => {
@@ -102,12 +111,14 @@ pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
     // notice_ready 依赖页面 onMounted 触发——不显示的话「暂存等就绪」会自锁死，
     // 弹窗整体失联（v0.5.3 发版批次实测踩坑）。空窗完全透明，多显示一两秒无感
     if !NOTICE_READY.load(Ordering::Relaxed) {
-        {
-            #[cfg(target_os = "windows")]
-            anchor_default_and_show(&win);
-            #[cfg(not(target_os = "windows"))]
+        if !silent {
             {
-                let _ = win.show();
+                #[cfg(target_os = "windows")]
+                anchor_default_and_show(&win, silent);
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = win.show();
+                }
             }
         }
         let mut q = pending_notices().lock().unwrap_or_else(|p| p.into_inner());
@@ -134,18 +145,23 @@ pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
         drop(q);
         log::info!("通知在暂存瞬间前端恰好就绪，直接推送: [{kind}] {title}");
     }
-    // 已在展示堆叠：只保证显示，不动尺寸/位置——重置回默认高度会让已展示的卡片
-    // 被瞬时裁切、再经一次 IPC 往返校正回来（肉眼可见跳动）；高度交给 notice_layout 增量校正
-    if win.is_visible().unwrap_or(false) {
+    // 免打扰：卡片照常 emit，但不碰窗口的可见性。
+    // 刻意**不**去 hide 一个已经显示着的窗口 —— 那是用户解除免打扰前自己
+    // 手动打开的，把它按下去是越权。
+    if silent {
+        log::info!("[免打扰] 已静默记下一条通知: [{kind}] {title}");
+    } else if win.is_visible().unwrap_or(false) {
+        // 已在展示堆叠：只保证显示，不动尺寸/位置——重置回默认高度会让已展示的卡片
+        // 被瞬时裁切、再经一次 IPC 往返校正回来（肉眼可见跳动）；高度交给 notice_layout 增量校正
         #[cfg(target_os = "windows")]
-        show_no_activate(&win);
+        show_no_activate(&win, silent);
         #[cfg(not(target_os = "windows"))]
         {
             let _ = win.show();
         }
     } else {
         // 首帧：先定位 + 显示（不依赖隐藏 WebView2 处理事件的时序），高度随后校正
-        anchor_default_and_show(&win);
+        anchor_default_and_show(&win, silent);
     }
     // 驻留时长随每条通知一起下发（设置 → 常规可调）：通知窗是启动期预创建、常驻不重启的，
     // 若让前端自己读一次配置，改了设置也得等下次启动才生效
@@ -154,12 +170,20 @@ pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
         "kind": kind,
         "title": title,
         "body": body,
-        "durationMs": duration_ms
+        "durationMs": duration_ms,
+        // 免打扰时不自动消失：窗口没显示，卡片若照常倒计时会在用户根本没看见的
+        // 情况下被撤掉 —— 那就等于丢弃，与「静默记下」的承诺相反。
+        // 由前端据此跳过倒计时，等用户解除免打扰后自行处理。
+        "silent": silent
     });
     if let Err(e) = app.emit_to(NOTICE_LABEL, "notice-new", &payload) {
         log::warn!("通知事件投递失败: {e}");
     }
-    log::info!("已推送右下角通知: [{kind}] {title}");
+    if silent {
+        // 上面已打过一条「已静默记下」，这里不再重复
+    } else {
+        log::info!("已推送右下角通知: [{kind}] {title}");
+    }
 }
 
 /// 窗口只取预创建实例。**不做运行时 build 兜底**：预创建失败说明启动期建窗已出问题，
@@ -189,19 +213,24 @@ pub fn notice_ready(app: AppHandle) {
 }
 
 /// 用默认高度把窗口锚到右下角并无激活显示（供推送首帧；精确高度随后由 notice_layout 校正）。
-fn anchor_default_and_show(win: &WebviewWindow) {
+/// 定位到默认位置并显示。同样由本函数自己判免打扰（理由见 `show_no_activate`）。
+fn anchor_default_and_show(win: &WebviewWindow, silent: bool) {
+    if silent {
+        return;
+    }
     #[cfg(target_os = "windows")]
     {
         apply_size(win, NOTICE_WIDTH, NOTICE_DEFAULT_HEIGHT);
         anchor_bottom_right(win, NOTICE_WIDTH, NOTICE_DEFAULT_HEIGHT);
-        show_no_activate(win);
+        show_no_activate(win, false);
     }
     #[cfg(not(target_os = "windows"))]
     {
         apply_size(win, NOTICE_WIDTH, NOTICE_DEFAULT_HEIGHT);
         simple_bottom_right(win, NOTICE_WIDTH, NOTICE_DEFAULT_HEIGHT);
-        // 走 show_no_activate 而非裸 show：通知弹出不得抢走用户正在输入的焦点
-        show_no_activate(win);
+        // 走 show_no_activate 而非裸 show：通知弹出不得抢走用户正在输入的焦点。
+        // 传 false：免打扰已在本函数开头挡掉，这里再判一次是冗余的
+        show_no_activate(win, false);
     }
 }
 
@@ -228,11 +257,19 @@ pub fn notice_layout(app: AppHandle, height: f64) -> Result<(), String> {
         .get_webview_window(NOTICE_LABEL)
         .ok_or_else(|| "通知窗不存在".to_string())?;
     let h = height.clamp(1.0, 1600.0);
+    // ⚠️ 免打扰必须在这里也判一次，不能只在 `show_notice` 判。
+    // 前端每张卡片入场后都会回调 `notice_layout` 量高，而这条路径末尾自带
+    // `show()` —— 所以只在 `show_notice` 门禁的话，一张**静默卡片**会通过
+    // 「入场 → 量高 → 显示」把窗口弹出来，免打扰当场失效。
+    // 尺寸与定位照做（窗口可能被别的入口显示出来），只是不把它显示出来。
+    let silent = crate::dnd::active();
     #[cfg(target_os = "windows")]
     {
         apply_size(&win, NOTICE_WIDTH, h);
         anchor_bottom_right(&win, NOTICE_WIDTH, h);
-        show_no_activate(&win);
+        if !silent {
+            show_no_activate(&win, silent);
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -241,7 +278,9 @@ pub fn notice_layout(app: AppHandle, height: f64) -> Result<(), String> {
             h,
         )));
         simple_bottom_right(&win, NOTICE_WIDTH, h);
-        let _ = win.show();
+        if !silent {
+            let _ = win.show();
+        }
     }
     Ok(())
 }
@@ -317,7 +356,16 @@ fn anchor_bottom_right(win: &WebviewWindow, width_logical: f64, height_logical: 
 
 /// 无激活显示：加 WS_EX_NOACTIVATE 后 SW_SHOWNA——通知不该抢走用户当前输入焦点。
 #[cfg(target_os = "windows")]
-fn show_no_activate(win: &WebviewWindow) {
+/// 无激活地显示窗口。
+///
+/// `silent` 是**必填**参数，不是可选的便利开关：让「要不要弹」由这一个函数自己判，
+/// 而不是散在各调用方。这样做的代价是多穿一个布尔值，换来的是
+/// `scripts/check-notice-dnd-gate.mjs` 能机械校验「每一个让窗口可见的函数里
+/// 都有免打扰判断」—— 之前靠调用方自觉，加一处新调用点就会静默失配。
+fn show_no_activate(win: &WebviewWindow, silent: bool) {
+    if silent {
+        return;
+    }
     // 先恢复内存级别再显示（webview_mem：Low 态缓存已吐，通知首帧前回 Normal）
     crate::webview_mem::on_shown(win.app_handle(), win.label());
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -357,7 +405,10 @@ fn hide_window(win: &WebviewWindow) {
 /// 通知绝不该抢走用户正在输入的焦点——这与剪贴板浮层同一条理由，
 /// 只是通知更「无关于我」，抢焦点的代价更大。
 #[cfg(target_os = "macos")]
-fn show_no_activate(win: &WebviewWindow) {
+fn show_no_activate(win: &WebviewWindow, silent: bool) {
+    if silent {
+        return;
+    }
     // 先恢复内存级别再显示（mac 上是 no-op，但保持两平台调用点同构）
     crate::webview_mem::on_shown(win.app_handle(), win.label());
     if !crate::mac::set_nonactivating_panel(win) {
@@ -369,7 +420,10 @@ fn show_no_activate(win: &WebviewWindow) {
 
 /// 其余平台：Tauri 的 `show()` 已经足够
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn show_no_activate(win: &WebviewWindow) {
+fn show_no_activate(win: &WebviewWindow, silent: bool) {
+    if silent {
+        return;
+    }
     crate::webview_mem::on_shown(win.app_handle(), win.label());
     let _ = win.show();
     crate::win_taskbar::apply(win);

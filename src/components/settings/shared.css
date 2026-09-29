@@ -987,3 +987,46 @@
 }
 
 /* 更改数据存储路径弹窗 */
+
+/* ---- 免打扰（2026-09-29 新增）----
+   放在共享样式而不是 GeneralPanel 的 <style>：该面板本身没有样式块
+   （见 settings/shared.css 顶部说明 —— 设置页样式统一收在这里），且守卫
+   check-settings-css.mjs 要求每条规则都带 .settings-view 前缀。 */
+.settings-view .dnd-now {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-card-hover, var(--bg-card-solid));
+  border: 1px solid var(--border-soft);
+  font-size: 0.6875rem;
+  font-weight: 400;
+  color: var(--text-2);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.settings-view .dnd-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.settings-view .dnd-dash {
+  font-size: 0.75rem;
+  color: var(--text-3);
+}
+.settings-view .dnd-select {
+  padding: 4px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--bg-input, transparent);
+  color: var(--text-1);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+.settings-view .dnd-select:focus-visible {
+  outline: 2px solid var(--brand-500);
+  outline-offset: 1px;
+}
+.settings-view .dnd-save {
+  flex: 0 0 auto;
+}

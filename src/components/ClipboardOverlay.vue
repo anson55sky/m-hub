@@ -4,11 +4,14 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
 import { emit, listen } from '@tauri-apps/api/event'
-import { Boxes, Copy, Download, FileText, Pin, PinOff, Search, Trash2, X, ZoomIn } from 'lucide-vue-next'
+import { Boxes, Copy, Download, FileText, Link2, ListTodo, Pin, PinOff, Search, Trash2, X, ZoomIn } from 'lucide-vue-next'
 import { isTauri, tauriApi, type ClipboardInfo, type ClipboardItem } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { useTheme } from '../composables/useTheme'
 import { parseTimestamp } from '../utils/time'
+// 复用统一捕获框的同一套解析器：剪贴板转待办与捕获框走**同一份**时间解析规则，
+// 两处各写一套的话，改了一处另一处就会静默失配。
+import { parseCapture } from '../utils/capture'
 
 const store = useStore()
 useTheme()
@@ -212,6 +215,65 @@ async function onSaveNote(item: ClipboardItem) {
     toast('已存为速记')
   } catch (e) {
     toast(`保存失败：${String(e)}`)
+  }
+}
+
+/**
+ * 转为待办（2026-09-29 新增）。
+ *
+ * 与已有的「存为速记 / 加入提示词库」同构，但**会解析时间**：
+ * 复制来的内容常是「明天下午3点交周报」这种带时间的句子，
+ * 直接建成待办却丢掉时间，等于让用户再手输一遍。
+ * 所以复用统一捕获的那套解析（`utils/capture`）——
+ * 与「统一捕获框」共用同一个解析器，解析规则只有一份。
+ */
+async function onSaveTodo(item: ClipboardItem) {
+  if (!isTauri()) return
+  try {
+    const plan = parseCapture(item.content)
+    // 只在「真的是待办」时才建；否则退回存速记，而不是硬塞一条空待办
+    if (plan.dest !== 'todo') {
+      await onSaveNote(item)
+      toast('已存为速记（内容里没认出待办和时间）')
+      return
+    }
+    const t = await store.createTodo(plan.text)
+    if (plan.dueAt != null && t?.id != null) await store.scheduleTodo(t.id, plan.dueAt, null)
+    await emit('todos-changed')
+    toast(plan.dueAt != null ? '已加入待办（含时间）' : '已加入待办')
+  } catch (e) {
+    toast(`保存失败：${String(e)}`)
+  }
+}
+
+/**
+ * 提取链接（2026-09-29 新增）。
+ *
+ * 剪贴板里常见的是「一整段文字里夹着几个链接」，真正想要的是那几个链接。
+ * 只在**确实有链接**时才出现这个按钮：给一条普通文本挂一个提链接的按钮，
+ * 点了只能得到「没找到链接」，那是噪音。
+ */
+function extractUrls(text: string): string[] {
+  const out: string[] = []
+  for (const m of text.matchAll(/https?:\/\/[^\s，。；、）)】"'<>]+/g)) {
+    const u = m[0].replace(/[.,;:!?]+$/, '')
+    if (!out.includes(u)) out.push(u)
+  }
+  return out
+}
+
+function itemUrls(item: ClipboardItem): string[] {
+  return item.kind === 'text' ? extractUrls(item.content) : []
+}
+
+async function onExtractLinks(item: ClipboardItem) {
+  const urls = itemUrls(item)
+  if (urls.length === 0) return
+  try {
+    await navigator.clipboard.writeText(urls.join('\n'))
+    toast(urls.length === 1 ? '已复制该链接' : `已复制 ${urls.length} 个链接`)
+  } catch {
+    toast('复制失败')
   }
 }
 
@@ -492,6 +554,17 @@ function fileName(item: ClipboardItem): string {
               </button>
               <button v-if="item.kind === 'text'" class="cb-a" title="存为速记" @click.stop="onSaveNote(item)">
                 <FileText :size="14" :stroke-width="2" />
+              </button>
+              <button v-if="item.kind === 'text'" class="cb-a" title="转为待办（会认出时间）" @click.stop="onSaveTodo(item)">
+                <ListTodo :size="14" :stroke-width="2" />
+              </button>
+              <button
+                v-if="item.kind === 'text' && itemUrls(item).length > 0"
+                class="cb-a"
+                :title="`提取 ${itemUrls(item).length} 个链接`"
+                @click.stop="onExtractLinks(item)"
+              >
+                <Link2 :size="14" :stroke-width="2" />
               </button>
               <button v-if="item.kind === 'text'" class="cb-a" title="加入提示词库" @click.stop="onSavePrompt(item)">
                 <Boxes :size="14" :stroke-width="2" />

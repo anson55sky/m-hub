@@ -1066,6 +1066,13 @@ export const tauriApi = {
     invoke<void>('set_note_tags', { noteId, tagIds }),
   listNoteTags: () => invoke<NoteTagRow[]>('list_note_tags'),
   backupData: (targetDir: string) => invoke<string>('backup_data', { targetDir }),
+  getDndConfig: () => invoke<{
+    enabled: boolean; scheduled: boolean; startHour: number; endHour: number; activeNow: boolean
+  }>('get_dnd_config'),
+  setDndConfig: (enabled: boolean, scheduled: boolean, startHour: number, endHour: number) =>
+    invoke<{ activeNow: boolean }>('set_dnd_config', {
+      enabled, scheduled, startHour, endHour,
+    }),
   getAutoBackupConfig: () => invoke<{
     dir: string; hours: number; keep: number; lastMs: number
   }>('get_auto_backup_config'),

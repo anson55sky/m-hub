@@ -68,7 +68,14 @@ function dismiss(uid: number) {
   items.value = items.value.filter((n) => n.uid !== uid)
 }
 
-function push(item: Omit<NoticeItem, 'uid'>, durationMs?: number) {
+/**
+ * @param silent 免打扰期间后端推来的通知（见 notify.rs）。
+ *
+ * 这类卡片**不自动消失**：免打扰时后端根本没有弹窗（窗口保持隐藏），
+ * 若照常倒计时，卡片会在用户根本没看见的情况下被撤掉 —— 那就等于丢弃，
+ * 与「静默记下、之后能看到」的承诺相反。
+ */
+function push(item: Omit<NoticeItem, 'uid'>, durationMs?: number, silent = false) {
   const it: NoticeItem = { uid: uidSeq++, ...item }
   items.value.push(it)
   // 超量：立即挤掉最旧（TransitionGroup 会为其播放离场）
@@ -76,7 +83,9 @@ function push(item: Omit<NoticeItem, 'uid'>, durationMs?: number) {
     const old = items.value.shift()
     if (old) clearTimer(old.uid)
   }
-  startTimer(it.uid, durationMs && durationMs > 0 ? durationMs : FALLBACK_DISMISS_MS)
+  if (!silent) {
+    startTimer(it.uid, durationMs && durationMs > 0 ? durationMs : FALLBACK_DISMISS_MS)
+  }
   // 新卡片入场后立即量高（入场动画只横向滑入，不影响布局高度）
   void syncLayout()
 }
@@ -91,9 +100,16 @@ onMounted(async () => {
   } catch {
     /* 无后端时保持默认 */
   }
-  unlistenNew = await listen<{ kind?: string; title?: string; body?: string; durationMs?: number }>('notice-new', (e) => {
+  unlistenNew = await listen<{
+    kind?: string
+    title?: string
+    body?: string
+    durationMs?: number
+    /** 免打扰期间后端只「记下」不弹窗，此时不挂自动消失的倒计时 */
+    silent?: boolean
+  }>('notice-new', (e) => {
     const p = e.payload ?? {}
-    push({ kind: p.kind || 'info', title: p.title || '通知', body: p.body || '' }, p.durationMs)
+    push({ kind: p.kind || 'info', title: p.title || '通知', body: p.body || '' }, p.durationMs, p.silent === true)
   })
   unlistenTheme = await listen<{ mode?: string; preset?: string; accent?: string | null }>(
     'notice-theme',
