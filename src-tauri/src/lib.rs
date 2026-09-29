@@ -1130,11 +1130,50 @@ pub fn run() {
             tauri::RunEvent::Reopen {
                 has_visible_windows, ..
             } => {
-                log::info!("收到程序坞重新打开（has_visible_windows={has_visible_windows}）");
-                if !has_visible_windows {
+                // ⚠️ 判据**必须问主窗自己**，不能用事件的 `has_visible_windows`
+                // （2026-09-29 修：第一版就栽在这里，实测日志连续 8 次
+                //   has_visible_windows=true，一次都没进 show_window 分支）。
+                // 原因：那个字段的含义是「**本 App 有没有任意可见窗口**」，
+                // 而**悬浮球**一直是可见的 —— 它不随主窗隐藏而隐藏。
+                // 所以只要开了悬浮球，这个字段就恒为 true，
+                // 「主窗已隐藏至托盘」这个真正需要处理的情况反而被漏掉，
+                // 表现就是：点红绿灯关闭后再点程序坞图标，**什么都不发生**。
+                //
+                // 正确判据分三种，与 tray::show_window 覆盖的范围一致：
+                //   ① 不可见（隐藏至托盘）→ show + unminimize + focus
+                //   ② 可见但最小化          → 同上（show_window 里带 unminimize）
+                //   ③ 可见且未最小化        → 只激活，把它拉到前台即可，
+                //                              **不要**顺手改窗口显隐
+                let main = crate::main_window(app);
+                let visible = main
+                    .as_ref()
+                    .and_then(|w| w.is_visible().ok())
+                    .unwrap_or(false);
+                let minimized = main
+                    .as_ref()
+                    .and_then(|w| w.is_minimized().ok())
+                    .unwrap_or(false);
+                log::info!(
+                    "收到程序坞重新打开：has_visible_windows={has_visible_windows}                      主窗可见={visible} 已最小化={minimized}"
+                );
+                // 两个信号取「或」：窗口自身的 is_visible（权威但依赖 AppKit）
+                // 与本工程自维护的显隐状态（tray.rs 用自己的 show/hide 调用维护，
+                // 不依赖系统接口 —— 那边注释写了「在多屏/远程桌面/DPI 缩放下
+                // 系统接口会返回不准确的值」，这正是不能只信单一来源的理由）。
+                let tracked_visible = tray::is_main_window_visible();
+                if !visible || minimized || !tracked_visible {
+                    log::info!("程序坞重开 → 显示主窗（visible={visible} minimized={minimized} tracked={tracked_visible}）");
                     tray::show_window(app);
+                } else {
+                    // 已开着就只是「拉到前台」，不重复 show（避免窗口闪一下）
+                    log::info!("程序坞重开 → 主窗已开着，仅拉到前台");
+                    if let Some(w) = main {
+                        let _ = w.set_focus();
+                    }
                 }
-                // 无论有没有可见窗口都要激活，否则点图标像是完全无响应
+                // 无论哪种都要激活：最后一个窗口隐藏后 NSApplication 处于
+                // 「无可见窗口」状态，系统回焦规则不会自动把本应用拉到前台，
+                // 不显式 activate 的话点了图标像是完全无响应。
                 mac::activate_self();
             }
             // 宿主退出：停止所有 service 后端进程，避免 Node 子进程残留
