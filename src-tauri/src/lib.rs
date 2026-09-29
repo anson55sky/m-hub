@@ -4,6 +4,7 @@ mod autostart;
 mod browsers;
 mod chat;
 mod chat_window;
+mod auto_backup;
 mod clipboard;
 mod commands;
 mod config;
@@ -657,6 +658,10 @@ pub fn run() {
                 }
             }
 
+            // 自动备份守护线程（2026-09-29）。默认关闭（需用户显式选目录），
+            // 启动它没有副作用 —— 它只在自己那一跳判断「到点没到」。
+            auto_backup::start(app.handle().clone());
+
             // 旧版本（com.workbench.desktop 标识）数据迁移到 m-hub 目录
             migrate_legacy_data();
 
@@ -973,6 +978,8 @@ pub fn run() {
             commands::list_note_tags,
             commands::backup_data,
             commands::restore_data,
+            commands::get_auto_backup_config,
+            commands::set_auto_backup_config,
             commands::get_data_path,
             commands::change_data_dir,
             commands::restart_app,

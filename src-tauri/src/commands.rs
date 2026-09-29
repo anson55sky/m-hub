@@ -1838,23 +1838,24 @@ fn rewrite_db_paths(db_file: &std::path::Path, data_root: &std::path::Path, to_r
 #[tauri::command]
 pub fn backup_data(state: State<'_, DbState>, target_dir: String) -> Result<String, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    make_backup(&conn, std::path::Path::new(&target_dir))
+    write_backup_archive(&conn, std::path::Path::new(&target_dir), None)
 }
 
-/// 备份的主体（2026-09-29 从 `backup_data` 抽出，让它可被测试直接调用）。
+/// 备份的主体：把运行中的库打包成 zip 落到 `target`，返回文件名。
 ///
-/// 抽出前这条路径**没有端到端测试**：测试只能直接调 `rewrite_db_paths` 这个辅助
-/// 函数，于是「`backup_data` 里那句 `rewrite_db_paths(&tmp_db, …)` 被删掉」这种
-/// 改动不会有任何测试失败 —— 而它恰恰是最容易被重构顺手删掉的一行
-/// （我实测过：去掉那句，测试照样全绿）。现在测试跑的是**生产路径本身**。
-fn make_backup(conn: &Connection, target: &std::path::Path) -> Result<String, String> {
+/// `name_override` 为 None 时用时间戳命名。抽成独立函数是为了让
+/// `auto_backup` 复用**同一份**逻辑 —— 手动备份与自动备份若各写一份，
+/// 手动备份这边修好的问题（可移植路径改写、临时库清理）会漏掉自动那份。
+pub fn write_backup_archive(
+    conn: &Connection,
+    target: &std::path::Path,
+    name_override: Option<&str>,
+) -> Result<String, String> {
     let app_data = crate::paths::data_root().to_path_buf();
     std::fs::create_dir_all(target).map_err(|e| format!("创建备份目录失败: {}", e))?;
 
-    // 1. 在线备份数据库到临时文件（运行中数据库被占用，不能直接复制；WAL 安全）
-    // 临时文件名必须**每次调用唯一**：原先只带 pid，而同进程内连点两次「备份」
-    // 就会共用同一个文件 —— 两个 `conn.backup` 交错往同一路径写，
-    // 产出的压缩包可能是半截的数据库。
+    // 临时库文件名必须**每次调用唯一**：只带 pid 的话，同进程内两次并发备份
+    // 会写同一个文件、两个 conn.backup 交错出半截的库。
     let tmp_db = std::env::temp_dir().join(format!(
         "m-hub-backup-{}-{}.db",
         std::process::id(),
@@ -1863,27 +1864,34 @@ fn make_backup(conn: &Connection, target: &std::path::Path) -> Result<String, St
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
+    // guard 负责**无论成败**都清掉临时库：它落在系统临时目录，残留会跨天累积
+    // （每份几十 MB）。原先只在成功分支清理、失败分支不清理 ——
+    // 而自动备份失败时走的正是失败分支，等于每次失败留一份几十 MB 的垃圾。
+    let _cleanup = TempFileGuard(tmp_db.clone());
+
+    // 1. 在线备份数据库到临时文件（运行中数据库被占用，不能直接复制；WAL 安全）
     conn.backup("main", &tmp_db, None)
         .map_err(|e| format!("备份数据库失败: {}", e))?;
 
     // 2. 把库里的数据根绝对路径改写成可移植形式（见 rewrite_db_paths 的说明）
     rewrite_db_paths(&tmp_db, &app_data, true);
 
-    // 3. 生成压缩包文件名（带时间戳，多次备份互不覆盖）
-    let name = format!(
-        "m-hub-backup-{}.zip",
-        chrono::Local::now().format("%Y%m%d-%H%M%S")
-    );
+    let name = match name_override {
+        Some(n) => n.to_string(),
+        None => format!(
+            "m-hub-backup-{}.zip",
+            chrono::Local::now().format("%Y%m%d-%H%M%S")
+        ),
+    };
     let zip_path = target.join(&name);
 
-    // 4. 打包成单个压缩包
+    // 3. 打包成单个压缩包
     let out = std::fs::File::create(&zip_path)
         .map_err(|e| format!("创建备份压缩包失败: {}", e))?;
     let mut zip = zip::ZipWriter::new(out);
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    // app.db
     zip.start_file("app.db", opts).map_err(|e| e.to_string())?;
     {
         let mut f = std::fs::File::open(&tmp_db).map_err(|e| e.to_string())?;
@@ -1898,10 +1906,18 @@ fn make_backup(conn: &Connection, target: &std::path::Path) -> Result<String, St
 
     zip.finish()
         .map_err(|e| format!("完成备份压缩包失败: {}", e))?;
-    let _ = std::fs::remove_file(&tmp_db);
-
     log::info!("数据备份完成 -> {}", zip_path.display());
     Ok(name)
+}
+
+/// 析构时删掉临时文件的守卫。用 RAII 而不是在每条返回路径上手写
+/// `let _ = remove_file` —— 后者漏一条就是一个几十 MB 的残留。
+struct TempFileGuard(std::path::PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// 递归把目录写入压缩包（压缩包内路径统一用 `/` 分隔）
@@ -3924,7 +3940,7 @@ mod tests {
 
     /// 端到端跑一遍**生产用的**备份路径，检查压缩包里的库确实不含原机器绝对路径。
     ///
-    /// 这条覆盖的是「`make_backup` 里那句 `rewrite_db_paths(&tmp_db, …)` 有没有被
+    /// 这条覆盖的是「`write_backup_archive` 里那句 `rewrite_db_paths(&tmp_db, …)` 有没有被
     /// 调用」。此前只有针对 `rewrite_db_paths` 辅助函数的单测，把那一句删掉
     /// 测试照样全绿 —— 而备份功能会静默退化成不可移植，且没有任何症状。
     #[test]
@@ -3943,7 +3959,7 @@ mod tests {
         crate::repo::clipboard::insert_image(&conn, "h1", &abs_img, None).unwrap();
 
         // 真实调用生产路径
-        let name = make_backup(&conn, &dir).unwrap();
+        let name = write_backup_archive(&conn, &dir, None).unwrap();
         let zip_path = dir.join(&name);
         assert!(zip_path.exists(), "应生成压缩包: {name}");
 
@@ -3977,4 +3993,67 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+// ---------- 自动备份设置 ----------
+
+/// 读取自动备份设置（目录 / 间隔小时 / 保留份数 / 上次备份时刻）。
+#[tauri::command]
+pub fn get_auto_backup_config() -> Result<serde_json::Value, String> {
+    let c = crate::config::load();
+    Ok(serde_json::json!({
+        "dir": c.auto_backup_dir,
+        "hours": c.auto_backup_hours,
+        "keep": c.auto_backup_keep,
+        "lastMs": c.auto_backup_last_ms,
+    }))
+}
+
+/// 改自动备份设置。`hours <= 0` 或空目录 = 关闭自动备份。
+///
+/// 改完**立即备份一次**（若已启用）：用户刚配好就等 24 小时才看到效果，
+/// 无法判断「到底有没有生效」。这次的产物就是轮转后的第一份。
+#[tauri::command]
+pub fn set_auto_backup_config(
+    state: State<'_, DbState>,
+    dir: String,
+    hours: i64,
+    keep: i64,
+) -> Result<(), String> {
+    {
+        let _guard = crate::config::lock();
+        let mut c = crate::config::load();
+        c.auto_backup_dir = dir.trim().to_string();
+        c.auto_backup_hours = hours.max(0);
+        c.auto_backup_keep = keep.max(1);
+        // 改设置时把「上次」清零：清零后 `due_at` **不会**立刻触发
+        // （见 auto_backup::due_at 的 last=0 约定），由这里显式补一次。
+        c.auto_backup_last_ms = 0;
+        crate::config::save(&c)?;
+    }
+    if !dir.trim().is_empty() && hours > 0 {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let target = std::path::Path::new(dir.trim());
+        match crate::commands::write_backup_archive(
+            &conn,
+            target,
+            Some(&format!(
+                "m-hub-backup-{}.zip",
+                chrono::Local::now().format("%Y%m%d-%H%M%S")
+            )),
+        ) {
+            Ok(name) => {
+                if let Err(e) = crate::auto_backup::rotate(target, keep.max(1)) {
+                    log::warn!("[自动备份] 轮转失败: {e}");
+                }
+                let _guard = crate::config::lock();
+                let mut c = crate::config::load();
+                c.auto_backup_last_ms = crate::auto_backup::now_ms();
+                crate::config::save(&c)?;
+                log::info!("[自动备份] 设置已保存并立即备份一份: {}", name);
+            }
+            Err(e) => return Err(format!("自动备份已保存，但首次备份失败: {}", e)),
+        }
+    }
+    Ok(())
 }

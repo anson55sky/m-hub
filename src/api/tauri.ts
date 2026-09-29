@@ -1066,6 +1066,11 @@ export const tauriApi = {
     invoke<void>('set_note_tags', { noteId, tagIds }),
   listNoteTags: () => invoke<NoteTagRow[]>('list_note_tags'),
   backupData: (targetDir: string) => invoke<string>('backup_data', { targetDir }),
+  getAutoBackupConfig: () => invoke<{
+    dir: string; hours: number; keep: number; lastMs: number
+  }>('get_auto_backup_config'),
+  setAutoBackupConfig: (dir: string, hours: number, keep: number) =>
+    invoke<void>('set_auto_backup_config', { dir, hours, keep }),
   restoreData: (source: string) => invoke<void>('restore_data', { source }),
   getDataPath: () => invoke<DataPathInfo>('get_data_path'),
   changeDataDir: (newDir: string) => invoke<void>('change_data_dir', { newDir }),

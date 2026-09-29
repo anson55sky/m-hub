@@ -68,6 +68,30 @@ pub struct AppConfig {
     /// 应用壁纸：主窗口背景图片的绝对路径（空 = 未设置，回退主题渐变背景）
     #[serde(default)]
     pub wallpaper_path: String,
+
+    // ---- 自动备份（2026-09-29 新增）----
+    /// 自动备份的目标目录（绝对路径）。空 = 不做自动备份。
+    ///
+    /// 为什么不默认开：备份目录该放哪儿是**用户的选择**（外置盘 / iCloud / 某块盘），
+    /// 猜一个位置（下载目录之类）反而可能把备份和被备份的东西放在一起 ——
+    /// 磁盘坏了就一起没了。默认关，由用户显式选一次。
+    #[serde(default)]
+    pub auto_backup_dir: String,
+    /// 自动备份间隔（小时）。0 = 不自动备份。
+    ///
+    /// 默认 24h：备份是「防意外」而不是「防丢失」，而这份数据本来就有手动导出。
+    /// 间隔太短会让磁盘反复写，收益却只在「崩了以后少丢一点」。
+    #[serde(default = "default_auto_backup_hours")]
+    pub auto_backup_hours: i64,
+    /// 自动备份保留份数（超出后删最旧的）。至少 1。
+    #[serde(default = "default_auto_backup_keep")]
+    pub auto_backup_keep: i64,
+    /// 上次自动备份的时刻（毫秒时间戳）。0 = 从未备份过。
+    ///
+    /// 存盘**而不是**每次启动就备份一次：应用一关一开是高频行为，
+    /// 而「距上次超过 N 小时才备份」才能让间隔设置真正有意义。
+    #[serde(default)]
+    pub auto_backup_last_ms: i64,
     /// 壁纸整屏静态模糊（ADR 0002：模糊作用于壁纸层整体，非卡片局部 backdrop）
     #[serde(default = "default_true")]
     pub wallpaper_blur: bool,
@@ -327,6 +351,14 @@ fn default_chat_panel_side() -> String {
     "right".to_string()
 }
 
+fn default_auto_backup_hours() -> i64 {
+    24
+}
+
+fn default_auto_backup_keep() -> i64 {
+    7
+}
+
 fn default_chat_panel_height() -> f64 {
     380.0
 }
@@ -416,6 +448,10 @@ impl Default for AppConfig {
             theme_preset: "indigo".to_string(),
             accent_color: None,
             wallpaper_path: String::new(),
+            auto_backup_dir: String::new(),
+            auto_backup_hours: default_auto_backup_hours(),
+            auto_backup_keep: default_auto_backup_keep(),
+            auto_backup_last_ms: 0,
             wallpaper_blur: true,
             wallpaper_veil: default_wallpaper_veil(),
             wallpaper_immersive: false,

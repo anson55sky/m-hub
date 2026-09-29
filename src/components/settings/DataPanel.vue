@@ -63,6 +63,66 @@ async function confirmChangeDataDir() {
   }
 }
 
+// ---- 自动备份（2026-09-29 新增）----
+// 与手动备份的关系：手动是「想起来时做一次」，自动是「按间隔做」并轮转保留 N 份。
+// 刻意**默认关闭且要求显式选目录**：备份放哪儿是用户的选择；猜一个位置的话，
+// 备份可能和被备份的数据落在同一块盘上 —— 盘坏了就一起没了，看着有备份其实没有。
+const autoBackupDir = ref('')
+const autoBackupHours = ref(24)
+const autoBackupKeep = ref(7)
+const autoBackupSaving = ref(false)
+const autoBackupLastText = ref('')
+
+const HOUR_OPTIONS = [
+  { v: 0, label: '关闭' },
+  { v: 6, label: '每 6 小时' },
+  { v: 12, label: '每 12 小时' },
+  { v: 24, label: '每天' },
+  { v: 72, label: '每 3 天' },
+  { v: 168, label: '每周' },
+]
+
+async function loadAutoBackup() {
+  try {
+    const c = await tauriApi.getAutoBackupConfig()
+    autoBackupDir.value = c.dir ?? ''
+    autoBackupHours.value = c.hours ?? 24
+    autoBackupKeep.value = c.keep ?? 7
+    autoBackupLastText.value =
+      c.lastMs > 0 ? new Date(c.lastMs).toLocaleString('zh-CN') : '尚未备份过'
+  } catch (e) {
+    showToast(`读取自动备份设置失败：${String(e)}`)
+  }
+}
+
+async function saveAutoBackup() {
+  autoBackupSaving.value = true
+  try {
+    await tauriApi.setAutoBackupConfig(
+      autoBackupDir.value,
+      Number(autoBackupHours.value),
+      Number(autoBackupKeep.value),
+    )
+    showToast('自动备份设置已保存，并立即备份了一份')
+    await loadAutoBackup()
+  } catch (e) {
+    showToast(`设置失败：${String(e)}`)
+  } finally {
+    autoBackupSaving.value = false
+  }
+}
+
+async function pickAutoBackupDir() {
+  // 复用本文件既有的目录选择方式（@tauri-apps/plugin-dialog 的 open），
+  // 不新造第二套 —— 同一件事两套写法，将来改交互就会漏一处
+  const dir = await open({ multiple: false, directory: true })
+  if (typeof dir === 'string' && dir) autoBackupDir.value = dir
+}
+
+onMounted(() => {
+  void loadAutoBackup()
+})
+
 // ---- 数据备份 / 恢复 ----
 const confirmRestore = ref(false)
 let confirmTimer: ReturnType<typeof setTimeout> | null = null
@@ -154,6 +214,64 @@ onMounted(() => {
             >
               <Upload :size="14" :stroke-width="2" />
               {{ confirmRestore ? '确认恢复？' : '恢复' }}
+            </button>
+          </div>
+
+          <!-- 自动备份（2026-09-29 新增） -->
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">自动备份</span>
+              <span class="setting-desc">
+                定时备份到指定目录并轮转保留最近若干份。默认关闭 ——
+                建议放在**与数据不同的盘**上，否则盘坏了备份一起没
+              </span>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">备份目录</span>
+              <span class="setting-desc">{{ autoBackupDir || '未设置' }}</span>
+            </div>
+            <div class="data-btn-group">
+              <button class="ghost-btn data-btn" @click="pickAutoBackupDir">更改</button>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">备份频率</span>
+              <span class="setting-desc">上次：{{ autoBackupLastText }}</span>
+            </div>
+            <select v-model.number="autoBackupHours" class="data-select">
+              <option v-for="o in HOUR_OPTIONS" :key="o.v" :value="o.v">{{ o.label }}</option>
+            </select>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">保留份数</span>
+              <span class="setting-desc">超出后自动删除最旧的备份</span>
+            </div>
+            <input
+              v-model.number="autoBackupKeep"
+              class="data-input"
+              type="number"
+              min="1"
+              max="999"
+            />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-desc">保存时会立即备份一份，便于确认是否生效</span>
+            </div>
+            <button
+              class="ghost-btn data-btn"
+              :class="{ confirm: autoBackupSaving }"
+              @click="saveAutoBackup"
+            >
+              {{ autoBackupSaving ? '保存中…' : '保存' }}
             </button>
           </div>
 
