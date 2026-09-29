@@ -637,6 +637,12 @@ const BACKEND_MANAGED_FIELDS: &[&str] = &[
     // 「我的扩展」本机源码目录：只经 add/remove_dev_extension 变更
     "dev_extensions",
     "dev_mode_enabled",
+    // 已废弃的旧服务端地址（约定 52）：与 market_endpoint / update_endpoint
+    // 同属「已废弃但仍要保住磁盘值」的字段，只写盘、从不读取。
+    // 不登记的话，每次 saveConfig 都会用 AppConfig::default() 的空串覆盖磁盘 ——
+    // 后果是老 app.json 里残留的开发期地址被悄悄抹掉（功能上无影响，
+    // 但排查历史问题时那份现场证据没了）。登记后与另两个端点字段口径一致。
+    "server_url",
     // Skills 自定义安装根：只经 install_skill / remove_skill_root 变更
     "skill_roots",
     // 「跳过此版本」：只经 skip_update_version 变更
@@ -682,6 +688,7 @@ pub fn merge_disk_authoritative(merged: &mut AppConfig, disk: &AppConfig) {
     // 归一后的服务端地址覆盖成空串（行为无影响，但文件里会来回翻烧饼）
     merged.market_endpoint = disk.market_endpoint.clone();
     merged.update_endpoint = disk.update_endpoint.clone();
+    merged.server_url = disk.server_url.clone();
     merged.skill_roots = disk.skill_roots.clone();
     merged.skipped_update_version = disk.skipped_update_version.clone();
     // 「稍后再提示」到期时间由 snooze_update 命令独占写盘，前端快照里只有启动时的旧值；

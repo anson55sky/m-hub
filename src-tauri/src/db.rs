@@ -277,6 +277,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_countdowns_end ON countdowns(end_at);
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id);
         CREATE INDEX IF NOT EXISTS idx_clipboard_updated ON clipboard_history(updated_at DESC);
+        -- 剪贴板去重索引（2026-09-29 补）。每次复制入库都会跑
+        --   SELECT id ... WHERE content = ?1 AND kind = ?2 AND is_pinned = 0
+        -- 而 content 上**原本没有任何索引**，所以每按一次 ⌘C 就是一次全表扫。
+        -- 索引列顺序按查询的等值条件排：content 是选择性最高的，kind 次之。
+        -- 代价可控的理由：索引项存的是 content 本身，所以索引体积 ≤ 表体积 ——
+        -- 它换来的是把 O(行数) 的扫描换成 O(log n) 的查找，而表本身已经在那儿了。
+        CREATE INDEX IF NOT EXISTS idx_clipboard_dedup ON clipboard_history(kind, content);
         ",
     )?;
 
@@ -1037,5 +1044,31 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM resources", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 25, "重建后行数必须与源表一致");
+    }
+
+    /// 剪贴板去重索引必须**真被查询计划用上**，而不只是建了个索引。
+    ///
+    /// 建了却没走上的索引是纯粹的装饰品：磁盘多占一份、每次复制照样全表扫，
+    /// 而没有任何症状能暴露它。`EXPLAIN QUERY PLAN` 里出现
+    /// `USING INDEX idx_clipboard_dedup` 才算真的用上了。
+    #[test]
+    fn clipboard_dedup_index_is_actually_used() {
+        let conn = init_in_memory().unwrap();
+        crate::repo::clipboard::insert(&conn, "重复内容", None, None).unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN
+                 SELECT id FROM clipboard_history
+                  WHERE content = ?1 AND kind = ?2 AND is_pinned = 0
+                  ORDER BY updated_at DESC, id DESC LIMIT 1",
+                params!["重复内容", "text"],
+                // EXPLAIN QUERY PLAN 的列是 (id, parent, notused, detail)，描述在第 3 列
+                |r| r.get::<_, String>(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("idx_clipboard_dedup"),
+            "去重查询没有走 idx_clipboard_dedup（索引白建了）: {plan}"
+        );
     }
 }

@@ -1701,31 +1701,156 @@ pub struct PathInfo {
 
 // ---------- 数据备份 / 恢复 ----------
 
+/// 备份包内路径改写用的前缀标记（2026-09-29）。
+///
+/// # 为什么要做这件事
+///
+/// `clipboard_history.image_path` 与 `resources.icon` 存的都是**绝对路径**，
+/// 且都指向数据根内部（`clipboard/images/*` 与 `icons/*`）。于是备份 zip 拿到
+/// 另一台机器、或「更改数据存储路径」之后再恢复时，这些路径全部指向
+/// `/Users/<别人>/…` —— **图片与图标全裂，而且没有任何报错**。
+///
+/// 压缩包本质上是**传输格式**，路径的可移植性属于它的职责，所以改写只发生在
+/// 「打包时写相对形式」与「解包时还原成当前数据根的绝对形式」两处，
+/// **不动数据库 schema、不动日常读写路径**。
+///
+/// 用显式前缀而不是「存纯相对路径、靠『不以 / 开头』来判断」：后者是**推断**，
+/// 会把任何本来就是相对路径的记录误当成待还原项。显式标记让「这条是相对的」
+/// 成为一次肯定判断，跨平台也无歧义（不依赖 `/` 或盘符的形状）。
+const REL_PATH_PREFIX: &str = "mhub-rel://";
+
+/// 把数据根下的绝对路径改写成 `mhub-rel://<相对路径>`；不在数据根下的原样返回。
+fn to_portable_path(raw: &str, data_root: &std::path::Path) -> String {
+    let root = data_root.to_string_lossy().into_owned();
+    // 补一个分隔符再比前缀，避免 `/data/m-hub-extra/x` 被误判成在 `/data/m-hub` 下
+    let prefix = if root.ends_with(std::path::MAIN_SEPARATOR) {
+        root.clone()
+    } else {
+        format!("{root}{}", std::path::MAIN_SEPARATOR)
+    };
+    match raw.strip_prefix(prefix.as_str()) {
+        Some(rel) if !rel.is_empty() => format!("{REL_PATH_PREFIX}{rel}"),
+        _ => raw.to_string(),
+    }
+}
+
+/// `mhub-rel://` 前缀还原成当前数据根下的绝对路径；其余原样返回。
+fn from_portable_path(raw: &str, data_root: &std::path::Path) -> String {
+    match raw.strip_prefix(REL_PATH_PREFIX) {
+        Some(rel) if !rel.is_empty() => data_root.join(rel).to_string_lossy().into_owned(),
+        _ => raw.to_string(),
+    }
+}
+
+/// 批量改写一张库里所有「指向数据根内部的文件」列。
+///
+/// 只处理**确定由数据根自己生成**的两列。刻意**不**碰：
+///   · `resources.target`     —— kind='file' 时是用户自己选的任意路径，不是数据根文件
+///   · `clipboard_history.file_paths` —— 同理，是用户复制进来的文件路径
+///   · `notes.content`        —— 笔记图片走 `mhub-note:` 协议 URL，**本就不含绝对路径**
+///     （见 `note_image_url` 的注释），碰它反而会破坏正文
+///   · `app.json` 的 `wallpaper_path` —— 根本不在备份里（备份只含数据库与图标）
+fn rewrite_db_paths(db_file: &std::path::Path, data_root: &std::path::Path, to_relative: bool) {
+    let map = |raw: &str| {
+        if to_relative {
+            to_portable_path(raw, data_root)
+        } else {
+            from_portable_path(raw, data_root)
+        }
+    };
+    let conn = match Connection::open(db_file) {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("路径改写：打开 {} 失败: {e}", db_file.display());
+            return;
+        }
+    };
+    for (table, column) in [
+        ("clipboard_history", "image_path"),
+        ("resources", "icon"),
+    ] {
+        let sql = format!("SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL");
+        let mut rows = match conn.prepare(&sql) {
+            Ok(st) => st,
+            Err(e) => {
+                log::error!("路径改写：{table}.{column} 查询失败: {e}");
+                continue;
+            }
+        };
+        let collected: Vec<(i64, String)> = match rows
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+        {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("路径改写：{table}.{column} 读取失败: {e}");
+                continue;
+            }
+        };
+        let mut changed = 0usize;
+        for (id, raw) in collected {
+            let new = map(&raw);
+            if new != raw {
+                let upd = format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2");
+                if let Err(e) = conn.execute(&upd, rusqlite::params![new, id]) {
+                    log::error!("路径改写：{table}.{column} id={id} 更新失败: {e}");
+                } else {
+                    changed += 1;
+                }
+            }
+        }
+        if changed > 0 {
+            log::info!("路径改写：{table}.{column} 改写 {changed} 条");
+        }
+    }
+}
+
+
 /// 备份数据到指定目录：把在线备份的数据库（SQLite backup API）与图标目录
 /// 打包成单个压缩包（如 `m-hub-backup-20260815-143022.zip`），避免散落。
 /// 返回生成的压缩包文件名。
 #[tauri::command]
 pub fn backup_data(state: State<'_, DbState>, target_dir: String) -> Result<String, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    make_backup(&conn, std::path::Path::new(&target_dir))
+}
+
+/// 备份的主体（2026-09-29 从 `backup_data` 抽出，让它可被测试直接调用）。
+///
+/// 抽出前这条路径**没有端到端测试**：测试只能直接调 `rewrite_db_paths` 这个辅助
+/// 函数，于是「`backup_data` 里那句 `rewrite_db_paths(&tmp_db, …)` 被删掉」这种
+/// 改动不会有任何测试失败 —— 而它恰恰是最容易被重构顺手删掉的一行
+/// （我实测过：去掉那句，测试照样全绿）。现在测试跑的是**生产路径本身**。
+fn make_backup(conn: &Connection, target: &std::path::Path) -> Result<String, String> {
     let app_data = crate::paths::data_root().to_path_buf();
-    let target = std::path::Path::new(&target_dir);
     std::fs::create_dir_all(target).map_err(|e| format!("创建备份目录失败: {}", e))?;
 
     // 1. 在线备份数据库到临时文件（运行中数据库被占用，不能直接复制；WAL 安全）
-    let tmp_db = std::env::temp_dir().join(format!("m-hub-backup-{}.db", std::process::id()));
-    {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        conn.backup("main", &tmp_db, None)
-            .map_err(|e| format!("备份数据库失败: {}", e))?;
-    }
+    // 临时文件名必须**每次调用唯一**：原先只带 pid，而同进程内连点两次「备份」
+    // 就会共用同一个文件 —— 两个 `conn.backup` 交错往同一路径写，
+    // 产出的压缩包可能是半截的数据库。
+    let tmp_db = std::env::temp_dir().join(format!(
+        "m-hub-backup-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    conn.backup("main", &tmp_db, None)
+        .map_err(|e| format!("备份数据库失败: {}", e))?;
 
-    // 2. 生成压缩包文件名（带时间戳，多次备份互不覆盖）
+    // 2. 把库里的数据根绝对路径改写成可移植形式（见 rewrite_db_paths 的说明）
+    rewrite_db_paths(&tmp_db, &app_data, true);
+
+    // 3. 生成压缩包文件名（带时间戳，多次备份互不覆盖）
     let name = format!(
         "m-hub-backup-{}.zip",
         chrono::Local::now().format("%Y%m%d-%H%M%S")
     );
     let zip_path = target.join(&name);
 
-    // 3. 打包成单个压缩包
+    // 4. 打包成单个压缩包
     let out = std::fs::File::create(&zip_path)
         .map_err(|e| format!("创建备份压缩包失败: {}", e))?;
     let mut zip = zip::ZipWriter::new(out);
@@ -1831,6 +1956,12 @@ pub fn restore_data(source: String) -> Result<(), String> {
         let _ = std::fs::remove_dir_all(&restore_icons);
         return Err("备份压缩包中未找到 app.db".into());
     }
+
+    // 把包内的可移植路径还原成**当前**数据根下的绝对路径。
+    // 必须在写 `.restore_pending` 之前做完：那个标志一落，下次启动
+    // `apply_pending_restore` 就会把库换上去，那时再改写就晚了。
+    // 老备份包里存的是绝对路径，from_portable_path 原样返回，天然向后兼容。
+    rewrite_db_paths(&restore_db, &app_data, false);
 
     // 写入待恢复标志
     std::fs::write(app_data.join(".restore_pending"), "1")
@@ -3639,5 +3770,185 @@ mod tests {
             crate::chat::PLATFORM_ENTRY_NAME
         );
         assert_eq!(default_session_model_name(&[]), "");
+    }
+
+    /// 备份包的可移植路径：核心是**跨数据根往返**。
+    ///
+    /// 这条直接复现用户会遇到的那个场景：在这台机器、这个数据根下做的备份，
+    /// 拿到**另一个数据根**（换机、或「更改数据存储路径」之后）去恢复。
+    /// 改写前，库里的路径全指向原机器的绝对路径，恢复后图片与图标全裂。
+    #[test]
+    fn backup_paths_survive_a_different_data_root() {
+        let src_root = std::path::Path::new("/Users/alice/Library/Application Support/m-hub");
+        let dst_root = std::path::Path::new("/Volumes/Ext/mhub-data");
+
+        // —— 打包侧 ——
+        assert_eq!(
+            to_portable_path(
+                "/Users/alice/Library/Application Support/m-hub/clipboard/images/ab12",
+                src_root
+            ),
+            "mhub-rel://clipboard/images/ab12"
+        );
+        // 还原到**另一个**数据根
+        assert_eq!(
+            from_portable_path("mhub-rel://clipboard/images/ab12", dst_root),
+            "/Volumes/Ext/mhub-data/clipboard/images/ab12"
+        );
+
+        // 前缀必须是**目录边界**上的匹配：
+        // 数据根 /data/m-hub 不该把 /data/m-hub-extra/x 当成自己下面的文件
+        let root = std::path::Path::new("/data/m-hub");
+        assert_eq!(
+            to_portable_path("/data/m-hub-extra/x.png", root),
+            "/data/m-hub-extra/x.png",
+            "只差一个字符的兄弟目录绝不能被当成数据根内部"
+        );
+        assert_eq!(to_portable_path("/data/m-hub/x.png", root), "mhub-rel://x.png");
+        // 不在数据根下的用户路径原样保留（速达指向 /Applications/Foo.app 之类）
+        assert_eq!(
+            to_portable_path("/Applications/Foo.app", root),
+            "/Applications/Foo.app"
+        );
+        // 老备份包里存的是绝对路径 → 原样返回，天然向后兼容
+        assert_eq!(
+            from_portable_path("/old/machine/icons/a.png", dst_root),
+            "/old/machine/icons/a.png"
+        );
+    }
+
+    /// 整库层面的往返：改写后库里的路径不再含原数据根，还原后指向新数据根。
+    #[test]
+    fn rewrite_db_paths_roundtrips_across_roots() {
+        let src_root = std::path::Path::new("/Users/alice/Library/Application Support/m-hub");
+        let dst_root = std::path::Path::new("/Volumes/Ext/mhub-data");
+        let dir = std::env::temp_dir().join("mhub_backup_path_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("app.db");
+        let _ = std::fs::remove_file(&db);
+
+        {
+            let conn = crate::db::init_in_memory().unwrap();
+            crate::repo::clipboard::insert_image(
+                &conn,
+                "h1",
+                "/Users/alice/Library/Application Support/m-hub/clipboard/images/ab12",
+                None,
+            )
+            .unwrap();
+            // 一个**不在**数据根下的图标路径，必须原样保留
+            crate::repo::resource::create(
+                &conn,
+                crate::models::ResourceKind::App,
+                "外来图标",
+                "/Applications/Foo.app",
+                None,
+                Some("/somewhere/else/icon.png"),
+                None,
+            )
+            .unwrap();
+            // backup 要的是路径而非 File
+            conn.backup("main", &db, None).unwrap();
+        }
+
+        // 打包侧改写
+        rewrite_db_paths(&db, src_root, true);
+        {
+            // 必须打开**文件**：`init_in_memory()` 每次都是全新空库，读不到任何行
+            let conn = Connection::open(&db).unwrap();
+            let (p,): (String,) = conn
+                .query_row(
+                    "SELECT image_path FROM clipboard_history WHERE image_path IS NOT NULL",
+                    [],
+                    |r| Ok((r.get(0)?,)),
+                )
+                .unwrap();
+            assert_eq!(p, "mhub-rel://clipboard/images/ab12", "打包后应是可移植形式");
+            assert!(
+                !p.contains("/Users/alice"),
+                "备份包里绝不能残留原机器的绝对路径"
+            );
+            let (icon,): (Option<String>,) = conn
+                .query_row("SELECT icon FROM resources WHERE name = '外来图标'", [], |r| {
+                    Ok((r.get(0)?,))
+                })
+                .unwrap();
+            assert_eq!(icon.as_deref(), Some("/somewhere/else/icon.png"), "数据根外的路径要原样保留");
+        }
+
+        // 还原侧：换到另一个数据根
+        rewrite_db_paths(&db, dst_root, false);
+        {
+            let conn = Connection::open(&db).unwrap();
+            let (p,): (String,) = conn
+                .query_row(
+                    "SELECT image_path FROM clipboard_history WHERE image_path IS NOT NULL",
+                    [],
+                    |r| Ok((r.get(0)?,)),
+                )
+                .unwrap();
+            assert_eq!(
+                p, "/Volumes/Ext/mhub-data/clipboard/images/ab12",
+                "恢复后必须指向**当前**数据根，而不是原机器"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 端到端跑一遍**生产用的**备份路径，检查压缩包里的库确实不含原机器绝对路径。
+    ///
+    /// 这条覆盖的是「`make_backup` 里那句 `rewrite_db_paths(&tmp_db, …)` 有没有被
+    /// 调用」。此前只有针对 `rewrite_db_paths` 辅助函数的单测，把那一句删掉
+    /// 测试照样全绿 —— 而备份功能会静默退化成不可移植，且没有任何症状。
+    #[test]
+    fn produced_backup_archive_has_no_absolute_paths() {
+        let dir = std::env::temp_dir().join("mhub_backup_e2e_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 必须用**真实**数据根来造这条路径：改写只处理位于数据根之下的路径，
+        // 随便编一个 /Users/alice/… 会被正确地判为「不在数据根下」而原样保留，
+        // 于是测试失败在断言上，看不出是夹具错了还是逻辑错了。
+        let real_root = crate::paths::data_root().to_string_lossy().into_owned();
+        let abs_img = format!("{real_root}/clipboard/images/ab12");
+
+        let conn = crate::db::init_in_memory().unwrap();
+        crate::repo::clipboard::insert_image(&conn, "h1", &abs_img, None).unwrap();
+
+        // 真实调用生产路径
+        let name = make_backup(&conn, &dir).unwrap();
+        let zip_path = dir.join(&name);
+        assert!(zip_path.exists(), "应生成压缩包: {name}");
+
+        // 解出 app.db 检查内容
+        let f = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(f).unwrap();
+        let mut db_bytes: Vec<u8> = Vec::new();
+        {
+            use std::io::Read;
+            let mut e = archive.by_name("app.db").expect("包内应有 app.db");
+            e.read_to_end(&mut db_bytes).unwrap();
+        }
+        let db_path = dir.join("check.db");
+        std::fs::write(&db_path, &db_bytes).unwrap();
+        let back = Connection::open(&db_path).unwrap();
+        let (p,): (String,) = back
+            .query_row(
+                "SELECT image_path FROM clipboard_history WHERE image_path IS NOT NULL",
+                [],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(
+            p, "mhub-rel://clipboard/images/ab12",
+            "备份包里的路径应已改写成可移植形式"
+        );
+        assert!(
+            !p.contains(&real_root),
+            "备份包里绝不能残留本机数据根的绝对路径（换机/换数据根恢复后图片会全裂）"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
