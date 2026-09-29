@@ -18,18 +18,11 @@ fn parse_id(label: &str) -> Option<i64> {
         .parse::<i64>()
         .ok()
 }
-
-/// 计算浮窗初始位置：主窗口中心附近偏移
+/// 浮窗初始落点：主窗中心略偏右下。**单位与算法统一由
+/// `lib.rs::centered_on_main` 提供**（此前此处有三份各自为政的实现，
+/// 其中把物理坐标与逻辑尺寸混算，Retina 上落点偏近一倍）。
 fn initial_position(app: &AppHandle) -> Option<(f64, f64)> {
-    let main = crate::main_window(app)?;
-    if !main.is_visible().unwrap_or(false) {
-        return None;
-    }
-    let pos = main.outer_position().ok()?;
-    let size = main.outer_size().ok()?;
-    let x = pos.x as f64 + size.width as f64 / 2.0 - COUNTDOWN_WIDTH / 2.0 + 40.0;
-    let y = pos.y as f64 + size.height as f64 / 2.0 - COUNTDOWN_HEIGHT / 2.0 + 24.0;
-    Some((x, y))
+    crate::centered_on_main(app, COUNTDOWN_WIDTH as f64, COUNTDOWN_HEIGHT as f64)
 }
 
 /// 创建（或聚焦）倒计时浮窗。已存在同 label 窗口时复用。

@@ -1880,12 +1880,33 @@ pub fn change_data_dir(state: State<'_, DbState>, new_dir: String) -> Result<(),
             .map_err(|e| format!("迁移数据库失败: {}", e))?;
     }
 
-    // 2. 复制图标 / 剪贴板图片目录
-    for name in ["icons", "clipboard"] {
+    // 2. 复制「用户数据」目录。
+    //
+    // ⚠️ 原来只有 `icons` 与 `clipboard` 两项，且**全部 `let _ =` 吞掉错误**，
+    // 然后**无条件**写引导文件 —— 而 UI 上写的是「将 m-hub 的**所有数据**挪到…」
+    // （DataPanel.vue）。漏掉的是：
+    //   · `extensions` — 已安装的扩展，漏了 = 扩展列表直接清空
+    //   · `notes`       — 笔记内嵌图片（mhub-note 协议按 data_root/notes/images 解析）
+    //   · `wallpapers`  — 壁纸文件（app.json 里存的是绝对路径，漏了必然失效）
+    // 用户看到的是「迁移成功、无任何报错」，重启后扩展全没了、图片全裂、壁纸没了，
+    // 且**不可逆**（想不到去旧目录里捞）。
+    //
+    // 有意**不**搬的（机器相关或可再生，搬过去反而有害）：
+    //   · `data_path.json` — 这是**指向数据根的引导文件本身**，拷过去会让新目录
+    //     指回旧目录，等于迁移没做
+    //   · `runtime`        — 下载的 Node 运行时，与平台绑定、体积大，按需重下
+    //   · `logs`           — 日志，新目录自然会重新生成
+    //   · `updates`        — 升级包的临时暂存区，搬过去是垃圾
+    //   · `market`         — 扩展市场清单缓存，会自动刷新
+    const DATA_DIRS: &[&str] = &["icons", "clipboard", "notes", "wallpapers", "extensions"];
+    let mut failures: Vec<String> = Vec::new();
+    for name in DATA_DIRS {
         let s = src.join(name);
-        let d = target.join(name);
-        if s.exists() {
-            let _ = copy_dir_recursive(&s, &d);
+        if !s.exists() {
+            continue;
+        }
+        if let Err(e) = copy_dir_recursive(&s, &target.join(name)) {
+            failures.push(format!("{name}/: {e}"));
         }
     }
 
@@ -1893,11 +1914,24 @@ pub fn change_data_dir(state: State<'_, DbState>, new_dir: String) -> Result<(),
     for name in ["app.json", "chat_keys.json"] {
         let s = src.join(name);
         if s.exists() {
-            let _ = std::fs::copy(&s, target.join(name));
+            if let Err(e) = std::fs::copy(&s, target.join(name)) {
+                failures.push(format!("{name}: {e}"));
+            }
         }
     }
 
-    // 4. 写引导文件指向新目录（重启后 init_database 读它）
+    // ⚠️ 任一失败就**不写引导文件**：应用仍指向旧数据根，本次迁移等于没发生，
+    // 用户可重试或改选目录。写下去则是「新目录缺一半数据 + 指针已切走」——
+    // 那才是真正不可逆的形态。目标目录里留下的半份数据由用户自行处理。
+    if !failures.is_empty() {
+        log::error!("数据目录迁移中止（未切换指针）: {}", failures.join("; "));
+        return Err(format!(
+            "迁移失败，已保持使用原数据目录（未做任何切换）。原因：\n· {}",
+            failures.join("\n· ")
+        ));
+    }
+
+    // 4. 全部搬完，最后才写引导文件指向新目录（重启后 init_database 读它）
     crate::paths::set_data_root(target)?;
 
     log::info!(

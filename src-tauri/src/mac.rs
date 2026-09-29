@@ -405,6 +405,23 @@ pub fn read_clipboard_image() -> Option<(Vec<u8>, &'static str)> {
 /// 而 Windows 的 CF_HTML 有 StartFragment/EndFragment 偏移。这里不做偏移解析，
 /// 直接整份交给前端的 DOMPurify 清洗——`ClipboardOverlay.vue` 渲染富文本时
 /// 本来就走 `markdownHtml.ts` 的 sanitize 路径，多一层 head/body 无害。
+/// 剪贴板里的富文本 HTML。
+///
+/// # 为什么没有 Windows 那套「递增重试」
+///
+/// `clipboard.rs` 的 `HTML_RETRY_DELAYS_MS`（0/40/80/140/220/360/560ms）**只用在
+/// Windows 路径**，这里是一次读取。这是刻意的，不要"补齐"：
+/// 那套重试存在的原因是 Windows 会**分格式逐个**发 `WM_CLIPBOARDUPDATE`
+/// （先纯文本、后 HTML），读到时 HTML 还没写进去。
+/// macOS 的 `NSPasteboard` 写入是**事务性**的 —— 一次 `clearContents` + 多次
+/// `setData` 在同一事务内完成，只 bump 一次 `changeCount`，不存在"读到一半"的窗口。
+///
+/// 理论上仍有 `NSPasteboard` **懒提供者**（Word/Pages 的某些版本用 delegate 延迟
+/// 物化 `public.html`）导致首次读为 nil 的可能，但**本工程没有复现证据**。
+/// 而剪贴板监听链路的轮询间隔是被刻意调过的（约定 P7：间隔不能调小，
+/// 100ms 级轮询在应用常驻时持续吃 CPU）。在没有实测复现前往这条链路里塞 sleep，
+/// 是拿一个稳定工作的路径去赌一个未证实的假设 —— 故维持单次读取。
+/// 真要加，先复现「从 Word 复制富文本 → 速达里存成纯文本」，再谈。
 pub fn read_clipboard_html() -> Option<String> {
     let pb = NSPasteboard::generalPasteboard();
     if !has_type(&pb, &uti("public.html")) {
@@ -820,6 +837,18 @@ extern "C" {
     fn AXIsProcessTrusted() -> bool;
 }
 
+/// 同一条消息只记一次日志（避免「每次显示浮层都刷一遍」）。
+pub fn warn_once(key: &str, msg: &str) {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let Ok(mut seen) = SEEN.lock() else { return };
+    if seen.iter().any(|k| k == key) {
+        return;
+    }
+    seen.push(key.to_string());
+    log::warn!("{msg}");
+}
+
 /// 当前进程是否已获授辅助功能权限（决定模拟粘贴能不能生效）
 pub fn ax_is_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
@@ -936,19 +965,26 @@ pub fn set_nonactivating_panel(win: &tauri::WebviewWindow) -> bool {
         return true;
     }
     window.setStyleMask(want);
-    // `setStyleMask:` 没有返回值，也不抛异常 —— 原先这里无条件 `true`，
-    // 于是两个调用点的 `if !set_nonactivating_panel(win) { log::warn!(...) }`
-    // **永远不触发**，那段错误处理是死代码：失败时不会有任何日志，
-    // 而失败的后果正是调用方最想知道的（「浮层会抢焦点」）。
-    // 改成设完**回读校验**，让那个 warn 真正有意义。
-    let applied = window.styleMask();
-    if !applied.contains(NSWindowStyleMask::NonactivatingPanel) {
-        log::warn!(
-            "set_nonactivating_panel: NonactivatingPanel 未生效（tao 建的是 NSWindow 而非 NSPanel，\
-             该 style mask 本就只对 NSPanel 有定义）。浮层将退化为会抢焦点的显示。"
-        );
-        return false;
-    }
+    // ⚠️ 这里**不能**用「回读 styleMask()」当成功判据（2026-09-29 修正）。
+    // 上一版觉得「`setStyleMask:` 没有返回值 → 读回来校验一下」很自然，
+    // 但那是**恒真**的：刚设进去的值原样读出来，`contains` 必然为真，
+    // 于是 warn 依然永不触发 —— 只是换了个写法的死代码而已。
+    //
+    // 真正的失败模式是「AppKit 对**非 NSPanel** 的窗口不接受
+    // `NSWindowStyleMaskNonactivatingPanel`（Apple 只对 NSPanel 定义了该位），
+    // 而 tao 建的是 NSWindow」。这**无法从 styleMask 读出来** ——
+    // AppKit 会老老实实把该位存进去，只是行为上不生效。
+    // 想真判定只能「show 一次看有没有抢到 keyWindow」，而那恰恰是本函数
+    // 要避免的行为（为了诊断去惊动用户正在输入的界面），不划算。
+    //
+    // 故如实处理：**不做假的成功判定**，改为首次记录一次已知限制，
+    // 让「浮层可能抢焦点」这件事在日志里可查（warn_once，不刷屏）。
+    warn_once(
+        "set-nonactivating-panel-unverified",
+        "NonactivatingPanel 已设置但**无法验证是否生效**：tao 在 macOS 上建的是 \
+         NSWindow 而非 NSPanel，而该 style mask 只对 NSPanel 有定义。若剪贴板浮层/通知 \
+         弹出时抢走了键盘焦点，根因在此（AppKit 不接受该位，且不报错）。",
+    );
     true
 }
 

@@ -86,28 +86,116 @@ fn apply_pending_restore(app_data: &std::path::Path) {
     }
     let db = app_data.join("app.db");
     let restore = app_data.join("restore.db");
+
     if restore.exists() {
-        let _ = std::fs::remove_file(&db);
+        // ⚠️ 原来是「先删正式库 → copy → 删备份」，且每一步的 `let _ =` 都丢弃错误。
+        // copy 失败（磁盘满 / 权限 / I/O）时的后果是：**原库已删、备份也删、**
+        // 什么都不剩，而日志还写「已应用待恢复的数据」—— 静默的全量数据丢失。
+        //
+        // 改为「复制到暂存名 → 校验它确实是合法 SQLite → 同目录 rename 原子替换」。
+        // Unix 的 rename(2) 本身就会原子替换目标，**不需要先删原库**。
+        // 任何一步失败都**原封不动**保留 原库 + restore.db + .restore_pending，
+        // 下次启动自然重试 —— 恢复要么完整成功，要么完全没发生，没有中间态。
+        let staged = app_data.join("app.db.restoring");
+        let _ = std::fs::remove_file(&staged);
+
+        if let Err(e) = std::fs::copy(&restore, &staged) {
+            log::error!(
+                "恢复数据库：复制暂存失败（{e}）。**已保留原数据与备份，未做任何改动**，下次启动会重试"
+            );
+            return;
+        }
+        if let Err(e) = validate_sqlite(&staged) {
+            let _ = std::fs::remove_file(&staged);
+            log::error!(
+                "恢复数据库：暂存文件不是合法的 SQLite 库（{e}）。已丢弃暂存，**原数据未动**，下次启动会重试"
+            );
+            return;
+        }
+        if let Err(e) = std::fs::rename(&staged, &db) {
+            log::error!(
+                "恢复数据库：替换失败（{e}）。**已保留原数据与备份**，下次启动会重试"
+            );
+            return;
+        }
+        // 旧库的 -wal/-shm 属于已被替换掉的那个库，必须清掉，否则下次打开时
+        // SQLite 会拿旧的 WAL 去校验新库。放在 rename **之后**：万一 rename 失败，
+        // 原库连同它的 WAL 都还在，数据不残缺。SQLite 本身会校验 WAL 的
+        // salt/checksum 并忽略不匹配的残留，故这个顺序是安全的。
         let _ = std::fs::remove_file(app_data.join("app.db-wal"));
         let _ = std::fs::remove_file(app_data.join("app.db-shm"));
-        let _ = std::fs::copy(&restore, &db);
+        // 确认换上去的新库能打开，才敢删备份
+        if let Err(e) = validate_sqlite(&db) {
+            log::error!("恢复数据库：替换后的库无法打开（{e}）。**已保留备份 restore.db**，请勿删除");
+            return;
+        }
         let _ = std::fs::remove_file(&restore);
+        log::info!("已应用待恢复的数据（数据库）");
     }
+
     let restore_icons = app_data.join("restore_icons");
     if restore_icons.exists() {
-        let _ = std::fs::remove_dir_all(app_data.join("icons"));
-        let _ = std::fs::rename(&restore_icons, app_data.join("icons"));
+        // 同款问题：原来 remove_dir_all(icons) 之后 rename，rename 失败则图标全灭且不重试。
+        // 改为「先搬到旁路 → 换上去 → 再删旧的」，失败时旧图标目录仍完整。
+        let icons = app_data.join("icons");
+        let old_icons = app_data.join("icons.old");
+        let _ = std::fs::remove_dir_all(&old_icons);
+        let swap = if icons.exists() {
+            std::fs::rename(&icons, &old_icons).is_ok()
+                && std::fs::rename(&restore_icons, &icons).is_ok()
+        } else {
+            std::fs::rename(&restore_icons, &icons).is_ok()
+        };
+        if swap {
+            let _ = std::fs::remove_dir_all(&old_icons);
+            log::info!("已应用待恢复的数据（图标）");
+        } else {
+            // 换不上去就把旧的搬回去，别让用户处于「两个都没有」的状态
+            let _ = std::fs::remove_dir_all(&icons);
+            if old_icons.exists() {
+                let _ = std::fs::rename(&old_icons, &icons);
+            }
+            log::error!("恢复图标：替换失败。已还原原图标目录，备份仍在，下次启动会重试");
+            return;
+        }
     }
     let _ = std::fs::remove_file(&flag);
-    log::info!("已应用待恢复的数据");
+}
+
+/// 打开 SQLite 文件并跑一条查询，确认它不是损坏/截断的文件。
+///
+/// 存在的意义：恢复流程里 copy 成功**不等于**内容有效（磁盘写满时 copy 可能
+/// 返回 Ok 却只写了一半）。不校验就替换的话，用户会拿到一个打不开的库，
+/// 而原库已经被覆盖掉了 —— 那比恢复失败严重得多。
+fn validate_sqlite(path: &std::path::Path) -> Result<(), String> {
+    use rusqlite::OpenFlags;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    // pragma user_version 会真正读文件头与 b-tree 的一页，截断的库在这里就会露馅
+    conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// 一次性迁移旧目录（com.workbench.desktop）数据到新目录（m-hub）
 fn migrate_legacy_data() {
     let new_dir = crate::paths::data_root().to_path_buf();
-    if new_dir.exists() {
+
+    // ⚠️ 守卫原先是 `if new_dir.exists() { return; }`，**恒为真、这段从来没执行过**
+    // （2026-09-29 修）。原因是调用顺序：`data_root()` 在本函数之前就已被调用多次，
+    // 其中 `paths::write_bootstrap_at` 与资产作用域循环的 `create_dir_all(data_root().join(rel))`
+    // 都会**先把新数据根建出来**。于是从 com.workbench.desktop 升级上来的用户，
+    // 速记/待办/速达/便签**全部为空**（app.db 是新建的空库），设置全默认，
+    // 旧数据完好躺在旧目录里，日志里也不会出现「已从旧目录迁移数据」。
+    //
+    // 改用「目标根里有没有 app.db」作判据 —— 它才是「这套数据根已经在用」的
+    // 真实标志（目录本身会被引导文件、assets 目录等先建出来，不能作数）。
+    if new_dir.join("app.db").exists() {
         return;
     }
+    // 上次迁移中途失败会留下半截目录；没有标记就重试，覆盖残缺的部分。
+    // （有标记则跳过：即使之后用户自己往新目录放了 app.db，也不再动它。）
+
     let Some(legacy_dir) = dirs::data_dir().map(|d| d.join("com.workbench.desktop")) else {
         return;
     };
@@ -117,18 +205,40 @@ fn migrate_legacy_data() {
     if std::fs::create_dir_all(&new_dir).is_err() {
         return;
     }
+    let mut failures = 0usize;
     if let Ok(entries) = std::fs::read_dir(&legacy_dir) {
         for entry in entries.flatten() {
             let src = entry.path();
             let dst = new_dir.join(entry.file_name());
-            if src.is_dir() {
-                let _ = copy_dir(&src, &dst);
+            // 逐条失败必须落日志：原来全部 `let _ =` 吞掉，迁移失败时用户
+            // 只看到「数据空了」，而日志里干净得什么都没有，无从排查。
+            let res = if src.is_dir() {
+                copy_dir(&src, &dst)
             } else {
-                let _ = std::fs::copy(&src, &dst);
+                std::fs::copy(&src, &dst).map(|_| ())
+            };
+            if let Err(e) = res {
+                failures += 1;
+                log::warn!(
+                    "旧数据迁移失败 {} → {}: {e}",
+                    src.display(),
+                    dst.display()
+                );
             }
         }
     }
-    log::info!("已从旧目录迁移数据: {}", legacy_dir.display());
+    if failures > 0 {
+        // 不写标记 → 下次启动继续补齐剩下的条目（已拷成功的会被覆盖，可重入）
+        log::warn!(
+            "旧数据迁移有 {failures} 项失败，将在下次启动重试；已成功的条目会被覆盖，可安全重跑"
+        );
+    } else {
+        let _ = std::fs::write(new_dir.join(".legacy_migrated"), b"1");
+    }
+    log::info!(
+        "已从旧目录迁移数据: {}（失败 {failures} 项）",
+        legacy_dir.display()
+    );
 }
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
@@ -204,6 +314,70 @@ pub fn main_window(app: &tauri::AppHandle) -> Option<tauri::Window<tauri::Wry>> 
 /// 语义不变、无需迁移，代价只是首次启动窗口小了 2×M 再被拉回来。
 pub const WINDOW_SHADOW_MARGIN: f64 = 32.0;
 
+/// 浮窗「首次建窗」的落点：以主窗中心为基准，向右下偏移半个浮窗尺寸 + 少量留白。
+///
+/// 返回**逻辑**像素 —— 因为 `WindowBuilder::position(x, y)` 的文档明写
+/// 「The initial position of the window in **logical pixels**」。
+///
+/// # 为什么必须是这一个函数（2026-09-29 修）
+///
+/// 此前有**四份**几乎相同的实现，其中三份是错的：
+/// `sticky_window` / `countdown_window` / `float_window` 把主窗的**物理**坐标
+/// （`outer_position()`）与浮窗的**逻辑**尺寸直接相加，再把结果喂给收逻辑像素的
+/// `position()`。Retina（scale 2.0）上算出来的落点会右偏/下偏接近一倍：
+///
+/// ```text
+/// 主窗 pos=(0,0) size=2928×1928（物理）、便签 260×360（逻辑）
+///   期望  x = 0 + 1464 - 260 + 40 = 1244（物理）→ 622（逻辑）
+///   实际  x = 0 + 1464 - 130 + 40 = 1374  → 被当逻辑解释 = 物理 2748  ← 偏了一倍多
+/// ```
+///
+/// 症状是便签/倒计时/提示词·待办浮窗**首次弹出就严重偏移**，小屏上直接飞出屏幕
+/// 边缘（够不着、拖不回来）。只有 `chat_window` 一份是对的（它显式乘了 `scale`），
+/// 正好说明正确写法就在工程里、只是没人抄。
+///
+/// # 算法
+///
+/// 在**物理空间**里算中心对齐（避免中途反复换算），最后整体除回 `scale` 变逻辑；
+/// 两个留白常量（40/24）本身是「小间距」语义，按逻辑像素计。
+pub fn centered_on_main(app: &tauri::AppHandle, width: f64, height: f64) -> Option<(f64, f64)> {
+    let main = main_window(app)?;
+    if !main.is_visible().unwrap_or(false) {
+        return None;
+    }
+    let scale = main.scale_factor().unwrap_or(1.0).max(0.01);
+    let pos = main.outer_position().ok()?;
+    let size = main.outer_size().ok()?;
+    Some(centered_offset(
+        pos.x as f64,
+        pos.y as f64,
+        size.width as f64,
+        size.height as f64,
+        width,
+        height,
+        scale,
+    ))
+}
+
+/// [`centered_on_main`] 的纯计算部分（抽出以便单测，见 `window_geometry_tests`）。
+///
+/// 入参 `px/py/sw/sh` 是主窗的**物理**像素，`width/height` 是浮窗的**逻辑**尺寸，
+/// 返回**逻辑**像素的落点。
+pub fn centered_offset(
+    px: f64,
+    py: f64,
+    sw: f64,
+    sh: f64,
+    width: f64,
+    height: f64,
+    scale: f64,
+) -> (f64, f64) {
+    let scale = scale.max(0.01);
+    let x = (px + (sw - width * scale) / 2.0) / scale + 40.0;
+    let y = (py + (sh - height * scale) / 2.0) / scale + 24.0;
+    (x, y)
+}
+
 /// 可视区尺寸 → 窗口 inner 尺寸（外扩带的 2 倍）
 fn to_window_size(visible_w: f64, visible_h: f64) -> tauri::LogicalSize<f64> {
     tauri::LogicalSize::new(
@@ -227,9 +401,10 @@ fn restore_window_state(app: &tauri::App) {
         let ws = &config.window;
         // ws.width/height 是**可视区**尺寸，落进窗口时要补上外扩带（约定 69）
         let _ = window.set_size(to_window_size(ws.width, ws.height));
+        // ws.x/y 是**逻辑**像素（落盘时已从 physical 换算），故这里用 LogicalPosition
         if let (Some(x), Some(y)) = (ws.x, ws.y) {
             if is_position_on_screen(x, y) {
-                let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+                let _ = window.set_position(tauri::LogicalPosition::new(x as i32, y as i32));
             }
         }
         if ws.always_on_top {
@@ -288,17 +463,37 @@ fn persist_window_state(app: &tauri::AppHandle) {
         if let Ok(pos) = window.outer_position() {
             if let Ok(size) = window.inner_size() {
                 // inner_size() 含外扩带，落盘前扣掉，只存可视区（约定 69）。
-                // 位置存的是**窗口框**左上角且无需换算：外扩带四边对称，
-                // 窗口框与可视区左上角差一个固定的 M，存取都走同一个原点。
+                //
+                // ⚠️ 位置必须**换算成逻辑像素**再存（2026-09-29 修）。
+                // `outer_position()` 返回的是 `PhysicalPosition`（tauri 文档明写），
+                // 而恢复侧用的是 `LogicalPosition` —— 两者差一个 `scale_factor`。
+                // Windows 上 scale 基本恒为 1，量不出来；macOS Retina 是 2.0，
+                // 于是**每退出再启动一次，位置就往右下翻一倍**：
+                // 300 → 600 → 1200 → 2400 → 4800（已出屏）。
+                // 而 `is_position_on_screen` 只查 ±10000，拦不住，**窗口一旦出屏
+                // 就没有任何入口能把它拖回来** —— 症状与约定 8 记的
+                // 「窗口下半部分掉到屏幕外」一模一样，但那里归因成了尺寸问题。
+                //
+                // 为什么存逻辑而不是存物理：同一份 `WindowState` 里的
+                // width/height 本来就是逻辑（可视区）像素，x/y 跟着用逻辑
+                // 才自洽；而且逻辑坐标在「换一块不同 DPI 的显示器」后仍然有意义，
+                // 物理坐标不成立。
+                let scale = window.scale_factor().unwrap_or(1.0).max(f64::MIN_POSITIVE);
                 let visible = to_visible_size(size.width as f64, size.height as f64);
                 let _guard = config::lock();
                 let mut cfg = config::load();
-                cfg.window.x = Some(pos.x as f64);
-                cfg.window.y = Some(pos.y as f64);
+                cfg.window.x = Some(pos.x as f64 / scale);
+                cfg.window.y = Some(pos.y as f64 / scale);
                 cfg.window.width = visible.width;
                 cfg.window.height = visible.height;
                 match config::save(&cfg) {
-                    Ok(()) => log::debug!("窗口状态已保存: {}x{} @ ({},{})", visible.width, visible.height, pos.x, pos.y),
+                    Ok(()) => log::debug!(
+                        "窗口状态已保存: {}x{} @ ({},{}) [逻辑像素]",
+                        visible.width,
+                        visible.height,
+                        cfg.window.x.unwrap_or_default(),
+                        cfg.window.y.unwrap_or_default()
+                    ),
                     Err(e) => log::warn!("窗口状态保存失败: {}", e),
                 }
             }

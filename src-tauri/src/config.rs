@@ -619,6 +619,21 @@ const BACKEND_MANAGED_FIELDS: &[&str] = &[
     "floating_ball_x",
     "floating_ball_y",
     "floating_ball_idle_spin",
+    // 剪贴板「粘贴方式」：前端只读（FeaturesPanel 用本地 ref，改动只经
+    // set_clipboard_paste_method 命令写盘）。不登记的话，同一面板里改一下
+    // 「记录剪贴板图片」就会 saveConfig 整份快照，把它冲回启动时的旧值。
+    // 这条在 macOS 上尤其扎眼：约定 70 刚修好「选 ⌘⇧V 却发 ⌘V」，
+    // 用户为此去改这个下拉框，然后被无声吃回去。
+    "clipboard_paste_method",
+    // AI 对话抽屉面板几何/开合：前端只读（index.vue 用本地 ref，改动只经
+    // set_chat_panel 命令写盘）。不登记则拖完面板改任意设置就回弹。
+    "chat_panel_width",
+    "chat_panel_height",
+    "chat_panel_open",
+    // 主窗位置与尺寸：只经 lib.rs::persist_window_state 写盘（点 × 隐藏到托盘时）。
+    // 整块登记是安全的 —— 其中的 always_on_top 由 set_always_on_top_config
+    // 走「锁内读-改-写磁盘」，磁盘同样是权威源。
+    "window",
     // 「我的扩展」本机源码目录：只经 add/remove_dev_extension 变更
     "dev_extensions",
     "dev_mode_enabled",
@@ -651,6 +666,15 @@ pub fn merge_disk_authoritative(merged: &mut AppConfig, disk: &AppConfig) {
     merged.floating_ball_x = disk.floating_ball_x;
     merged.floating_ball_y = disk.floating_ball_y;
     merged.floating_ball_idle_spin = disk.floating_ball_idle_spin;
+    // 剪贴板粘贴方式：前端快照里是启动时的值，改动只经命令写盘（见登记处说明）
+    merged.clipboard_paste_method = disk.clipboard_paste_method.clone();
+    // AI 对话抽屉面板几何/开合：同上
+    merged.chat_panel_width = disk.chat_panel_width;
+    merged.chat_panel_height = disk.chat_panel_height;
+    merged.chat_panel_open = disk.chat_panel_open;
+    // 主窗位置与尺寸：整块以磁盘为准。always_on_top 也在其中，但由
+    // set_always_on_top_config 锁内读-改-写磁盘，磁盘值本就是最新的。
+    merged.window = disk.window.clone();
     merged.dev_extensions = disk.dev_extensions.clone();
     // 已废弃字段（登记即加载后不再读取），仍以磁盘为准以免被快照写回
     merged.dev_mode_enabled = disk.dev_mode_enabled;
@@ -966,7 +990,6 @@ mod tests {
         snapshot.theme_preset = "midnight".to_string();
         snapshot.accent_color = Some("#8b8bff".to_string());
         snapshot.sidebar_toggle = true;
-        snapshot.window.width = 1280.0;
         snapshot.dashboard_layout = r#"[{"id":"clock"}]"#.to_string();
 
         let mut merged = snapshot.clone();
@@ -976,7 +999,54 @@ mod tests {
         assert_eq!(merged.theme_preset, "midnight");
         assert_eq!(merged.accent_color.as_deref(), Some("#8b8bff"));
         assert!(merged.sidebar_toggle);
-        assert_eq!(merged.window.width, 1280.0);
         assert_eq!(merged.dashboard_layout, snapshot.dashboard_layout);
+
+        // ⚠️ `window` 曾经被这条断言锁成「取前端快照值」（当年写的是
+        // `snapshot.window.width = 1280.0; assert_eq!(merged.window.width, 1280.0)`），
+        // 那正是 bug 本身：位置尺寸只经 `persist_window_state` 写盘，前端从不写，
+        // 快照里永远是启动时的旧值，于是「拖完窗口 → 改任意设置 → 下次启动弹回原处」。
+        // 现在 `window` 登记为后端管理字段，`snapshot_without_backend_fields`
+        // 会把它整块剥掉，合并后应当等于 **disk**。
+        assert_eq!(
+            merged.window.width, disk.window.width,
+            "窗口尺寸必须以磁盘为准，而不是前端启动快照"
+        );
+        assert_eq!(merged.window.height, disk.window.height);
+    }
+
+    /// 后端独占写盘的字段**不能被前端快照覆盖**。
+    ///
+    /// 这条是 A4/A5/A6 三个漏登记 bug 的正面防线：它们能长期存活，
+    /// 正是因为 `config::tests` 只验证「清单里的字段合并后等于磁盘值」，
+    /// 验证不了「清单外、但后端独占写的字段被快照吃掉了」。
+    #[test]
+    fn backend_only_fields_survive_a_snapshot_save() {
+        let mut disk = AppConfig::default();
+        // 模拟：用户改了这些只有后端会写盘的项
+        disk.clipboard_paste_method = "ctrl_shift_v".into();
+        disk.chat_panel_width = 777.0;
+        disk.chat_panel_height = 555.0;
+        disk.chat_panel_open = true;
+        disk.window.width = 1234.0;
+        disk.window.x = Some(42.0);
+
+        // 模拟前端那份「启动快照」：这些字段都停在更早的值
+        let mut snapshot = AppConfig::default();
+        snapshot.clipboard_paste_method = "auto".into();
+        snapshot.chat_panel_width = 420.0;
+        snapshot.chat_panel_height = 380.0;
+        snapshot.chat_panel_open = false;
+        snapshot.window.width = 1400.0;
+        snapshot.window.x = None;
+
+        let mut merged = snapshot.clone();
+        merge_disk_authoritative(&mut merged, &disk);
+
+        assert_eq!(merged.clipboard_paste_method, "ctrl_shift_v", "粘贴方式被快照回滚了");
+        assert_eq!(merged.chat_panel_width, 777.0, "对话面板宽度被快照回滚了");
+        assert_eq!(merged.chat_panel_height, 555.0, "对话面板高度被快照回滚了");
+        assert!(merged.chat_panel_open, "对话面板开合态被快照回滚了");
+        assert_eq!(merged.window.width, 1234.0, "窗口宽度被快照回滚了");
+        assert_eq!(merged.window.x, Some(42.0), "窗口位置被快照回滚了");
     }
 }

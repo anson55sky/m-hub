@@ -120,6 +120,32 @@ if (!win) {
   }
 }
 
+// ---- index.html 的内联启动页（第 5 处）---------------------------------------
+// 这处**必须硬编码**：`index.html` 的 <style> 在 <head> 里，早于 style.css 加载，
+// 那时 `var(--window-shadow-margin)` 还不存在，var() 解析成 0 → 修等于没修。
+// 代价是它成了第 5 份拷贝，故在这里锁死。
+const html = read("index.html");
+const splashInset = html.match(/#boot-splash\s*\{[\s\S]*?\binset:\s*(\d+(?:\.\d+)?)px/);
+if (!splashInset) {
+  problems.push("index.html 找不到 `#boot-splash` 的 inset 声明");
+} else if (Number(splashInset[1]) !== cssMargin) {
+  problems.push(
+    `index.html #boot-splash 的 inset=${splashInset[1]}px，应为 ${cssMargin}px（= --window-shadow-margin）。\n` +
+      `        不一致时启动欢迎页的圆角落在窗口角、而主界面圆角落在内容角，\n` +
+      `        启动瞬间会看到一次「形状跳变」（方块缩进去 32px）。`,
+  );
+}
+const splashRadius = html.match(/#boot-splash::before\s*\{[\s\S]*?border-radius:\s*(\d+(?:\.\d+)?)px/);
+const radiusMatch = css.match(/--window-radius:\s*(\d+(?:\.\d+)?)px/);
+if (!splashRadius) {
+  problems.push("index.html 找不到 `#boot-splash::before` 的 border-radius 声明");
+} else if (radiusMatch && Number(splashRadius[1]) !== Number(radiusMatch[1])) {
+  problems.push(
+    `index.html #boot-splash::before 的 border-radius=${splashRadius[1]}px，` +
+      `应为 ${radiusMatch[1]}px（= --window-radius）`,
+  );
+}
+
 // ---- 阴影延伸量不得超过外扩带（否则阴影被窗口边缘切平）----------------------
 // box-shadow 的 `offsetY + blur` 决定向下的可见延伸，blur 决定两侧；
 // 超出 --window-shadow-margin 的部分会被窗口边界裁掉，表现为「阴影被削平」。

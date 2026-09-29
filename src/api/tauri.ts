@@ -225,8 +225,8 @@ export interface WindowState {
  * ⚠️ 判据：**这个类型里有没有某个字段，都不代表前端说了算**。凡是在后端
  * `config.rs::BACKEND_MANAGED_FIELDS` 里登记的字段，一律以磁盘为准（合并实现见
  * `config.rs::merge_disk_authoritative`，三条回归测试守着）。两种情形**都会**覆盖磁盘：
- *   - 前端认识它（如 `chat_models`、`chat_window_*`、`floating_ball_*`、`skipped_update_version`）
- *     → 提交时带的是**启动快照**里的旧值；
+ *   - 前端认识它（如 `chat_models`、`chat_window_*`、`floating_ball_*`、`skipped_update_version`、
+ *     `clipboard_paste_method`、`chat_panel_*`、`window`）→ 提交时带的是**启动快照**里的旧值；
  *   - 前端不认识它（如 `dev_extensions`、`dev_mode_enabled`、`skill_roots`）→ 序列化后整份提交，
  *     反序列化时按 `AppConfig::default()` 的**同名字段值**补缺（容器级 `#[serde(default)]`），
  *     照样把磁盘值冲掉（`skill_roots` 那次事故就是这么发生的）。

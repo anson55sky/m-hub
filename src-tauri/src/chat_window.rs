@@ -128,23 +128,16 @@ fn schedule_persist(app: &AppHandle) {
 
 /// 首次建窗（尚无记忆位置）的落点：主窗中央略偏右下（与便签/整列表浮窗同口径）。
 /// 主窗不可见或取不到几何时返回 None，交给系统默认级联位置。
-/// 入参为逻辑尺寸，返回物理 px 坐标（与 `set_position(PhysicalPosition)` 对齐）。
+/// 入参为逻辑尺寸，返回**物理** px 坐标（与 `set_position(PhysicalPosition)` 对齐）。
+///
+/// ⚠️ 这里原先是本工程**唯一写对**的一份（显式乘了 `scale` 换算），另三份是错的。
+/// 现改为调用 `lib.rs::centered_on_main`（算法单一来源），只在出口做一次
+/// 逻辑 → 物理的换算，以配合本窗用 `PhysicalPosition` 落位的既有口径
+/// （本窗的 `persist_geometry` 存的是 `outer_position()`，也是物理）。
 fn initial_center(app: &AppHandle, width: f64, height: f64) -> Option<(i32, i32)> {
-    let main = crate::main_window(app)?;
-    if !main.is_visible().unwrap_or(false) {
-        return None;
-    }
-    let pos = main.outer_position().ok()?;
-    let size = main.outer_size().ok()?;
-    let scale = main.scale_factor().unwrap_or(1.0);
-    // outer_size 是物理 u32、position 是物理 i32，统一到 i32 再算
-    let (sw, sh) = (size.width as i32, size.height as i32);
-    let w = (width * scale) as i32;
-    let h = (height * scale) as i32;
-    Some((
-        pos.x + (sw - w) / 2 + 40,
-        pos.y + (sh - h) / 2 + 24,
-    ))
+    let (x, y) = crate::centered_on_main(app, width, height)?;
+    let scale = crate::main_window(app)?.scale_factor().unwrap_or(1.0).max(0.01);
+    Some(((x * scale).round() as i32, (y * scale).round() as i32))
 }
 
 /// 建窗（一律隐藏常驻，唤起/收起由 show_window/hide_window 做显隐；启动 init 唯一调用点）

@@ -136,12 +136,26 @@ static ESC_WATCH: Mutex<Option<crate::mac::EscWatch>> = Mutex::new(None);
 /// （而且没有任何报错，只表现为「Esc 什么都不发生」）。
 #[cfg(target_os = "macos")]
 fn stop_esc_watch() {
-    match ESC_WATCH.lock() {
-        Ok(mut slot) => {
-            *slot = None;
-        }
-        Err(e) => log::warn!("剪贴板浮层：停止 Esc 监视时锁被占用: {e}"),
-    }
+    // ⚠️ **必须先出锁再 drop**（2026-09-29 修，原实现是自死锁）。
+    // `*slot = None` 会在**锁仍持有时** drop 掉旧的 `EscWatch`，而它的
+    // `Drop` 里要 `h.join()` 等监视线程收工。于是形成死锁环：
+    //   边缘监视线程：持 ESC_WATCH ──join──▶ 等 tap 线程结束
+    //   tap 线程    ：等 ESC_WATCH（它正走 on_esc → hide_overlay → stop_esc_watch）
+    // 两者互等，**永久**卡死，且没有任何报错。
+    //
+    // 症状：悬浮球悬停不再滑出、拖拽不再吸附、剪贴板浮层点外部收不起来，
+    // 而且 **Esc 被永久吞掉**（tap 线程也卡住、拆不掉）—— 任何 App 的 Esc 都失效，
+    // 只能重启 m-hub。
+    //
+    // 原先的 `Drop` 里只挡了「自己 join 自己」（tap 线程自己 drop 自己的场景），
+    // 没挡「drop 者 ≠ 被 join 者、但被 join 者要同一把锁」—— 这是标准的
+    // lock-ordering 违规，加 join 之前必须想清楚被 join 线程会不会回头拿锁。
+    let taken = {
+        let mut slot = ESC_WATCH.lock().unwrap_or_else(|e| e.into_inner());
+        slot.take()
+    };
+    // 锁已释放，此刻 drop 才安全
+    drop(taken);
 }
 
 /// 一次延迟窗口操作任务：粘贴后恢复焦点+注入按键，或收起后归还焦点。
@@ -1581,10 +1595,12 @@ fn show_ready_overlay(win: &tauri::WebviewWindow, app: &AppHandle) {
             hide_overlay(&app_for_esc);
         }) {
             Ok(watch) => {
-                if let Ok(mut slot) = ESC_WATCH.lock() {
-                    // 顶掉上一次残留的（正常路径上上一个已在 hide 时 drop）
-                    *slot = Some(watch);
-                }
+                // 同样必须出锁再 drop 旧的（见 stop_esc_watch 的死锁说明）
+                let replaced = {
+                    let mut slot = ESC_WATCH.lock().unwrap_or_else(|e| e.into_inner());
+                    slot.replace(watch)
+                };
+                drop(replaced);
             }
             // 失败不阻断：浮层照常显示，只是没有 Esc 兜底
             Err(()) => log::warn!("剪贴板浮层：Esc 兜底不可用，只能点浮层外部关闭"),

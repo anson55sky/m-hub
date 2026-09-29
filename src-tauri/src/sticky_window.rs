@@ -11,20 +11,11 @@ pub const STICKY_HEIGHT: f64 = 280.0;
 pub fn window_label(slot: i64) -> String {
     format!("{}{}", STICKY_WINDOW_PREFIX, slot)
 }
-
-/// 计算浮窗初始位置：主窗口中心附近错开一点（避免完全盖住来源卡）。
-/// 主窗口不可见或取不到位置时返回 None（交给系统默认位置）。
+/// 浮窗初始落点：主窗中心略偏右下。**单位与算法统一由
+/// `lib.rs::centered_on_main` 提供**（此前此处有三份各自为政的实现，
+/// 其中把物理坐标与逻辑尺寸混算，Retina 上落点偏近一倍）。
 fn initial_position(app: &AppHandle) -> Option<(f64, f64)> {
-    let main = crate::main_window(app)?;
-    if !main.is_visible().unwrap_or(false) {
-        return None;
-    }
-    let pos = main.outer_position().ok()?;
-    let size = main.outer_size().ok()?;
-    // 主窗口中心附近，向右下偏移半张浮窗尺寸 + 少量留白
-    let x = pos.x as f64 + size.width as f64 / 2.0 - STICKY_WIDTH / 2.0 + 40.0;
-    let y = pos.y as f64 + size.height as f64 / 2.0 - STICKY_HEIGHT / 2.0 + 24.0;
-    Some((x, y))
+    crate::centered_on_main(app, STICKY_WIDTH as f64, STICKY_HEIGHT as f64)
 }
 
 /// 创建（或重建）便签浮窗。已存在同 label 窗口时先复用。
