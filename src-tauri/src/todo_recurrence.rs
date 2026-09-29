@@ -50,6 +50,35 @@ fn weekday_offsets(mask: i64) -> Vec<u32> {
     (0..7u32).filter(|i| mask & (1 << i) != 0).collect()
 }
 
+/// 毫秒时间戳 → 本地时间。**遇到夏令时回拨造成的歧义取最早那个**。
+///
+/// # 为什么不能用 `.single()`（2026-09-29 修，全模块 6 处）
+///
+/// `Local.timestamp_millis_opt()` 返回 `LocalResult`：
+/// - `Single`    —— 唯一解（绝大多数时刻）
+/// - `Ambiguous` —— 当地**回拨**时同一个墙上时间出现两次（如 America/New_York
+///   每年 11 月第一个周日 01:00–02:00 本地时间）
+///
+/// 原先 6 处一律 `.single()`，于是只要 `due_at` 落在那个重复小时里就返回 `None`，
+/// 而这个 `None` 一路被当成**「规则已用尽」**：
+/// `repo/todo.rs` 据此判定 `ended = true`，把 `repeat_mode` **永久**写成 `once`。
+/// 于是「每周一 01:30」在 DST 回拨之后再也不滚了，且没有任何提示 ——
+/// 正是本模块开头警告的「混为一谈会静默降级」。
+///
+/// 另一条路径同样致命：点「完成本轮」时抛
+/// `RECURRENCE_INVALID_TIME: due_at 不是合法时间戳`，这一轮**永远完不成**。
+///
+/// 改用 `.earliest()` 后：`timestamp_millis_opt` 是「瞬时 → 本地」的转换方向，
+/// 只会歧义、不会空洞，故对**任何**合法 `i64` 都返回 `Some` ——
+/// 这条路径再也不会凭空产出「规则已用尽」。
+///
+/// 取 earliest 而非 latest 不影响计算结果：歧义的两个候选**本地日期与时分完全相同**
+/// （差的是 UTC 偏移量），而本模块只用日期与时分。取最早是为了与下面 `at_time`
+/// 已有的 `Ambiguous(earliest, _)` 取法保持一致，全模块口径统一。
+fn local_at(ms: i64) -> Option<chrono::DateTime<Local>> {
+    Local.timestamp_millis_opt(ms).earliest()
+}
+
 /// 本地「日 + 时分」→ 毫秒时间戳。
 /// 夏令时歧义取较早的一侧；**不存在的时刻（春季跳变被跳过的那一小时）顺延到当日
 /// 第一个有效时刻**——绝不能返回 None：上层把 None 当成「规则已用尽」，
@@ -143,14 +172,14 @@ fn month_anchor(year: i32, month: u32, rule: &RepeatRule) -> Option<NaiveDate> {
 /// 周差必须按**日历日**算，不能用毫秒差除以 7 天：跨夏令时切换的那一周只有 167 小时，
 /// 整除后周序号少 1，「每 2 周的周一」会整周漏掉（中国无夏令时，但用户可能在别的时区）。
 fn week_monday(ms: i64) -> Option<NaiveDate> {
-    let dt = Local.timestamp_millis_opt(ms).single()?;
+    let dt = local_at(ms)?;
     dt.date_naive()
         .checked_sub_signed(Duration::days(dt.weekday().num_days_from_monday() as i64))
 }
 
 /// 下一个实例（严格晚于 prev）。规则用尽（如 monthly 无合法日）返回 None。
 fn advance(rule: &RepeatRule, prev: i64, base_time: NaiveTime) -> Option<i64> {
-    let dt = Local.timestamp_millis_opt(prev).single()?;
+    let dt = local_at(prev)?;
     let date = dt.date_naive();
     match rule.mode.as_str() {
         "daily" => at_time(date + Duration::days(1), base_time),
@@ -238,7 +267,7 @@ fn advance(rule: &RepeatRule, prev: i64, base_time: NaiveTime) -> Option<i64> {
 
 /// 上一个实例（严格早于 cur），用于撤销勾选时把 due_at 滚回本轮。
 fn retreat(rule: &RepeatRule, cur: i64, base_time: NaiveTime) -> Option<i64> {
-    let dt = Local.timestamp_millis_opt(cur).single()?;
+    let dt = local_at(cur)?;
     let date = dt.date_naive();
     match rule.mode.as_str() {
         "daily" => at_time(date - Duration::days(1), base_time),
@@ -331,9 +360,10 @@ pub fn next_occurrence(rule: &RepeatRule, due_at: i64, from_ms: i64) -> Result<O
     if rule.is_once() {
         return Ok(None);
     }
-    let base_time = Local
-        .timestamp_millis_opt(due_at)
-        .single()
+    let base_time = local_at(due_at)
+        // local_at 用 earliest()，对任何合法 i64 都返回 Some，这个 Err 分支
+        // 现在**不可达**。仍保留：① 语义上区分「算不出基准时刻」与「规则结束」，
+        // ② 万一 chrono 将来对某些区间也返回 None，走 Err 比静默降级好。
         .ok_or_else(|| "RECURRENCE_INVALID_TIME: due_at 不是合法时间戳".to_string())?
         .time();
     let mut prev = due_at;
@@ -357,7 +387,7 @@ pub fn previous_occurrence(rule: &RepeatRule, cur: i64) -> Option<i64> {
     if rule.is_once() {
         return None;
     }
-    let base_time = Local.timestamp_millis_opt(cur).single()?.time();
+    let base_time = local_at(cur)?.time();
     retreat(rule, cur, base_time)
 }
 
@@ -400,9 +430,10 @@ pub fn expand_occurrences(
     if rule.is_once() || to_ms < from_ms {
         return Ok(out);
     }
-    let base_time = Local
-        .timestamp_millis_opt(due_at)
-        .single()
+    let base_time = local_at(due_at)
+        // local_at 用 earliest()，对任何合法 i64 都返回 Some，这个 Err 分支
+        // 现在**不可达**。仍保留：① 语义上区分「算不出基准时刻」与「规则结束」，
+        // ② 万一 chrono 将来对某些区间也返回 None，走 Err 比静默降级好。
         .ok_or_else(|| "RECURRENCE_INVALID_TIME: due_at 不是合法时间戳".to_string())?
         .time();
     let mut remaining = match rule.end_mode.as_deref() {
@@ -455,6 +486,92 @@ mod tests {
             end_mode: None,
             end_at: None,
             count: None,
+        }
+    }
+
+    /// `local_at` 对**任何**合法毫秒时间戳都必须返回 Some。
+    ///
+    /// 这正是本次修复的核心不变量：这里的 None 会被上层当成「规则已用尽」，
+    /// 从而把还在生效的周期待办**永久**降级成一次性，且无任何提示。
+    /// 旧实现用 `.single()`，在 DST 回拨的重复小时里会返回 None。
+    #[test]
+    fn local_at_never_yields_none() {
+        // 覆盖 1900-2100，每 37 分钟一个采样点（37 与 24h 不整除，
+        // 保证会落在各种奇数分钟上），再加两个 i64 极值。
+        let mut checked = 0i64;
+        let mut ms = ts(1900, 1, 1, 0, 0);
+        let end = ts(2100, 1, 1, 0, 0);
+        while ms < end {
+            assert!(
+                local_at(ms).is_some(),
+                "local_at 在 {ms}（本地 {:?}）返回了 None —— 这会被上层当成「规则已用尽」",
+                Local.timestamp_millis_opt(ms)
+            );
+            checked += 1;
+            ms += 37 * 60 * 1000;
+        }
+        assert!(checked > 1_000_000, "采样点过少，测试没覆盖到东西: {checked}");
+
+        // ⚠️ 但**超出 chrono 可表示范围**的输入确实会得到 None
+        // （chrono 大致支持 ±26 万年，而 i64 毫秒能到 ±2.9 亿年）。
+        // 这不是 bug，而是必须有**入口校验**去挡的东西：
+        // `due_at` 会从不可信扩展经 `mhub_api` 进来（约定见 commands.rs 的
+        // DUE_AT_MAX），一个越界值会让这里拿到 None，而下游
+        // `date + Duration::days(n)` 在越界日期上会**直接 panic**，
+        // 连带把 DbState 的互斥锁毒化、整个应用的数据库功能当场全灭。
+        // 所以这里的 None 必须在**进入本模块之前**就被拒绝，不能靠这里兜。
+        assert!(
+            local_at(i64::MAX).is_none(),
+            "i64::MAX 毫秒超出 chrono 可表示范围，预期返回 None"
+        );
+    }
+
+    /// 若本机时区有夏令时，**实测**造一个歧义时刻，证明 `.single()` 会返回 None
+    /// 而 `local_at`（earliest）不会。
+    ///
+    /// 本工程没有 chrono-tz 这类固定时区依赖，无法在任意机器上构造出歧义时刻，
+    /// 所以这里退而用本机时区：没有 DST 的机器（CI、中国大陆）走
+    /// 「扫描未命中即视为无事可验」的分支，并**把这件事打印出来**而不是静默通过，
+    /// 以免日后有人以为这条在各处都真的跑过。
+    #[test]
+    fn ambiguous_local_time_is_handled_not_dropped() {
+        // 暴力扫 2000-2030 的 11 月，找一个 `single()` 会返回 None 的时刻。
+        let mut found = 0usize;
+        for year in 2000..2030i32 {
+            for day in 1..=30u32 {
+                let Some(base) = at_time(
+                    NaiveDate::from_ymd_opt(year, 11, day).unwrap(),
+                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                ) else {
+                    continue;
+                };
+                // 那一天的每一分钟都试一遍，命中歧义就停下
+                for minute in 0..(60 * 24 * 30) {
+                    let ms = base + minute as i64 * 60_000;
+                    if Local.timestamp_millis_opt(ms).single().is_none() {
+                        assert!(
+                            local_at(ms).is_some(),
+                            "歧义时刻 {ms} 上 local_at 也返回了 None"
+                        );
+                        found += 1;
+                        if found >= 3 {
+                            break;
+                        }
+                    }
+                }
+                if found >= 3 {
+                    break;
+                }
+            }
+            if found >= 3 {
+                break;
+            }
+        }
+        if found == 0 {
+            eprintln!(
+                "[todo_recurrence] 本机时区（{}）无夏令时或未扫到歧义时刻，                 本次未实测验到 DST 分支；核心不变量由 local_at_never_yields_none 覆盖",
+                Local::now().format("%Z")
+            );
         }
     }
 

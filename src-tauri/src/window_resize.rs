@@ -63,6 +63,13 @@ pub fn parse_edges(direction: &str) -> Option<Edges> {
 }
 
 /// 记录一次缩放拖拽的起点状态
+/// 主窗 inner 最小宽度（**逻辑** px）。必须与 `tauri.conf.json` 的 `minWidth` 一致，
+/// 由 `scripts/check-window-min-size.mjs` 在 prebuild 锁死（tao 建窗时用它调
+/// `NSWindow.setMinSize`，这里是那份配置的 Rust 侧镜像）。
+pub const MIN_INNER_W: f64 = 1064.0;
+/// 主窗 inner 最小高度（**逻辑** px），同上，对应 `minHeight`。
+pub const MIN_INNER_H: f64 = 764.0;
+
 struct DragStart {
     edges: Edges,
     cursor: (i32, i32),
@@ -72,6 +79,11 @@ struct DragStart {
     h: f64,
     /// 起始所在显示器的工作区（物理像素），用于把窗口夹在屏幕内
     work: (f64, f64, f64, f64),
+    /// 起始时的缩放因子。**必要**：本结构的 x/y/w/h 全是**物理**像素
+    /// （来自 `outer_position()` / `inner_size()`），而 `minWidth`/`minHeight`
+    /// 是**逻辑**像素（AppKit 的 min size 也是逻辑值经 tao 换算后落到物理）。
+    /// 不乘 scale 的话，Retina 上算出来的下限只有真实下限的一半。
+    scale: f64,
 }
 
 /// 按下边缘后调用。**立即返回**，实际拖拽在后台线程里进行。
@@ -118,6 +130,7 @@ fn snapshot(window: &tauri::Window<tauri::Wry>, edges: Edges) -> Option<DragStar
         w: size.width as f64,
         h: size.height as f64,
         work,
+        scale: window.scale_factor().unwrap_or(1.0).max(0.01),
     })
 }
 
@@ -189,11 +202,23 @@ fn geometry_for(s: &DragStart, cursor: (i32, i32)) -> (f64, f64, f64, f64) {
     if s.edges.north {
         h -= dy;
     }
-    // 夹到工作区。**下限交给 AppKit**：tao 建窗时调过 `NSWindow.setMinSize`
-    // （macos/window.rs:1753），比 min size 小的 set_size 会被系统自己夹住，
-    // 这里重复夹一遍反而会在最小尺寸被抬高后算出错误的窗口原点。
-    w = w.clamp(1.0, s.work.2);
-    h = h.clamp(1.0, s.work.3);
+    // 夹下限**必须和 AppKit 用同一个值**（2026-09-29 修）。
+    //
+    // 原先这里写的是「下限交给 AppKit，这里只夹到 1.0」，理由是「重复夹一遍
+    // 会算出错误的窗口原点」—— 那个理由是**反的**：AppKit 恰恰是在我算完原点
+    // **之后**才夹，于是我拿着一个永远不会被采用的宽度去算原点。
+    // 往西边拖过头时的实际表现是：窗口不继续缩了，却猛地往右下窜一下
+    // （宽度卡在 min，而原点按更小的宽度左移过了）。
+    //
+    // 正确做法是让两边一致：`minWidth` 是逻辑 px，本结构是物理 px，
+    // 所以物理下限 = MIN_INNER_W * scale。
+    // clamp 的上界用 `.max()`：防 min > max 时 panic —— 工作区真比 min 还窄
+    // （极小屏 / 显示器枚举异常）时，宁可让窗口略微超屏，也不能 panic：
+    // 整个拖拽线程挂掉比窗口超屏严重得多。
+    let min_w = MIN_INNER_W * s.scale;
+    let min_h = MIN_INNER_H * s.scale;
+    w = w.clamp(min_w, s.work.2.max(min_w));
+    h = h.clamp(min_h, s.work.3.max(min_h));
 
     // 北/西边要连带移动窗口原点，否则是「往内长」而不是「往外长」
     let x = if s.edges.west {
@@ -243,15 +268,23 @@ mod tests {
 
     // ---- 几何（拖到某点后窗口该变成什么样）----
 
+    /// 夹具用**真实**的主窗尺寸（tauri.conf.json 的默认 1464×964），不用随手编的
+    /// 800×600 —— 后者比最小尺寸 1064×764 还小，于是每一步都会被下限夹住，
+    /// 「往东拖变宽」这类用例全部退化成「恒等于最小值」，测不出任何东西。
+    const FIXTURE_W: f64 = 1464.0;
+    const FIXTURE_H: f64 = 964.0;
+
     fn start(edges: Edges) -> DragStart {
         DragStart {
             edges,
             cursor: (1000, 500),
             x: 100.0,
             y: 200.0,
-            w: 800.0,
-            h: 600.0,
+            w: FIXTURE_W,
+            h: FIXTURE_H,
             work: (0.0, 0.0, 3000.0, 2000.0),
+            // 默认 1.0（非 Retina）以便断言直观；Retina 场景另有用例
+            scale: 1.0,
         }
     }
 
@@ -259,7 +292,8 @@ mod tests {
     fn dragging_east_grows_width_and_keeps_origin() {
         let s = start(Edges { east: true, ..Default::default() });
         let (w, h, x, y) = geometry_for(&s, (1100, 500));
-        assert_eq!((w, h, x, y), (900.0, 600.0, 100.0, 200.0));
+        assert_eq!((w, h), (FIXTURE_W + 100.0, FIXTURE_H));
+        assert_eq!((x, y), (100.0, 200.0), "东边拖动时原点不动");
     }
 
     /// 西边是这里最容易错的一条：宽度按 -dx 变，同时**原点必须反向移动**，
@@ -267,34 +301,71 @@ mod tests {
     #[test]
     fn dragging_west_grows_width_leftwards_and_anchors_right_edge() {
         let s = start(Edges { west: true, ..Default::default() });
+        // dx = 900-1000 = -100，west 分支是 w -= dx → 变宽 100（左边缘往左长）
         let (w, h, x, y) = geometry_for(&s, (900, 500));
-        assert_eq!((w, h), (900.0, 600.0));
-        assert_eq!((x, y), (0.0, 200.0), "右边缘应保持在 100+800=900 不变");
+        assert_eq!((w, h), (FIXTURE_W + 100.0, FIXTURE_H));
+        assert_eq!(x + w, 100.0 + FIXTURE_W, "右边缘必须是不动的锚点");
+        assert_eq!((x, y), (0.0, 200.0));
     }
 
     #[test]
     fn dragging_north_anchors_bottom_edge() {
         let s = start(Edges { north: true, ..Default::default() });
+        // dy = 400-500 = -100，north 分支是 h -= dy → 变高 100
         let (w, h, x, y) = geometry_for(&s, (1000, 400));
-        assert_eq!((w, h), (800.0, 700.0));
-        assert_eq!((x, y), (100.0, 100.0), "下边缘应保持在 200+600=800 不变");
+        assert_eq!((w, h), (FIXTURE_W, FIXTURE_H + 100.0));
+        assert_eq!(y + h, 200.0 + FIXTURE_H, "下边缘必须是不动的锚点");
+        assert_eq!((x, y), (100.0, 100.0));
     }
 
     #[test]
     fn corner_drag_grows_both_axes() {
         let s = start(Edges { north: true, west: true, ..Default::default() });
         let (w, h, x, y) = geometry_for(&s, (900, 400));
-        assert_eq!((w, h, x, y), (900.0, 700.0, 0.0, 100.0));
+        assert_eq!((w, h), (FIXTURE_W + 100.0, FIXTURE_H + 100.0));
+        // 右边缘与下边缘都不动
+        assert_eq!(x + w, 100.0 + FIXTURE_W);
+        assert_eq!(y + h, 200.0 + FIXTURE_H);
+        assert_eq!((x, y), (0.0, 100.0));
     }
 
     /// 拖过头（把窗口往里拖成负宽）必须被夹住，且**原点不能跟着跑飞** ——
     /// 夹住宽度后原点要按夹后的尺寸算，否则窗口会瞬移到别处。
     #[test]
     fn overshrink_is_clamped_and_origin_stays_consistent() {
+        // dx = 3000-1000 = +2000 → w = 1464-2000 = -536（拖过头），夹到最小值
         let s = start(Edges { west: true, ..Default::default() });
         let (w, _h, x, _y) = geometry_for(&s, (3000, 500));
-        assert_eq!(w, 1.0, "宽度应被夹到下限");
-        assert_eq!(x, 100.0 - (1.0 - 800.0), "原点须按夹后的宽度算，右边缘才是锚点");
+        assert_eq!(w, MIN_INNER_W, "宽度应被夹到与 AppKit 相同的下限");
+        // 原点须按**夹后**的宽度算，右边缘 100+1464 保持不动
+        assert_eq!(x, 100.0 - (MIN_INNER_W - FIXTURE_W));
+        assert_eq!(x + w, 100.0 + FIXTURE_W, "右边缘不应移动 —— 这正是往西拖的语义");
+    }
+
+    /// Retina（scale 2.0）上物理下限是逻辑下限的两倍。
+    ///
+    /// 这条是上一条的姊妹用例：minWidth 是**逻辑** px，而本模块全程用**物理** px，
+    /// 漏乘 scale 会让下限只有真实值的一半 —— 在 13" Retina 上就是 1064 物理 px
+    /// ≈ 532 逻辑 px，窗口会被拖到比设计意图小一半，而 AppKit 又会在之后
+    /// 把它撑回 1064 逻辑 px，于是用户看到「拖到底就猛地弹一下」。
+    #[test]
+    fn min_bound_scales_with_retina() {
+        let mut s = start(Edges { west: true, ..Default::default() });
+        s.scale = 2.0;
+        let (w, _h, _x, _y) = geometry_for(&s, (3000, 500));
+        assert_eq!(w, MIN_INNER_W * 2.0, "物理下限必须是逻辑下限乘 scale");
+    }
+
+    /// 工作区比最小尺寸还窄时不能 panic（`f64::clamp` 在 min > max 时会 panic，
+    /// 而整个拖拽线程挂掉远比窗口超屏严重）。
+    #[test]
+    fn tiny_work_area_does_not_panic() {
+        let mut s = start(Edges { east: true, south: true, ..Default::default() });
+        s.work = (0.0, 0.0, 100.0, 100.0);
+        // 不 panic 即通过；下限优先于工作区，宁可超屏
+        let (w, h, _x, _y) = geometry_for(&s, (-1000, -1000));
+        assert_eq!(w, MIN_INNER_W);
+        assert_eq!(h, MIN_INNER_H);
     }
 
     /// 不能超过所在显示器的工作区（否则窗口大半掉到屏幕外）
@@ -311,9 +382,9 @@ mod tests {
     fn missing_work_area_does_not_lock_window() {
         let mut s = start(Edges { east: true, ..Default::default() });
         s.work = (0.0, 0.0, f64::MAX / 4.0, f64::MAX / 4.0);
-        // 起点光标 x=1000、窗口宽 800，拖到 x=5000 → dx=4000 → 宽 4800
+        // 起点光标 x=1000，拖到 x=5000 → dx=4000 → 宽 1464+4000
         let (w, _h, _x, _y) = geometry_for(&s, (5000, 500));
-        assert_eq!(w, 4800.0, "工作区缺失时应允许自由放大，而不是夹成 1px");
+        assert_eq!(w, FIXTURE_W + 4000.0, "工作区缺失时应允许自由放大，而不是夹成最小值");
     }
 
     #[test]

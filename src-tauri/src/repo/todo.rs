@@ -73,6 +73,10 @@ pub fn schedule(
     due_at: Option<i64>,
     remind_at: Option<i64>,
 ) -> Result<Todo> {
+    check_due_at("dueAt", due_at)
+        .map_err(|m| rusqlite::Error::InvalidParameterName(m))?;
+    check_due_at("remindAt", remind_at)
+        .map_err(|m| rusqlite::Error::InvalidParameterName(m))?;
     conn.execute(
         "UPDATE todos SET due_at = ?1, remind_at = ?2, remind_fired = 0, sort_order = NULL, updated_at = ?3, version = version + 1 WHERE id = ?4",
         params![due_at, remind_at, now(), id],
@@ -159,6 +163,43 @@ pub fn delete_with_version(
 }
 
 /// 乐观锁排期。expected_version 命中才更新，否则 CONFLICT。
+/// `due_at` / `remind_at` 允许的最小值：1900-01-01T00:00:00Z。
+pub const DUE_AT_MIN: i64 = -2_208_988_800_000;
+/// `due_at` / `remind_at` 允许的最大值：2100-01-01T00:00:00Z。
+pub const DUE_AT_MAX: i64 = 4_102_444_800_000;
+
+/// 排期时间戳的**入口校验**（2026-09-29 加）。
+///
+/// # 为什么必须挡
+///
+/// `due_at` 有两条来路，其中一条是**不可信扩展**经 `mhub_api::data_todos_schedule`
+/// 传进来的任意 `i64`（前端 DatePicker 那条也接受手工构造的 JSON）。
+/// 而 `dueAt` 一旦落到周期引擎里，越界值会在两个地方炸：
+///
+/// 1. `todo_recurrence::local_at` 对超出 chrono 可表示范围的毫秒返回 `None`，
+///    而 `None` 在上层被当成**「规则已用尽」** —— 静默把周期降级成一次性；
+/// 2. 更糟的是 `date + Duration::days(n)`（`todo_recurrence` 里到处在用）
+///    在越界日期上**直接 panic**。而 `DbState` 是 `Mutex<Connection>`，
+///    所有取锁点都用 `.map_err(|e| e.to_string())?` —— panic 会**毒化**该锁，
+///    之后整个应用的数据库功能全部返回错误，**直到重启**。
+///    也就是说一个扩展调一次 `data.todos.schedule` 传个垃圾值，
+///    就能让整个应用的数据库当场全灭。
+///
+/// 范围取 1900–2100：比任何真实排期宽出几个数量级，
+/// 也远在 chrono 的可表示范围（±26 万年）之内。
+/// 校验放在这一层是因为它是**两条来路的唯一汇合点**（`schedule` 与
+/// `schedule_with_version`），上游命令与扩展桥都绕不过去。
+fn check_due_at(field: &str, value: Option<i64>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if (DUE_AT_MIN..=DUE_AT_MAX).contains(&v) => Ok(()),
+        Some(v) => Err(format!(
+            "INVALID_ARGUMENT: {field} 超出可接受范围: {v}（允许 {DUE_AT_MIN}..={DUE_AT_MAX}，\
+             即 1900-01-01 至 2100-01-01 UTC）"
+        )),
+    }
+}
+
 pub fn schedule_with_version(
     conn: &Connection,
     id: i64,
@@ -166,6 +207,8 @@ pub fn schedule_with_version(
     remind_at: Option<i64>,
     expected_version: Option<i64>,
 ) -> Result<Todo, String> {
+    check_due_at("dueAt", due_at)?;
+    check_due_at("remindAt", remind_at)?;
     let affected = conn
         .execute(
             "UPDATE todos SET due_at = ?1, remind_at = ?2, remind_fired = 0, sort_order = NULL,
@@ -1207,5 +1250,47 @@ mod tests {
         let err = move_child(&conn, top.id, p.id, &[top.id]).unwrap_err();
         assert!(err.starts_with("INVALID_STATE"), "{err}");
         assert_eq!(get(&conn, top.id).unwrap().parent_id, None);
+    }
+
+    /// 越界的 `due_at` / `remind_at` 必须在**入口**被拒。
+    ///
+    /// 防线意义：它挡住的是「一个不可信扩展传个越界 dueAt → chrono 溢出 panic
+    /// → 毒化 DbState 的 Mutex → 整个应用数据库功能全灭到重启」这条链。
+    /// 单测只验得住「这里拒了」，验不住后续那半段（那是 chrono 的行为），
+    /// 但入口这一段正是唯一能便宜地拦住的地方。
+    #[test]
+    fn schedule_rejects_out_of_range_timestamps() {
+        let conn = setup();
+        let id = create(&conn, "越界排期", None, None).unwrap().id;
+
+        // 正常值放行
+        assert!(schedule(&conn, id, Some(0), None).is_ok());
+        assert!(schedule(&conn, id, Some(DUE_AT_MAX), None).is_ok());
+        assert!(schedule(&conn, id, Some(DUE_AT_MIN), None).is_ok());
+        assert!(schedule(&conn, id, None, None).is_ok());
+
+        // 越界一律拒绝，且**库里的值没被改动**（不能是「先写后报错」）
+        for bad in [DUE_AT_MAX + 1, DUE_AT_MIN - 1, i64::MAX, i64::MIN] {
+            let before = get(&conn, id).unwrap().due_at;
+            let err = schedule(&conn, id, Some(bad), None).unwrap_err().to_string();
+            assert!(
+                err.contains("INVALID_ARGUMENT"),
+                "越界值 {bad} 应当被 INVALID_ARGUMENT 拒绝，实际: {err}"
+            );
+            assert_eq!(
+                get(&conn, id).unwrap().due_at,
+                before,
+                "越界值 {bad} 竟然被写进了库"
+            );
+        }
+        // remind_at 同样要挡
+        assert!(schedule(&conn, id, None, Some(i64::MAX)).is_err());
+        // 带版本校验的入口（扩展桥走的这条）也要挡
+        assert!(schedule_with_version(&conn, id, Some(i64::MAX), None, None)
+            .unwrap_err()
+            .contains("INVALID_ARGUMENT"));
+        assert!(schedule_with_version(&conn, id, None, Some(i64::MIN), None)
+            .unwrap_err()
+            .contains("INVALID_ARGUMENT"));
     }
 }

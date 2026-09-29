@@ -265,8 +265,15 @@ fn fix_icon_paths(conn: &Connection) {
     };
     let old = old_dir.to_string_lossy().into_owned();
     let new = new_dir.to_string_lossy().into_owned();
+    // ⚠️ 这里用 `substr(...) = ?` 而不是 `LIKE ? || '%'`（2026-09-29 修）。
+    // `LIKE` 模式下 `_` 是「匹配任意单个字符」的通配符，而 macOS 用户名里
+    // 带下划线非常常见（`/Users/john_doe/…`）。于是 `LIKE '/Users/john_doe/%'`
+    // 还会顺带匹配到 `/Users/johnXdoe/…` 这类**不相干**的路径，
+    // 把它们一并 replace 成 m-hub 目录 —— 改坏别的应用的路径记录。
+    // `substr(icon, 1, length(?1)) = ?1` 是纯字符串比较，语义精确。
     match conn.execute(
-        "UPDATE resources SET icon = replace(icon, ?1, ?2) WHERE icon LIKE ?1 || '%'",
+        "UPDATE resources SET icon = replace(icon, ?1, ?2)
+           WHERE substr(icon, 1, length(?1)) = ?1",
         rusqlite::params![old, new],
     ) {
         Ok(n) if n > 0 => log::info!("已修复 {} 条图标路径为 m-hub 目录", n),
