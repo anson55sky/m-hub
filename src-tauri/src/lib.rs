@@ -42,6 +42,7 @@ mod tray;
 pub mod updater;
 mod webview_mem;
 mod win_taskbar;
+mod window_resize;
 mod mhub_api;
 
 /// WebView2 附加浏览器参数（所有窗口必须完全一致——同一 user data folder 下
@@ -716,6 +717,7 @@ pub fn run() {
             commands::log_client_error,
             commands::minimize_window,
             commands::toggle_maximize,
+            commands::window_resize_begin,
             commands::hide_to_tray,
             commands::parse_dropped_path,
             commands::import_icon_file,

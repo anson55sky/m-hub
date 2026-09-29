@@ -101,6 +101,9 @@ windows-core = "0.61"
 # plist：LaunchAgent 自启 plist 与 .app bundle 的 Info.plist 解析。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# CFRunLoop：Esc 事件 tap 要把 run loop source 挂到某个线程上并跑起来
+# （CGEventTap::new 建的 tap 只能在创建它的线程上生效）
+core-foundation = "0.10"
 objc2-foundation = { version = "0.3", features = [
     "NSArray",
     "NSData",

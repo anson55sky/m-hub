@@ -10,7 +10,7 @@ import type { AutostartStatus } from '../../api/tauri';
 import { useStore } from '../../stores/workbench';
 import { normalizeShortcutDisplay, useShortcutRecorder } from '../../composables/useShortcutRecorder';
 import { FLOATING_BALL_BUTTONS, FLOATING_BALL_MAX_BUTTONS } from '../../composables/floatingBallButtons';
-import { isMac } from '../../utils/platform';
+import { isMac, RIGHT_CLICK_TERM, shortcutLabel } from '../../utils/platform';
 
 const showToast = inject<(msg: string) => void>('showToast', () => {})
 const store = useStore()
@@ -290,7 +290,7 @@ onMounted(async () => {
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-name">桌面悬浮球</span>
-              <span class="setting-desc">主窗口隐藏/最小化时在桌面显示悬浮球（可开启下方「与主窗口同时显示」常驻）：单击展开环形快捷菜单，双击显示主窗口，右键快捷菜单，可拖拽，贴边自动隐藏一半</span>
+              <span class="setting-desc">主窗口隐藏/最小化时在桌面显示悬浮球（可开启下方「与主窗口同时显示」常驻）：单击展开环形快捷菜单，双击显示主窗口，{{ RIGHT_CLICK_TERM }}快捷菜单，可拖拽，贴边自动隐藏一半</span>
             </div>
             <button
               class="toggle"
@@ -406,7 +406,7 @@ onMounted(async () => {
                   type="text"
                   spellcheck="false"
                   :readonly="shortcutListening"
-                  placeholder="Ctrl+Shift+Space"
+                  :placeholder="shortcutLabel('toggle')"
                   @keydown="onShortcutKeydown"
                   @keydown.enter="commitShortcut"
                   @blur="onShortcutBlur"
@@ -434,7 +434,7 @@ onMounted(async () => {
                   type="text"
                   spellcheck="false"
                   :readonly="clipListening"
-                  placeholder="Ctrl+`"
+                  :placeholder="shortcutLabel('clipboard')"
                   @keydown="onClipShortcutKeydown"
                   @keydown.enter="commitClipShortcut"
                   @blur="onClipShortcutBlur"
@@ -462,7 +462,7 @@ onMounted(async () => {
                   type="text"
                   spellcheck="false"
                   :readonly="searchListening"
-                  placeholder="Ctrl+K"
+                  :placeholder="shortcutLabel('search')"
                   @keydown="onSearchShortcutKeydown"
                   @keydown.enter="commitSearchShortcut"
                   @blur="onSearchShortcutBlur"
@@ -490,7 +490,7 @@ onMounted(async () => {
                   type="text"
                   spellcheck="false"
                   :readonly="chatListening"
-                  placeholder="Ctrl+Shift+K"
+                  :placeholder="shortcutLabel('chat')"
                   @keydown="onChatShortcutKeydown"
                   @keydown.enter="commitChatShortcut"
                   @blur="onChatShortcutBlur"

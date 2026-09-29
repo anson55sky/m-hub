@@ -1086,6 +1086,14 @@ export const tauriApi = {
     invoke<void>('log_client_error', { message: payload.message, detail: payload.detail }),
   minimizeWindow: () => invoke<void>('minimize_window'),
   toggleMaximize: () => invoke<void>('toggle_maximize'),
+  /**
+   * 开始窗口缩放拖拽。**不要换成 `getCurrentWindow().startResizeDragging()`**：
+   * tao 在 macOS 上对该操作恒返回 `NotSupported`（tao-0.35.3 macos/window.rs:963），
+   * 且无边框窗口没有系统缩放边，于是光标会亮起 resize 图标却拖不动。
+   * 宿主改用 `window_resize.rs` 轮询光标自己实现。方向取值同 ResizeDirection。
+   */
+  windowResizeBegin: (direction: string) =>
+    invoke<void>('window_resize_begin', { direction }),
   hideToTray: () => invoke<void>('hide_to_tray'),
   // ---- 桌面悬浮球（ADR 0004，窗口几何恒定 + 椭圆命中区域/吸附/位置记忆均在 Rust 侧） ----
   floatingBallGetState: () => invoke<FloatingBallState>('floating_ball_get_state'),

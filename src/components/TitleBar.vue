@@ -3,7 +3,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Copy, Maximize2, MessageSquare, Minus, Pin, PinOff, Search, Square, X } from 'lucide-vue-next'
 import { isTauri, tauriApi } from '../api/tauri'
-import { isMac, prettyShortcut, trayLabel } from '../utils/platform'
+import {
+  isMac,
+  prettyShortcut,
+  RIGHT_CLICK_TERM,
+  TRAY_TERM,
+  trayLabel,
+} from '../utils/platform'
 import { useStore } from '../stores/workbench'
 
 const store = useStore()
@@ -94,11 +100,7 @@ function close() {
     // 首次关闭时提示已最小化到托盘，避免用户误以为应用退出了
     if (!localStorage.getItem('tray-hint-shown')) {
       localStorage.setItem('tray-hint-shown', '1')
-      showToast(
-        isMac
-          ? `已${trayLabel()}，右键菜单栏图标可退出`
-          : '已最小化到系统托盘，右键托盘图标可退出',
-      )
+      showToast(`已${trayLabel()}，在${TRAY_TERM}图标上${RIGHT_CLICK_TERM}可退出`)
     }
   }
 }
@@ -108,7 +110,7 @@ function close() {
   <div class="title-bar" :class="{ 'is-mac': isMac }" @mousedown="onDragStart">
     <!-- macOS：三颗交通灯在左侧。红=关闭 黄=最小化 绿=缩放 -->
     <div v-if="isMac" class="traffic-lights">
-      <button class="tl tl-close" title="关闭（最小化至菜单栏）" @click="close">
+      <button class="tl tl-close" :title="`关闭（${trayLabel()}）`" @click="close">
         <X :size="9" :stroke-width="2.4" />
       </button>
       <button class="tl tl-min" title="最小化" @click="minimize">
@@ -163,7 +165,7 @@ function close() {
           <Square v-if="!isMaximized" :size="14" :stroke-width="1.8" />
           <Copy v-else :size="14" :stroke-width="1.8" />
         </button>
-        <button class="win-btn close" title="关闭（最小化至托盘）" @click="close">
+        <button class="win-btn close" :title="`关闭（${trayLabel()}）`" @click="close">
           <X :size="15" :stroke-width="1.8" />
         </button>
       </template>

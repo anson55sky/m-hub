@@ -24,6 +24,7 @@ import { isTauri, tauriApi } from '../api/tauri'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import type { Countdown, ExtensionEntry, Note, Resource, Todo } from '../api/tauri'
 import { playChime } from '../utils/chime'
+import { shortcutLabel } from '../utils/platform'
 import { FileText, FolderOpen, LayoutDashboard, ListTodo, MessageSquare, Puzzle, Settings, ChevronLeft, ChevronRight, AppWindow, PanelRight } from 'lucide-vue-next'
 import type { Component } from 'vue'
 import { useTheme } from '../composables/useTheme'
@@ -59,6 +60,14 @@ const ExtensionView = defineAsyncComponent(() => import('../components/Extension
 const DashboardLayoutEditor = defineAsyncComponent(() => import('../components/DashboardLayoutEditor.vue'))
 
 const store = useStore()
+/**
+ * AI 对话快捷键的**显示**文本。
+ *
+ * ⚠️ 此前这里硬编码 `Ctrl+Shift+K`：macOS 上真实键是 ⌘⇧K，同一功能的标题栏
+ * tooltip 与设置页都写着 ⌘⇧K，三处不一致 —— 用户会去按 ⌃⇧K 发现没反应，
+ * 回来当成 bug。而且用户改了自定义快捷键后这行也不更新。
+ */
+const chatShortcutLabel = computed(() => shortcutLabel('chat', store.state.config.chat_shortcut))
 
 // 初始化三轴主题系统（应用 data-theme/data-preset/inline --accent，监听系统变化）
 useTheme()
@@ -1040,7 +1049,7 @@ provide('showToast', showToast)
         <section v-else-if="activeView === 'chat'" class="view view-chat" tabindex="-1" aria-label="对话">
           <div class="view-chat-hint">
             <MessageSquare :size="20" :stroke-width="1.8" />
-            <p>抽屉面板已是最佳对话形态，可点击标题栏对话按钮或按 Ctrl+Shift+K 唤起（方位可在设置 → AI 助手调整）。</p>
+            <p>抽屉面板已是最佳对话形态，可点击标题栏对话按钮或按 {{ chatShortcutLabel }} 唤起（方位可在设置 → AI 助手调整）。</p>
           </div>
         </section>
 

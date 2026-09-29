@@ -70,6 +70,7 @@ version = "0.7.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "core-foundation 0.10.1",
  "core-graphics",
  "dirs",
  "ed25519-dalek",

@@ -515,14 +515,44 @@ pub fn running_applications() -> Retained<NSArray<NSRunningApplication>> {
     unsafe { msg_send![&*ws, runningApplications] }
 }
 
-/// 取当前前台应用的 bundle id（去掉 `.app` 后缀）。
+/// 取当前前台应用的 **bundle id**（形如 `com.apple.Safari`）。
 /// 用于「焦点是否还留在本进程」的判定——macOS 没有「前台窗口句柄」，
 /// 但有前台 **应用**，粒度更粗却足够区分「是不是我们自己」。
+///
+/// ⚠️ **必须取 `bundleIdentifier`，不能拿 `bundleURL` 的末段去壳**（2026-09-29 修）。
+/// 末段去掉 `.app` 得到的是**包名**（`Safari` / `Google Chrome` / `WeChat`），
+/// 看着像 id 实则不是。两个下游都被它静默废掉：
+/// ① `clipboard.rs` 的 `prev_focus == SELF_BUNDLE_ID`（`com.mhub.desktop`）
+///    永远不成立 → 「向前台应用派发插入」的可靠路径永不命中，每次都退化成
+///    依赖辅助功能权限的模拟 ⌘V；
+/// ② `activate_app(&prev_focus)` 走的是
+///    `NSRunningApplication::runningApplicationsWithBundleIdentifier:`
+///    —— 该 API **只接受真 bundle id**，传包名必然返回空数组，焦点归还恒失败。
+/// 症状是「收起剪贴板浮层后键盘焦点丢了、要手动点一下原窗口」，且无任何报错。
 pub fn frontmost_bundle_id() -> Option<String> {
     let apps = running_applications();
     let frontmost = apps
         .iter()
         .find(|a: &Retained<NSRunningApplication>| a.isActive())?;
+    frontmost.bundleIdentifier().map(|s| s.to_string())
+}
+
+/// 当前前台应用的**包名**（`Safari` / `Google Chrome`）。
+///
+/// 与 [`frontmost_bundle_id`] 是两回事，别混用：包名用于**展示**
+/// （剪贴板历史条目的「来源应用」列，用户要认得出是哪个 App），
+/// 而 bundle id 用于**判定与激活**（两者都是 API 硬要求：激活只认 id）。
+/// 恰好 `bundleIdentifier` 的末段常常就是包名，但仍一律走本函数取，
+/// 以免两处各自推导末段。
+pub fn frontmost_app_name() -> Option<String> {
+    let apps = running_applications();
+    let frontmost = apps
+        .iter()
+        .find(|a: &Retained<NSRunningApplication>| a.isActive())?;
+    // 优先本地化名（用户自己改过的名字，如「Visual Studio Code」）
+    if let Some(name) = frontmost.localizedName() {
+        return Some(name.to_string());
+    }
     let url = frontmost.bundleURL()?;
     let name = url.lastPathComponent()?.to_string();
     Some(name.trim_end_matches(".app").to_string())
@@ -641,6 +671,144 @@ pub fn lmb_down() -> bool {
     const HID_SYSTEM_STATE: i32 = 1;
     const LEFT_BUTTON: u32 = 0;
     unsafe { CGEventSourceButtonState(HID_SYSTEM_STATE, LEFT_BUTTON) }
+}
+
+// ==================== 全局 Esc 监视（剪贴板浮层） ====================
+
+/// macOS 虚拟键码：Esc = 53（`kVK_Escape`）。
+const KEY_ESCAPE: i64 = 53;
+
+/// 一次 Esc 监视的持有句柄。**drop 即停止监视**（tap 随之拆除，不再吞 Esc）。
+pub struct EscWatch {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 监视线程的 JoinHandle —— drop 时确保 tap 已被拆掉
+    ///
+    /// **必须有**：tap 的生命周期绑在它自己线程的 run loop 上，
+    /// 只置 `stop` 不 join 的话监视线程可能还活着几十毫秒（一次轮询周期），
+    /// 那段时间里用户的 Esc 仍会被吞掉。
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for EscWatch {
+    fn drop(&mut self) {
+        self.stop
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            // ⚠️ **不能在 tap 线程自己身上 join** —— 那会 panic/死锁。
+            // 而这条路径是真实存在的：`on_esc` 回调就运行在 tap 线程上，
+            // 它调 `hide_overlay` → drop 本句柄 → 落进这个 Drop。
+            // 此时线程函数马上就要返回、tap 随它一起析构，
+            // 所以把手柄 forget 掉（= detach）即可，无需等待。
+            if h.thread().id() == std::thread::current().id() {
+                std::mem::forget(h);
+            } else {
+                let _ = h.join();
+            }
+        }
+    }
+}
+
+/// 开始监视全局 Esc，命中时调用 `on_esc`。
+///
+/// # 用途
+///
+/// 剪贴板浮层以**无激活**方式显示（`set_nonactivating_panel`），代价是它
+/// **收不到键盘事件** —— 用户按 Esc 什么都不会发生，只能点浮层外面收起。
+/// Windows 版用 `RegisterHotKey(VK_ESCAPE)` 兜住这条路径，macOS 没有对应 API，
+/// 故用 `CGEventTap`。
+///
+/// # 为什么用 `Session` 而不是 `HID`
+///
+/// `kCGHLEventTap` 需要**辅助功能**权限，而 `kCGSessionEventTap` 不需要 ——
+/// 后者已经能看到本用户会话内来自任意应用的按键。用 `HID` 等于为「能按 Esc 关闭
+/// 浮层」这件事**额外索要一次系统授权**，不划算。
+///
+/// # 吞掉 Esc
+///
+/// 命中时返回 `CallbackResult::Drop`，即**吞掉这一次 Esc**。这是刻意与 Windows 版
+/// 对齐（`RegisterHotKey` 同样会消费掉该键）：浮层在时，Esc 归浮层所有，
+/// 否则用户会同时看到「浮层关了」和「原来那个 App 的弹窗也关了」。
+///
+/// # 失败姿态
+///
+/// 建 tap 失败（权限/系统限制）只返回 `Err`，调用方记一条日志继续 ——
+/// 浮层照常可用，只是没有 Esc 兜底。**绝不能**因为这个失败就不显示浮层。
+pub fn start_esc_watch<F>(on_esc: F) -> Result<EscWatch, ()>
+where
+    F: Fn() + Send + 'static,
+{
+    use core_graphics::event::{
+        CallbackResult, CGEventTap, CGEventTapLocation, CGEventTapOptions,
+        CGEventTapPlacement, CGEventType, EventField,
+    };
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // 先在**本线程**建好 tap 再移交：tap 的 run loop source 只能绑在它创建
+    // 所在的线程上，所以创建与 run 必须在同一个线程。
+    let handle = std::thread::Builder::new()
+        .name("m-hub-esc-watch".into())
+        .spawn(move || {
+            use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
+
+            let hit_cb = hit.clone();
+            let tap = CGEventTap::new(
+                CGEventTapLocation::Session,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::Default,
+                vec![CGEventType::KeyDown],
+                move |_proxy, _kind, event| match event
+                    .get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE)
+                {
+                    k if k == KEY_ESCAPE => {
+                        hit_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+                        CallbackResult::Drop // 吞掉这一次 Esc，与 Windows 版一致
+                    }
+                    _ => CallbackResult::Keep,
+                },
+            );
+            let Ok(tap) = tap else {
+                log::warn!("剪贴板浮层：建立 Esc 事件 tap 失败，浮层将只能用「点外部」关闭");
+                return;
+            };
+            let loop_source = tap
+                .mach_port()
+                .create_runloop_source(0)
+                .expect("建立 run loop source 失败");
+            // kCFRunLoopDefaultMode 是 extern static，取它要 unsafe
+            CFRunLoop::get_current()
+                .add_source(&loop_source, unsafe { kCFRunLoopDefaultMode });
+            tap.enable();
+
+            // 50ms 一跳：既保证 Esc 的响应快到无感（远小于一帧的 3 倍），
+            // 又让 stop 标志最迟 50ms 内被看到、tap 随即被 drop。
+            while !stop_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                // 同上：kCFRunLoopDefaultMode 是 extern static
+                unsafe {
+                    CFRunLoop::run_in_mode(
+                        kCFRunLoopDefaultMode,
+                        core::time::Duration::from_millis(50),
+                        true,
+                    )
+                };
+                if hit.load(std::sync::atomic::Ordering::SeqCst) {
+                    on_esc();
+                    // 只触发一次就收工：浮层马上要隐藏，tap 再留着就白吞 Esc
+                    return;
+                }
+            }
+            // 落到这里说明是 stop 路径，tap 随本函数结束被 drop
+        })
+        .map_err(|e| {
+            log::warn!("剪贴板浮层：Esc 监视线程启动失败: {e}");
+        })?;
+
+    Ok(EscWatch {
+        stop,
+        handle: Some(handle),
+    })
 }
 
 // ==================== 模拟按键（粘贴注入） ====================
@@ -768,6 +936,19 @@ pub fn set_nonactivating_panel(win: &tauri::WebviewWindow) -> bool {
         return true;
     }
     window.setStyleMask(want);
+    // `setStyleMask:` 没有返回值，也不抛异常 —— 原先这里无条件 `true`，
+    // 于是两个调用点的 `if !set_nonactivating_panel(win) { log::warn!(...) }`
+    // **永远不触发**，那段错误处理是死代码：失败时不会有任何日志，
+    // 而失败的后果正是调用方最想知道的（「浮层会抢焦点」）。
+    // 改成设完**回读校验**，让那个 warn 真正有意义。
+    let applied = window.styleMask();
+    if !applied.contains(NSWindowStyleMask::NonactivatingPanel) {
+        log::warn!(
+            "set_nonactivating_panel: NonactivatingPanel 未生效（tao 建的是 NSWindow 而非 NSPanel，\
+             该 style mask 本就只对 NSPanel 有定义）。浮层将退化为会抢焦点的显示。"
+        );
+        return false;
+    }
     true
 }
 

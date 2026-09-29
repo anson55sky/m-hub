@@ -257,6 +257,16 @@ WebKit 没有 MemoryUsageTargetLevel 的等价物；macOS 对内存压力是**�
 
 ### 已知未实现 / 降级的部分
 
+- **「用 XX 浏览器打开」依赖 LaunchServices 枚举。** 已改为向系统问
+  「哪些应用能打开这个 https 链接」（`-[NSWorkspace URLsForApplicationsToOpenURL:]`），
+  这是「系统默认浏览器」设置面板的同一份数据，所以 Setapp 子目录、
+  Homebrew 改过路径、手工拷贝的应用都能列出来（早先只扫三个目录的一级，
+  会漏掉整类）。代价是结果里会混进个别「能当浏览器用但不是浏览器」的 App
+  （如某些 AI 客户端注册了 http），这是系统数据本身的性质。
+- **剪贴板浮层的 Esc 关闭依赖全局事件 tap**（`CGEventTap`，非 HID 层，
+  不需要辅助功能权限）。它会**吞掉浮层显示期间的那一次 Esc** —— 与 Windows 版
+  `RegisterHotKey` 的行为一致。tap 建不起来时只记日志，浮层照常可用，
+  此时只能点浮层外部关闭。
 - **主窗没有系统阴影，是自绘的。** macOS 的 AppKit 不给透明窗口画系统阴影
   （实测显式 `setHasShadow(true)` 也无效），所以窗口比内容大了一圈
   `--window-shadow-margin`(32px) 让 CSS `box-shadow` 有地方画。

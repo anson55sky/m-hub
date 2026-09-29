@@ -7,6 +7,7 @@ import { categorize } from '../utils/categories'
 import { useFocusTrap } from '../composables/useFocusTrap'
 import { useStore } from '../stores/workbench'
 import { deriveFaviconUrl, normalizeWebUrl } from '../utils/web'
+import { isMac } from '../utils/platform'
 
 const store = useStore()
 
@@ -63,7 +64,7 @@ function defaultCategoryFor(k: 'app' | 'web' | 'file'): string | null {
   return store.defaultSubcategoryName(k)
 }
 
-const isExtractedIcon = computed(() => /\.(png|jpg|jpeg|ico|gif|webp)$/i.test(icon.value))
+const isExtractedIcon = computed(() => /\.(png|jpg|jpeg|ico|icns|gif|webp)$/i.test(icon.value))
 const targetLabel = computed(() => {
   if (kind.value === 'file') return isDir.value ? '文件夹路径' : '文件路径'
   if (kind.value === 'app') return '程序路径'
@@ -72,7 +73,9 @@ const targetLabel = computed(() => {
 
 const targetPlaceholder = computed(() => {
   if (kind.value === 'file') return '选择要链接的文件或文件夹'
-  if (kind.value === 'app') return '如：C:\\Program Files\\...\\code.exe'
+  if (kind.value === 'app') {
+    return isMac ? '如：/Applications/Safari.app（直接拖进来也可以）' : '如：C:\\Program Files\\...\\code.exe'
+  }
   return '如：github.com 或 https://github.com'
 })
 
@@ -142,7 +145,11 @@ async function pickTarget() {
     const file = await open({
       multiple: false,
       directory: false,
-      filters: [{ name: '程序', extensions: ['exe', 'lnk'] }],
+      // ⚠️ macOS 上不能给扩展名过滤：`.app` 是**包**（目录）没有可匹配的扩展名，
+      // 任何 extensions 列表都会把全部应用灰掉（实测一个都选不了），
+      // 而拖拽路径反而是好的 —— 同一功能的两个入口自相矛盾。
+      // 故 mac 上不加过滤，让用户直接导航到 /Applications。
+      filters: isMac ? undefined : [{ name: '程序', extensions: ['exe', 'lnk'] }],
     })
     if (typeof file !== 'string') return
     target.value = file
@@ -166,7 +173,10 @@ async function pickIcon() {
     multiple: false,
     directory: false,
     filters: [
-      { name: '图标', extensions: ['ico', 'png', 'jpg', 'jpeg', 'webp'] },
+      // `.icns` 是 macOS 的标准图标格式，后端 `import_icon_file` 已实现转 PNG，
+      // 但过滤器原先没放行 —— 后端能力做了、入口把它挡住了。
+      ...(isMac ? [{ name: 'Apple 图标', extensions: ['icns'] }] : []),
+      { name: '图标', extensions: ['ico', 'png', 'jpg', 'jpeg', 'webp', 'gif'] },
     ],
   })
   if (typeof file !== 'string') return

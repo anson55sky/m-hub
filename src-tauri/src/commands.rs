@@ -1602,6 +1602,22 @@ pub fn toggle_maximize(webview: tauri::Webview) -> Result<(), String> {
     Ok(())
 }
 
+/// 开始一次窗口缩放拖拽（macOS 上由 `window_resize` 自己实现）。
+///
+/// **不要改用 `startResizeDragging`**：tao 在 macOS 上对该操作恒返回
+/// `NotSupported`，且无边框窗口没有系统缩放边 —— 详见 `window_resize.rs` 头注释。
+///
+/// `webview: tauri::Webview` 而非 `WebviewWindow`：主窗是多 webview 窗口，
+/// 后者会被 `is_webview_window()` 判掉（约定 66）。
+#[tauri::command]
+pub fn window_resize_begin(webview: tauri::Webview, direction: String) -> Result<(), String> {
+    let Some(edges) = crate::window_resize::parse_edges(&direction) else {
+        return Err(format!("未知的缩放方向：{direction}"));
+    };
+    crate::window_resize::begin(webview.window().clone(), edges);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn hide_to_tray(app: tauri::AppHandle) -> Result<(), String> {
     // hide_window 找不到主窗时会自己落 WARN；这里只在真隐藏成功时打 INFO，
@@ -2635,6 +2651,16 @@ Get-Content -LiteralPath $listFile -Encoding UTF8 | ForEach-Object {
 /// 返回当前所有正在运行的进程名（ImageName，小写去重、排序）。
 /// 前端按速达 app 资源的目标文件名匹配，判断应用是否已启动。
 /// 由前端每 3s 轮询；进程枚举走系统快照，单次开销约几十毫秒。
+///
+/// ⚠️ macOS 上**只回进程名是不够的**（2026-09-29 修）。前端把 `target`
+/// 切成末段去匹配，而 macOS 的 `target` 是 `.app` **包路径**：得到
+/// `wechat.app`，而进程名是 `WeChat`（且 VS Code 这类 Electron 应用
+/// 跑起来是 `Code Helper`/`Electron`，差得更远）。两边永远对不上，
+/// 于是速达列表里**所有**应用的「运行中」绿点一个都不会亮，且无任何报错。
+///
+/// 修法不是在前端做字符串猜测（`.app` 去掉后缀、包名/进程名各种别名…猜不全），
+/// 而是**后端把「可能匹配上的键」都算好一起回传**，前端只做集合查表：
+/// 每个运行中应用的 ① 包路径 ② 包名（去 `.app`）③ 本地化名，外加进程名。
 #[tauri::command]
 pub fn get_running_processes() -> Result<Vec<String>, String> {
     use sysinfo::{ProcessesToUpdate, System};
@@ -2645,9 +2671,34 @@ pub fn get_running_processes() -> Result<Vec<String>, String> {
         .values()
         .filter_map(|p| p.name().to_str().map(|s| s.to_lowercase()))
         .collect();
+
+    // macOS 追加包路径 / 包名 / 本地化名（Windows 上没有这些概念）
+    #[cfg(target_os = "macos")]
+    {
+        for app in crate::mac::running_applications().iter() {
+            if let Some(url) = app.bundleURL() {
+                if let Some(path) = url.path() {
+                    let path = path.to_string();
+                    if !path.is_empty() {
+                        names.push(path.to_lowercase());
+                        if let Some(base) = path.rsplit('/').next() {
+                            names.push(base.trim_end_matches(".app").to_lowercase());
+                        }
+                    }
+                }
+            }
+            if let Some(label) = app.localizedName() {
+                let text = label.to_string();
+                if !text.is_empty() {
+                    names.push(text.to_lowercase());
+                }
+            }
+        }
+    }
+
     names.sort();
     names.dedup();
-    log::debug!("查询运行中进程: {} 个", names.len());
+    log::debug!("查询运行中进程: {} 个键", names.len());
     Ok(names)
 }
 

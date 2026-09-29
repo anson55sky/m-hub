@@ -19,6 +19,7 @@ import { reportClientError } from '../utils/error-report'
 import { accentOf, fileAccentOf, iconSrc, useResourceIcon } from '../composables/useResourceIcon'
 import { useAdaptivePolling } from '../composables/useAdaptivePolling'
 import { useSudaDrag } from '../composables/useSudaDrag'
+import { ADMIN_LAUNCH_TERM } from '../utils/platform'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 import SudaFormDialog from './SudaFormDialog.vue'
 import SudaScanDialog from './SudaScanDialog.vue'
@@ -156,10 +157,26 @@ const runningNames = ref<Set<string>>(new Set())
 const RUNNING_ACTIVE_MS = 5000
 const RUNNING_IDLE_MS = 15000
 
+// 匹配「这个速达 app 是不是在跑」。
+// 后端回传的是**一批可能对上的键**（进程名 + 每个运行中应用的包路径/包名/本地化名），
+// 这里只做集合查表，不做字符串猜测 —— macOS 的 target 是 `.app` 包路径、
+// 进程名却可能是 `WeChat` 甚至 `Code Helper`，猜是猜不全的（见 get_running_processes）。
 function isRunning(r: Resource): boolean {
   if (r.kind !== 'app' || !r.target) return false
-  const file = r.target.split(/[\\/]/).pop()?.toLowerCase()
-  return !!file && runningNames.value.has(file)
+  const set = runningNames.value
+  if (!set.size) return false
+  const full = r.target.toLowerCase()
+  // ① 完整包路径：macOS 上的精确匹配（`/applications/wechat.app`）
+  if (set.has(full)) return true
+  // ② 末段：Windows 的 `xxx.exe` 口径（进程名即文件名）
+  const base = full.split(/[\\/]/).pop() ?? ''
+  if (base && set.has(base)) return true
+  // ③ 末段去掉 `.app`：兼容只回包名/本地化名的旧数据
+  if (base.endsWith('.app')) {
+    const stem = base.slice(0, -4)
+    if (stem && set.has(stem)) return true
+  }
+  return false
 }
 
 async function refreshRunning() {
@@ -345,7 +362,7 @@ async function onOpenAsAdmin(r: Resource) {
   try {
     await store.launchResourceAsAdmin(r.id)
   } catch (e) {
-    showToast(`无法以管理员身份运行「${r.name}」：${String(e)}`)
+    showToast(`${ADMIN_LAUNCH_TERM.replace(/（.*/, '')}「${r.name}」失败：${String(e)}`)
   }
 }
 
@@ -354,7 +371,7 @@ async function onResourceContext(e: MouseEvent, r: Resource) {
   const items: ContextMenuItem[] = [{ label: '打开', onClick: () => onOpen(r) }]
   const isApp = r.kind === 'app'
   if (isApp) {
-    items.push({ label: '以管理员身份运行', onClick: () => void onOpenAsAdmin(r) })
+    items.push({ label: ADMIN_LAUNCH_TERM, onClick: () => void onOpenAsAdmin(r) })
   }
   let isWeb = false
   if (r.kind === 'web') {

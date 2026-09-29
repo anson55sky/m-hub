@@ -319,6 +319,61 @@ m-hub/
     的地方（症状是「换到小屏笔记本上窗口下半截掉出屏幕」，大屏上完全看不出来），
     且构建期守卫覆盖不到。能消灭的重复就不要只去校验它。
 
+70. **macOS 移植的七个静默失效点（2026-09-29 全面排查后一次修完；判据见 P9）：**
+    共同形态是**「上游换了数据源，下游的匹配代码没跟着换」**。单测全绿、
+    类型检查全绿、构建全绿，只有实机看得见。
+    - **窗口完全无法缩放**（最严重，全应用级）。tao 在 macOS 上
+      `drag_resize_window` 恒返回 `NotSupported`（`macos/window.rs:963`，
+      参数 `_direction` 连读都没读），且无边框窗口用的是
+      `Borderless | Resizable`（同文件 `:217`）而 **AppKit 的 borderless 窗口
+      没有系统缩放边**。两个原因叠加 = 拖哪儿都不管用。改由
+      `window_resize.rs` 自己实现（轮询 `mac::cursor_physical()`，手法同悬浮球）。
+      **别再写 `startResizeDragging`** —— 它在 mac 上是最坏的一种状态：
+      光标亮起 resize 图标、拖下去什么都不发生，比没有手柄更糟。
+    - **剪贴板焦点归还恒失效**。`frontmost_bundle_id` 原先取 `bundleURL` 的
+      末段去 `.app`（得到包名 `Safari`），而 `SELF_BUNDLE_ID` 是真 bundle id
+      `com.mhub.desktop`，`activate_app` 走的
+      `runningApplicationsWithBundleIdentifier:` **只认 id** → 恒返回空。
+      已改用 `NSRunningApplication.bundleIdentifier()`。
+      ⚠️ **展示用包名、判定/激活用 bundle id，两条路不能互相推导**，
+      故 `frontmost_bundle_id` / `frontmost_app_name` 是两个函数。
+    - **速达「运行中」绿点一个都不亮**。前端把 `target` 切末段去比进程名，
+      而 macOS 的 `target` 是 `.app` **包路径**（`wechat.app`），进程名是 `WeChat`
+      （VS Code 更是 `Code Helper`）。改成后端把「可能匹配上的键」
+      （进程名 + 包路径 + 包名 + 本地化名）一起回传，前端只做集合查表。
+    - **`.app` 提权启动必然失败**：macOS 的「程序」是包（目录），
+      `do shell script` 拿目录去 exec 报 126。`launch_elevated` 原先漏了
+      `open -a` 分支（`launch_program` 早就有）→ 用户为每个应用白输一次密码。
+    - **「无格式粘贴」选项是装饰品**：配置存 `ctrl_shift_v`，而 macOS 分支的
+      `match` 只认 `cmd_*`，于是 `ctrl_shift_v` 与 `ctrl_v` **双双落进 `_ => "cmd_v"`**。
+    - **「本地程序」文件选择器在 macOS 上一个 `.app` 都选不了**：
+      过滤器写死 `extensions: ['exe','lnk']`，而 `.app` 是包、没有可匹配的扩展名。
+      同一功能的拖拽路径却是对的（`looksLikeApp` 已含 `.app`）—— 两入口自相矛盾。
+      同处 `.icns` 也没放行，而**后端已实现 icns→PNG 转换**，能力做了入口给挡住了。
+    - **剪贴板浮层收不到 Esc**：无激活显示的代价。Windows 用
+      `RegisterHotKey(VK_ESCAPE)` 兜底，macOS 无对应 API。
+      已用 `CGEventTap`（`Session` 而非 `HID`：后者要辅助功能权限，
+      为「能按 Esc」额外索权不划算）实现，并**吞掉**该次 Esc 以对齐 Windows。
+      ⚠️ **凡是收起浮层的路径都必须 `stop_esc_watch()`** —— 漏一条就留下一个
+      还在吞 Esc 的 tap。最容易漏的是「粘贴后收起」（不走 `hide_overlay`）：
+      症状是「按一次 ⌃⌘V 粘贴之后 Esc 永久失灵」，且无任何报错。
+
+71. **快捷键的「显示」只有一个出口，且默认值有两份要锁**（构建期双守卫）：
+    - `platform.ts::prettyShortcut` 是内部写法 → 显示文本的唯一转换器；
+      `shortcutLabel(key, configured)` 是它的平台版快捷封装（用户改过就用改后的）。
+    - **文案里绝不能出现裸的 `Ctrl+…` / 直接渲染 `config.xxx_shortcut`** ——
+      前者在 macOS 上给出错的键，后者把字面量 `CommandOrControl+K` 怼到用户眼前
+      （用户刚用 ⌘K 唤起搜索，弹窗里却写着 `CommandOrControl+K`）。
+      守卫 `scripts/check-shortcut-text.mjs`：扫 `.vue` 的 `<template>`，
+      查**静态文本节点与静态属性值**里的裸 `Ctrl+`。**属性绑定内的豁免**
+      （`prettyShortcut(cfg, isMac ? '⌘K' : 'Ctrl+K')` 是正确的平台兜底分支）。
+    - 四个默认值有两份拷贝：`shortcut.rs` 的 `DEFAULT_*`（真相源）与
+      `platform.ts` 的 `DEFAULT_SHORTCUT_VARIANTS`（显示用镜像）。
+      守卫 `scripts/check-default-shortcuts.mjs` 锁死。⚠️ Rust 那边是
+      `#[cfg]` **分叉**的、两平台**允许不同**（剪贴板 mac `⌃⌘V` / win `Ctrl+\``），
+      故 TS 镜像**每个键存 mac / other 两个分支**，两侧都要对上 ——
+      `other` 分支只在该平台被读到，开发机上验不出来，所以更要锁。
+
 ---
 
 ## 平台约定（macOS 移植，**先读这一节再改任何代码**）
@@ -425,6 +480,27 @@ AppKit **没有**剪贴板变化通知。`NSPasteboard` 的 `changeCount` 只是
 - **间隔不能调小**。100ms 级轮询在应用常驻时会持续吃 CPU。感知延迟 250ms 人无感。
 - **暂停监听时也要刷新基准**。否则恢复监听会把暂停期间的 N 次变化当成「一次复制」
   一次性入库。
+
+### P9 · 判据：没有「论证注释」的平台 gate 都要当移植遗漏看待
+
+`webview_mem.rs` / `win_taskbar.rs` / `process.rs::activate_existing` 这几处
+**有意的 no-op**，每一处都有一段点名具体机制的论证（WebKit 没有对应 API、
+activation policy 是 per-app 而非 per-window、LaunchServices 已代劳）。
+凡是**没有**这类论证、却因为换了平台而消失的能力，都应当视为「移植遗漏」而非「有意取舍」。
+
+2026-09-29 全面排查就靠这条判据，7 处真遗漏全部命中。它们的共同形态是
+**「上游换了数据源，下游的匹配代码没跟着换」**：
+
+| 上游的语义 | macOS 上变成了 | 没跟着换的地方 |
+| --- | --- | --- |
+| `target` 是 `…\chrome.exe` | `…/WeChat.app`（包路径） | 比进程名 → 绿点全灭 |
+| `GetForegroundWindow` 拿 HWND | `NSRunningApplication`（只有应用） | bundle id 误取包名 → 焦点归还失效 |
+| 扩展名过滤 `exe/lnk` | `.app` 是包、无扩展名 | 文件选择器全灰 |
+| `RegisterHotKey(VK_ESCAPE)` | 无公开等价物 | Esc 兜底消失 |
+| 系统缩放边（borderless 窗口没有） | 无 | 整窗不可缩放 |
+
+**加新能力时反过来用这条**：先问「macOS 上这个值/这个名字长什么样」，
+再确认**所有消费它的地方**都按新形态匹配了 —— 只改数据源那一端是最容易漏的。
 
 ### P8 · AppKit 线程：`NSWorkspace`/`NSPasteboard` 后台可用，窗口层级不行
 

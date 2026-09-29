@@ -6,6 +6,7 @@
 import { computed, inject, onMounted, ref } from 'vue';
 import { LocateFixed, MapPin, Trash2 } from 'lucide-vue-next';
 import { isTauri, tauriApi } from '../../api/tauri';
+import { isMac, RIGHT_CLICK_TERM } from '../../utils/platform';
 import AppSelect from '../AppSelect.vue';
 import AiProviders from '../AiProviders.vue';
 import SudaSubcategoryManager from './SudaSubcategoryManager.vue';
@@ -142,12 +143,31 @@ async function onToggleClipboardPause() {
 }
 
 // ---- 粘贴快捷键方式 ----
-const PASTE_METHOD_OPTIONS = [
-  { value: 'auto', label: '自动（终端用 Ctrl+Shift+V，其他用 Ctrl+V）' },
-  { value: 'ctrl_v', label: 'Ctrl+V' },
-  { value: 'ctrl_shift_v', label: 'Ctrl+Shift+V' },
-  { value: 'shift_insert', label: 'Shift+Insert' },
-] as const
+//
+// ⚠️ 这里原先四个选项全写死 `Ctrl+…`，而 macOS 上注入的物理键是 ⌘ 系列 ——
+// 用户看到「Ctrl+V」却拿到 ⌘V。更糟的是「自动」的说明在骗人：macOS 的终端
+// **全部支持 ⌘V**（上游那套「终端只认 Ctrl+Shift+V」是 Windows 终端的特性），
+// 所以 macOS 上 auto 恒等于 ⌘V，恰恰是正确的，不需要终端检测。
+//
+// `value` 仍是**跨平台的逻辑口径**（ctrl_v / ctrl_shift_v / shift_insert / auto），
+// 配置本身可跨平台迁移；只有 label 与说明按平台分文案。
+const PASTE_METHOD_OPTIONS = isMac
+  ? ([
+      { value: 'auto', label: '自动（等同 ⌘V）' },
+      { value: 'ctrl_v', label: '⌘V' },
+      { value: 'ctrl_shift_v', label: '⌘⇧V（无格式粘贴）' },
+      { value: 'shift_insert', label: '⇧Insert（需全尺寸键盘）' },
+    ] as const)
+  : ([
+      { value: 'auto', label: '自动（终端用 Ctrl+Shift+V，其他用 Ctrl+V）' },
+      { value: 'ctrl_v', label: 'Ctrl+V' },
+      { value: 'ctrl_shift_v', label: 'Ctrl+Shift+V（无格式粘贴）' },
+      { value: 'shift_insert', label: 'Shift+Insert' },
+    ] as const)
+
+const PASTE_METHOD_DESC = isMac
+  ? '「自动」在 macOS 上等同 ⌘V —— 这里的终端也都支持 ⌘V。若目标应用只认 ⌘⇧V，请显式选它。模拟按键需要「辅助功能」权限。'
+  : '自动模式下：终端/命令行（不支持 Ctrl+V）用 Ctrl+Shift+V，其他应用用 Ctrl+V'
 
 const pasteMethod = ref(store.state.config.clipboard_paste_method ?? 'auto')
 
@@ -249,7 +269,7 @@ onMounted(() => {
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-name">网页默认打开方式</span>
-              <span class="setting-desc">点击网页条目时的打开位置：内嵌面板在主窗口右侧视图打开（轻量、单页），独立浏览器窗口支持多标签与同地址复用；右键菜单可临时换另一种方式</span>
+              <span class="setting-desc">点击网页条目时的打开位置：内嵌面板在主窗口右侧视图打开（轻量、单页），独立浏览器窗口支持多标签与同地址复用；{{ RIGHT_CLICK_TERM }}菜单可临时换另一种方式</span>
             </div>
             <AppSelect
               :model-value="sudaWebOpenMode"
@@ -329,7 +349,7 @@ onMounted(() => {
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-name">粘贴方式</span>
-              <span class="setting-desc">自动模式下：终端/命令行（不支持 Ctrl+V）用 Ctrl+Shift+V，其他应用用 Ctrl+V</span>
+              <span class="setting-desc">{{ PASTE_METHOD_DESC }}</span>
             </div>
             <AppSelect
               :model-value="pasteMethod"

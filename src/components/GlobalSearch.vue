@@ -5,6 +5,7 @@ import type { Note, Resource, Todo } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { useFocusTrap } from '../composables/useFocusTrap'
 import { markdownPlainText } from '../utils/markdown'
+import { shortcutLabel } from '../utils/platform'
 
 const props = defineProps<{
   visible: boolean
@@ -19,8 +20,15 @@ const emit = defineEmits<{
 
 const store = useStore()
 
-/** 弹窗内展示当前生效的呼出快捷键：跟随设置 → 快捷键的自定义配置 */
-const searchShortcutLabel = computed(() => store.state.config.search_shortcut || 'Ctrl+K')
+/**
+ * 弹窗内展示当前生效的呼出快捷键。
+ *
+ * ⚠️ 此前是 `config.search_shortcut || 'Ctrl+K'` —— 唯一**没有**走 `prettyShortcut`
+ * 的展示点。而配置里存的是内部写法 `CommandOrControl+K`，于是用户刚用 ⌘K
+ * 唤起搜索、弹窗里却写着 `CommandOrControl+K`，而标题栏 tooltip 写着 `⌘K`。
+ * 用户会以为要照着输入一串字面量。
+ */
+const searchShortcutLabel = computed(() => shortcutLabel('search', store.state.config.search_shortcut))
 
 const keyword = ref('')
 const results = ref<{ resources: Resource[]; notes: Note[]; todos: Todo[] }>({

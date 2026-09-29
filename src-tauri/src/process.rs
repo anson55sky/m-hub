@@ -131,12 +131,28 @@ pub(crate) fn launch_elevated(path: &str, args: Option<&str>) -> Result<(), Stri
 /// `do shell script … with administrator privileges`——macOS 对应 Windows UAC 的
 /// 唯一官方途径，会弹原生密码框，**提权失败时 `osascript` 返回非 0**（用户点取消）。
 ///
+/// ⚠️ **`.app` 必须先转成 `open -a`**（2026-09-29 修）。macOS 上「程序」是整个
+/// `.app` **包**（一个目录），把包路径直接丢给 shell 去 exec 会失败——同文件的
+/// `launch_program` 早就为此加了 `open -a` 分支，这里原先漏了。
+/// 后果是用户为每个 `.app` 资源白输一次管理员密码，最后才看到
+/// 「提权启动被取消或失败（退出码 126）」。而右键菜单对**所有** app 类资源
+/// 无条件显示这一项，也就是说速达里每一个应用都会走到这条必失败的路径。
+///
 /// 走 shell 是因为 macOS 没有「带 RunAs 动词启动进程」的 API；因此路径与参数必须做
 /// **shell 引用**（`shell_quote`），否则含空格/引号的路径会被 shell 拆开——这是把参数
 /// 拼进 `do shell script` 字符串最典型的翻车点。
 #[cfg(target_os = "macos")]
 pub(crate) fn launch_elevated(path: &str, args: Option<&str>) -> Result<(), String> {
-    let mut command_line = shell_quote(path);
+    let mut command_line = if is_app_bundle(std::path::Path::new(path)) {
+        // `open -a <包> [参数…]`：由 LaunchServices 负责真正拉起，
+        // 与 `launch_program` 的 `.app` 分支同一条路（`open` 本身就是白名单二进制，
+        // 不需要 shell 解析绝对路径，也就没有引号地狱）
+        let mut c = String::from("open -a ");
+        c.push_str(&shell_quote(path));
+        c
+    } else {
+        shell_quote(path)
+    };
     if let Some(args) = args {
         for arg in split_args(args) {
             command_line.push(' ');

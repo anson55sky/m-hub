@@ -123,6 +123,27 @@ static MOUSE_HOOK: Mutex<Option<isize>> = Mutex::new(None);
 #[cfg(target_os = "windows")]
 static OVERLAY_HWND: Mutex<Option<isize>> = Mutex::new(None);
 
+/// Esc 事件监视的持有句柄（macOS 侧的 Esc 兜底关闭，等价于 Windows 的
+/// `register_esc_hotkey`）。浮层隐藏时 drop —— tap 随之拆除，不再吞 Esc。
+#[cfg(target_os = "macos")]
+static ESC_WATCH: Mutex<Option<crate::mac::EscWatch>> = Mutex::new(None);
+
+/// 停掉 Esc 监视（drop 即拆除事件 tap，之后不再吞 Esc）。
+///
+/// **凡是收起浮层的路径都必须调它**，漏一条就会留下一个还在吞 Esc 的 tap：
+/// 最容易漏的是「粘贴后收起」——那条路径只 `hide_overlay_window`，不走
+/// `hide_overlay`，于是用户按一次 ⌃⌘V 粘贴之后，Esc 就永久失灵了
+/// （而且没有任何报错，只表现为「Esc 什么都不发生」）。
+#[cfg(target_os = "macos")]
+fn stop_esc_watch() {
+    match ESC_WATCH.lock() {
+        Ok(mut slot) => {
+            *slot = None;
+        }
+        Err(e) => log::warn!("剪贴板浮层：停止 Esc 监视时锁被占用: {e}"),
+    }
+}
+
 /// 一次延迟窗口操作任务：粘贴后恢复焦点+注入按键，或收起后归还焦点。
 /// 统一交给单一 worker 线程串行执行，避免频繁 spawn 短命线程造成线程数波动。
 #[cfg(target_os = "windows")]
@@ -1240,6 +1261,8 @@ pub fn paste_to_previous_window(app: &AppHandle, content: &str, html: Option<&st
     #[cfg(target_os = "macos")]
     {
         crate::floating_ball::untrack_clipboard_overlay();
+        // 这条路径不走 hide_overlay，必须自己停 —— 漏了就是「粘贴一次后 Esc 永久失灵」
+        stop_esc_watch();
     }
     if let Some(win) = app.get_webview_window(CLIPBOARD_WINDOW_LABEL) {
         hide_overlay_window(&win);
@@ -1551,6 +1574,21 @@ fn show_ready_overlay(win: &tauri::WebviewWindow, app: &AppHandle) {
         // macOS 没有全局鼠标钩子：登记到 floating_ball 的 100ms 光标轮询里做
         // 矩形判定（点浮层之外即收起）。见模块文档「没有全局鼠标钩子」。
         crate::floating_ball::track_clipboard_overlay();
+        // 无激活显示的代价是浮层**收不到键盘事件**，Esc 收不到。
+        // 用 CGEventTap 兜住（等价 Windows 的 register_esc_hotkey）。
+        let app_for_esc = app.clone();
+        match crate::mac::start_esc_watch(move || {
+            hide_overlay(&app_for_esc);
+        }) {
+            Ok(watch) => {
+                if let Ok(mut slot) = ESC_WATCH.lock() {
+                    // 顶掉上一次残留的（正常路径上上一个已在 hide 时 drop）
+                    *slot = Some(watch);
+                }
+            }
+            // 失败不阻断：浮层照常显示，只是没有 Esc 兜底
+            Err(()) => log::warn!("剪贴板浮层：Esc 兜底不可用，只能点浮层外部关闭"),
+        }
     }
     let _ = app.emit_to(CLIPBOARD_WINDOW_LABEL, "clipboard-shown", ());
 }
@@ -1645,6 +1683,9 @@ pub fn hide_overlay(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     {
         crate::floating_ball::untrack_clipboard_overlay();
+        // Esc 回调本身也走这里，而它正跑在 tap 线程上 —— EscWatch 的 Drop
+        // 对「join 自己」做了处理，故这条路径安全。
+        stop_esc_watch();
     }
     let Some(win) = app.get_webview_window(CLIPBOARD_WINDOW_LABEL) else {
         return;
@@ -2125,11 +2166,20 @@ fn paste_macos(app: &AppHandle, prev_focus: &PrevFocus) {
             );
             return;
         }
+        // 配置里存的是**跨平台的逻辑口径**（ctrl_v / ctrl_shift_v / shift_insert /
+        // auto），macOS 上对应的物理键是 ⌘V / ⌘⇧V / ⇧Insert。
+        //
+        // ⚠️ 这里原先只认 `cmd_*`，而配置里根本不会有 `cmd_*` —— 于是
+        // `ctrl_v` 和 `ctrl_shift_v` **双双落进 `_ => "cmd_v"`**，
+        // 「无格式粘贴」选了等于没选，恒发 ⌘V，在只认 ⇧⌘V 的地方直接粘不出来。
+        // 选项成了纯装饰（2026-09-29 修）。
+        //
+        // `auto` 在 macOS 上恒等于 ⌘V，且这是**正确**行为：macOS 的终端
+        // 全部支持 ⌘V（不像 Windows 终端只认 Ctrl+Shift+V），上游那套
+        // 「按终端进程名白名单自动改键」的逻辑在 mac 上没有存在意义。
         let mac_method = match method.as_str() {
-            "cmd_v" => "cmd_v",
-            "cmd_shift_v" => "cmd_shift_v",
+            "ctrl_shift_v" => "cmd_shift_v",
             "shift_insert" => "shift_insert",
-            // 配置里是 Windows 口径的 ctrl_*：mac 上等价于 ⌘V
             _ => "cmd_v",
         };
         crate::mac::send_paste_keystroke(mac_method);
@@ -2138,16 +2188,12 @@ fn paste_macos(app: &AppHandle, prev_focus: &PrevFocus) {
 
 /// 前台应用名（记为历史条目的来源应用）。
 ///
-/// macOS 用 `NSWorkspace.frontmostApplication` 的 localizedName——比 Windows 的
-/// 「进程名 + 去掉终端后缀」简单，但展示给用户看更友好。
+/// 走 `mac::frontmost_app_name()`（内部取 `NSRunningApplication.localizedName`），
+/// 与判定/激活用的 [`crate::mac::frontmost_bundle_id`] 分开：展示要的是
+/// 用户认得出的名字，激活 API 要的是 bundle id，两者不能互相推导。
 #[cfg(target_os = "macos")]
 fn foreground_app_name() -> Option<String> {
-    let apps = crate::mac::running_applications();
-    apps.iter()
-        .find(|a| a.isActive())
-        .and_then(|a| a.localizedName())
-        .map(|n| n.to_string())
-        .filter(|s| !s.is_empty())
+    crate::mac::frontmost_app_name().filter(|s| !s.is_empty())
 }
 
 /// 延迟窗口操作 worker：Windows 侧靠它串行执行「隐藏 → 归还焦点 → 注入按键」。

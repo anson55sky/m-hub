@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, provide, ref } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { ListTodo, Pin, PinOff, X } from 'lucide-vue-next'
-import { isTauri, type Todo } from '../api/tauri'
+import { isTauri, tauriApi, type Todo } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { useTheme } from '../composables/useTheme'
 import { parseTodoItems } from '../utils/todoParse'
@@ -128,7 +128,9 @@ function onResizeStart(e: MouseEvent, dir: ResizeDirection) {
   if (!appWindow || e.button !== 0) return
   e.preventDefault()
   e.stopPropagation()
-  void appWindow.startResizeDragging(dir)
+  // 不用 `appWindow.startResizeDragging()`：tao 在 macOS 上恒返回 NotSupported
+  // （详见 src-tauri/src/window_resize.rs 头注释）
+  void tauriApi.windowResizeBegin(dir)
 }
 </script>
 

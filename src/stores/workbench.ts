@@ -1,5 +1,6 @@
 import { reactive, readonly } from 'vue'
 import { normalizeNoteEditorMode } from '../utils/noteEditorMode'
+import { DEFAULT_SHORTCUTS } from '../utils/platform'
 import { compareByOrder, groupOf } from '../utils/todoSchedule'
 import {
   tauriApi,
@@ -26,15 +27,16 @@ import {
   type WeatherCurrent,
 } from '../api/tauri'
 
-// 浏览器预览环境的兜底默认值；真实默认由 Rust 端 shortcut.rs 决定
-const IS_MAC_PREVIEW =
-  typeof navigator !== 'undefined' &&
-  (/Mac|iPhone|iPad/.test(navigator.userAgent) || /Mac|iPhone|iPad/.test(navigator.platform))
-const DEFAULT_GLOBAL_SHORTCUT = IS_MAC_PREVIEW
-  ? 'CommandOrControl+Shift+Space'
-  : 'Ctrl+Shift+Space'
-const DEFAULT_SEARCH_SHORTCUT = IS_MAC_PREVIEW ? 'CommandOrControl+K' : 'Ctrl+K'
-const DEFAULT_CHAT_SHORTCUT = IS_MAC_PREVIEW ? 'CommandOrControl+Shift+K' : 'Ctrl+Shift+K'
+// 浏览器预览环境的兜底默认值。内部一律用 Tauri 的写法（`CommandOrControl+…`），
+// `useShortcutRecorder` 会按平台再归一 —— 真值由 src/utils/platform.ts 的
+// DEFAULT_SHORTCUTS 镜像 shortcut.rs（构建期有 check-default-shortcuts.mjs 锁一致）。
+//
+// ⚠️ 此前这里在 mac 上给剪贴板兜底的是 `CommandOrControl+Alt+V`（⌘⌥V）——
+// 那正是被明确否决过的键（macOS 自带「粘贴并匹配样式」，第三方抢不到）。
+// 预览里显示的键与真机生效的键对不上，排查时会被带偏。
+const DEFAULT_GLOBAL_SHORTCUT = DEFAULT_SHORTCUTS.toggle
+const DEFAULT_SEARCH_SHORTCUT = DEFAULT_SHORTCUTS.search
+const DEFAULT_CHAT_SHORTCUT = DEFAULT_SHORTCUTS.chat
 
 interface StoreState {
   resources: Resource[]
@@ -112,7 +114,7 @@ const state = reactive<StoreState>({
     chat_window_x: null,
     chat_window_y: null,
     chat_window_pinned: false,
-    clipboard_shortcut: IS_MAC_PREVIEW ? 'CommandOrControl+Alt+V' : 'Ctrl+`',
+    clipboard_shortcut: DEFAULT_SHORTCUTS.clipboard,
     search_shortcut: DEFAULT_SEARCH_SHORTCUT,
     chat_shortcut: DEFAULT_CHAT_SHORTCUT,
     clipboard_max_items: 500,
