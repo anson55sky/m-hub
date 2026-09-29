@@ -86,6 +86,22 @@
      背景与内容都被它裁出圆角。与 --radius-lg 同值是为了让「窗」和「窗里的卡」
      属于同一套圆角语言；单独成 token 是因为它由窗口层（不是卡片层）决定。 */
   --window-radius: 12px;
+  /* 窗口阴影的外扩带宽度：主窗要比「可视区」大一圈，这一圈透明边框就是阴影的容身之处。
+
+     为什么必须外扩：AppKit 对 `opaque = false` 的窗口一律不画系统阴影
+     （显式 setHasShadow(true) 也无效，2026-09-29 实机取色证实），
+     而任何 CSS 阴影都只能画在**窗口以内**。窗口不外扩就没有落影的位置。
+
+     这一个数牵动四处，必须同步：① 本 token（.app-shell 的 margin）
+     ② `src-tauri/src/lib.rs::WINDOW_SHADOW_MARGIN`（窗口尺寸换算：inner = 可视区 + 2×它）
+     ③ `tauri.conf.json` 主窗的初始/最小尺寸（那四项是 **inner** 尺寸）
+     ④ `src-tauri/src/config.rs::WindowState::default`（可视区默认尺寸，与 ③ 对账）
+     不一致的后果是静默的：窗口与内容差一圈，肉眼像「边距没对齐」而不是「数值错了」。
+     故有 `scripts/check-window-margin.mjs` 在 prebuild 锁死。 */
+  --window-shadow-margin: 32px;
+  /* 外扩带宽度必须 ≥ 阴影的可见延伸量，否则阴影被窗口边缘切平。
+     横向 20px（blur）、纵向 8+20=28px < 32px，两侧都留得住。 */
+  --window-shadow: 0 8px 20px rgba(40, 34, 60, 0.26);
   --radius-xl: 16px;
   --radius-pill: 999px;
   --shadow-card: 0 1px 2px rgba(72, 62, 46, 0.05), 0 8px 24px rgba(72, 62, 46, 0.06);
@@ -181,6 +197,9 @@
   --shadow-item: 0 1px 2px rgba(0, 0, 0, 0.32), 0 2px 6px rgba(0, 0, 0, 0.22);
   --shadow-hover: 0 10px 24px rgba(0, 0, 0, 0.4), 0 24px 52px rgba(0, 0, 0, 0.3);
   --shadow-dock: 0 14px 36px rgba(0, 0, 0, 0.5), 0 30px 72px rgba(0, 0, 0, 0.36);
+  /* 窗口阴影：暗色下加深不透明度（浅色墙上的深色窗口需要更实的分隔），
+     几何与亮色一致 —— 延伸量必须 < --window-shadow-margin，否则被窗口边缘切平。 */
+  --window-shadow: 0 8px 20px rgba(0, 0, 0, 0.55);
   --scrim: rgba(0, 0, 0, 0.55);
   --window-close: #f05a67;
   /* 暗色下代码块用深灰底 + 亮字，行内 code 用浅色半透明底 + 亮红字 */
@@ -739,6 +758,29 @@
 html, body, #app { width: 100%; height: 100%; overflow: hidden; }
 html { color-scheme: light; }
 html[data-theme="dark"] { color-scheme: dark; }
+
+/* 最大化态：外扩带、圆角、阴影三者一起归零。
+ *
+ * 为什么必须归零 —— 最大化在 macOS 上是 `NSWindow.zoomRect`，窗口被系统缩放到
+ * 整块工作区。此时若仍保留 `--window-shadow-margin`，那圈外扩带就贴在屏幕四边，
+ * 而窗口之外没有「窗外」可以透：**用户会看到屏幕最外圈亮着一条桌面色的缝**。
+ * 圆角同理会露出屏幕四角，阴影则完全画不出来（无处可画）。
+ *
+ * 归零后 `.app-shell` 铺满整块工作区，正是「最大化」该有的样子。
+ * 代价是最大化/还原时可视区宽度会跳 2×margin（= 64px），这是一次尺寸变化，
+ * 与点「最大化」本身的语义一致，不算瑕疵。
+ *
+ * 标记的唯一写方是 `TitleBar.vue` 的 `refreshMaximized()` —— 它本来就在跟踪这个状态，
+ * `onMounted`（覆盖「启动即最大化」）+ `onResized`（覆盖「运行期切换」）两条入口正好覆盖
+ * 两种发生时机。Rust 侧刻意**不再** eval 一份：双写方会出现两边状态不一致的窗口期，
+ * 且启动期那次 eval 会打在加载中的空白文档上，真正页面一换就没了。
+ */
+html[data-window-maximized] {
+  --window-shadow-margin: 0px;
+  --window-radius: 0px;
+  --window-shadow: none;
+}
+
 /* 便签浮窗：窗口透明无边框，body 透明，只显示卡片本体 */
 html[data-sticky-window] body {
   background: transparent !important;

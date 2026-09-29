@@ -279,16 +279,45 @@ m-hub/
     小而定位的下拉 / 气泡 / tooltip **不受此限**（它们内缩，永远碰不到窗口边缘）。
     圆角值是独立 token `--window-radius`（12px，与 `--radius-lg` 同值，让「窗」与「窗里的卡」
     属于同一套圆角语言）；启动欢迎页 `#boot-splash::before` 也要同款圆角，否则启动瞬间有一次形状跳变。
-    ⚠️ **代价：透明窗口在 macOS 上没有系统阴影，且这个改不回来**（2026-09-29 实机取色证实）。
-    实测窗口边缘外 70px→0px 的桌面像素**完全平坦**（Δ≤2，纯 PNG 噪声）。
-    已试过并**证伪**的修法：显式 `NSWindow::setHasShadow(true)` —— 无任何变化。
-    根因是 AppKit 对 `opaque = false` 的窗口一律不画阴影，与 `hasShadow` 属性无关；
-    tao 那边 `has_shadow` 默认就是 true、只在为 false 时才显式关掉，所以不是「没打开」。
-    **唯一可行的修法是「窗口比内容大一圈」**：窗口外扩 N px、`.app-shell` 用
-    `margin: N` + CSS `box-shadow`，靠内容自己画阴影。**本版没做**——它会连带改掉
-    ① 窗口持久化尺寸与 `restore_window_state` 的屏内可容判断 ② 最大化/缩放时屏幕四边
-    会出现一圈透明缝（得再为「最大化态去掉 margin」加分支）③ 透明边框会吃掉靠近窗口边缘的点击。
-    这三条都是产品行为决策，不能顺手改。要加就按这三条一起改，别只加 margin。
+
+    **阴影：AppKit 不给透明窗口画系统阴影，只能自绘（2026-09-29 实机取色证实 + 实施）。**
+    实测窗口边缘外 70px→0px 的桌面像素**完全平坦**（Δ≤2，纯 PNG 噪声）；
+    已试过并**证伪**的修法是显式 `NSWindow::setHasShadow(true)` —— 无任何变化。
+    根因是 AppKit 对 `opaque = false` 的窗口一律不画阴影，与 `hasShadow` 属性无关
+    （tao 那边默认就是 true、只在为 false 时才显式关掉，所以不是「没打开」）。
+    于是改为**「窗口比可视区大一圈」**：外扩带 `--window-shadow-margin`(32px)、
+    `.app-shell` 用 `margin` + CSS `box-shadow`，靠内容自己画。**这条连带三个产品行为，
+    改外扩带时三个必须一起看：**
+    - **尺寸语义**：`WindowState.width/height` 存的是**可视区**、不是窗口尺寸。
+      落盘前 `to_visible_size()` 扣掉两倍外扩带，恢复时 `to_window_size()` 加回去
+      （互逆，有 `window_geometry_tests` 锁）。老配置是外扩带引入前写的裸 inner 尺寸，
+      语义不变、**无需迁移**，代价只是首次启动窗口小了 2×M 再被拉回来。
+      ⚠️ 小屏适配的 1400×900 基准要按**窗口**尺寸比（含外扩带），不是可视区 ——
+      可视区放得下但窗口框超出屏幕，一样会被菜单栏/Dock 吃掉下半截。
+    - **最大化**：`html[data-window-maximized]` 把外扩带/圆角/阴影三个 token **一起归零**。
+      不归零的话屏幕最外圈会亮起一条**透出桌面**的缝（窗口之外没有「窗外」可透）。
+      唯一写方是 `TitleBar.vue` 的 `refreshMaximized()`（它本来就在跟踪该状态，
+      `onMounted` + `onResized` 恰好覆盖「启动即最大化」与「运行期切换」两条路径）；
+      **Rust 侧刻意不再 eval 一份** —— 双写方会出现状态不一致的窗口期，且启动期那次
+      eval 会打在加载中的空白文档上、真正页面一换就没了。
+    - **边缘点击**：外扩带对内容是「死区」（属于窗口、能吃掉点击却不渲染什么），
+      且**看得见的圆角内容边缘并不在窗口边缘**、差着整整一圈，瞄准「窗框」的人会一直落空。
+      故 `WindowResizeHandles.vue` 用 8 向隐形手柄把它变成缩放热区（手法同 `TodoFloat.vue`，
+      边 14px / 角 22px，**卡在 14px 是为了不压到圆角内容边缘抢卡片点击**）。
+      它必须由 index.vue 作为 `.app-shell` 的**兄弟**渲染 —— 壳上有 `contain: paint`，
+      放壳内会被自己的裁切剪掉。最大化态隐藏（窗口就是屏幕四边，与系统 zoom 打架）。
+
+    **同一个外扩带宽度出现在四个地方，跨两种语言三种文件类型，没有任何编译器会把它们
+    关联起来**，故有构建期守卫 `scripts/check-window-margin.mjs`（prebuild 跑）：
+    ① `style.css` 的 `--window-shadow-margin` ② `lib.rs::WINDOW_SHADOW_MARGIN`
+    ③ `tauri.conf.json` 的 width/height/minWidth/minHeight（那四项是 **inner** 尺寸）
+    ④ `config.rs::WindowState::default`。漏改一处的症状不是报错，是「窗口与内容差了一圈」，
+    看起来像边距没对齐，排查方向会跑到 CSS 上而真正错的是另外几个文件里的数字。
+    守卫还额外校验「阴影向下延伸量 (`offsetY + blur`) 不得超过外扩带」，否则阴影被窗口边缘切平。
+    ⚠️ **凡别处也需要同一个默认尺寸（小屏判断的 1400×900 基准），一律写
+    `config::WindowState::default()` 引用、不要再抄字面量** —— 抄一份就多一处能静默漂移
+    的地方（症状是「换到小屏笔记本上窗口下半截掉出屏幕」，大屏上完全看不出来），
+    且构建期守卫覆盖不到。能消灭的重复就不要只去校验它。
 
 ---
 

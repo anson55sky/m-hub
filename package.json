@@ -6,7 +6,7 @@
   "scripts": {
     "test:security": "node --test tests/security.test.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/gen-settings-index.mjs && node scripts/check-settings-css.mjs && node scripts/check-rounded-window.mjs",
+    "prebuild": "node scripts/gen-settings-index.mjs && node scripts/check-settings-css.mjs && node scripts/check-rounded-window.mjs && node scripts/check-window-margin.mjs",
     "check:settings-css": "node scripts/check-settings-css.mjs",
     "build": "vue-tsc -b && vite build",
     "gen:settings-index": "node scripts/gen-settings-index.mjs",
@@ -15,7 +15,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:test": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
-    "check:rounded-window": "node scripts/check-rounded-window.mjs"
+    "check:rounded-window": "node scripts/check-rounded-window.mjs",
+    "check:window-margin": "node scripts/check-window-margin.mjs"
   },
   "dependencies": {
     "@internationalized/date": "^3.12.3",

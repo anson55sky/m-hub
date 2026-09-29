@@ -180,12 +180,52 @@ pub fn main_window(app: &tauri::AppHandle) -> Option<tauri::Window<tauri::Wry>> 
     app.get_window("main")
 }
 
+/// 主窗「可视区」四周的透明外扩带宽度（逻辑像素）。
+///
+/// **为什么窗口要比可视区大一圈**：AppKit 对 `opaque = false` 的窗口一律不画
+/// 系统阴影（显式 `setHasShadow(true)` 也无效，2026-09-29 实机取色证实），
+/// 而任何 CSS 阴影只能画在窗口**以内**。不外扩就没有落影的位置。
+/// 外扩带同时是 8 向缩放手柄的容身处（`WindowResizeHandles.vue`）。
+///
+/// **本值牵动四处，必须同步**（`scripts/check-window-margin.mjs` 在 prebuild 锁死）：
+/// ① `src/style.css` 的 `--window-shadow-margin`（.app-shell 的 margin）
+/// ② 本常量（尺寸换算：inner = 可视区 + 2 × 本值）
+/// ③ `tauri.conf.json` 主窗的 `width`/`height`/`minWidth`/`minHeight`（那四项是 **inner** 尺寸）
+/// ④ `config.rs::WindowState::default`（可视区默认尺寸，小屏判断与 ③ 对账都取它）
+///
+/// ⚠️ 凡是**别处也需要同一个默认尺寸**（如小屏适配的基准），一律写
+/// `config::WindowState::default()` 引用，不要再抄一份字面量 —— 抄一份就多一处
+/// 能静默漂移的地方，且构建期守卫覆盖不到。
+///
+/// **存的是「可视区」尺寸，不是窗口尺寸**：`WindowState.width/height` 的语义
+/// 始终是用户看到的应用大小，进 `tauri.conf.json` 的 `config.rs::WindowState::default`
+/// 与本文件的换算都以可视区为准。这样老配置（外扩带引入前写入的裸 inner 尺寸）
+/// 语义不变、无需迁移，代价只是首次启动窗口小了 2×M 再被拉回来。
+pub const WINDOW_SHADOW_MARGIN: f64 = 32.0;
+
+/// 可视区尺寸 → 窗口 inner 尺寸（外扩带的 2 倍）
+fn to_window_size(visible_w: f64, visible_h: f64) -> tauri::LogicalSize<f64> {
+    tauri::LogicalSize::new(
+        visible_w + WINDOW_SHADOW_MARGIN * 2.0,
+        visible_h + WINDOW_SHADOW_MARGIN * 2.0,
+    )
+}
+
+/// 窗口 inner 尺寸 → 可视区尺寸（`to_window_size` 的逆；用于落盘前归一）
+fn to_visible_size(inner_w: f64, inner_h: f64) -> tauri::LogicalSize<f64> {
+    tauri::LogicalSize::new(
+        (inner_w - WINDOW_SHADOW_MARGIN * 2.0).max(1.0),
+        (inner_h - WINDOW_SHADOW_MARGIN * 2.0).max(1.0),
+    )
+}
+
 /// 应用启动时恢复上次保存的窗口位置、尺寸与置顶状态
 fn restore_window_state(app: &tauri::App) {
     let config = config::load();
     if let Some(window) = main_window(app.handle()) {
         let ws = &config.window;
-        let _ = window.set_size(tauri::LogicalSize::new(ws.width, ws.height));
+        // ws.width/height 是**可视区**尺寸，落进窗口时要补上外扩带（约定 69）
+        let _ = window.set_size(to_window_size(ws.width, ws.height));
         if let (Some(x), Some(y)) = (ws.x, ws.y) {
             if is_position_on_screen(x, y) {
                 let _ = window.set_position(tauri::LogicalPosition::new(x, y));
@@ -195,11 +235,18 @@ fn restore_window_state(app: &tauri::App) {
             let _ = window.set_always_on_top(true);
         }
         // 小屏适配：屏幕（按窗口当前所在显示器，取不到回退主显示器）容不下
-        // 默认 1400×900 时直接最大化启动——否则窗口下半部分掉到屏幕外，没有任何
+        // 默认尺寸（`WindowState::default`）时直接最大化启动——否则窗口下半部分掉到屏幕外，没有任何
         // 入口能把窗口拖回来。物理像素先按 DPI 缩放折算成逻辑像素再比较；
         // 比较基准取「默认尺寸与记忆尺寸的较大者」，记忆尺寸更小时也按默认判。
-        let want_w = ws.width.max(1400.0);
-        let want_h = ws.height.max(900.0);
+        // ⚠️ 基准要按**窗口**尺寸比（含外扩带），不是可视区：真正决定「放不放得下」
+        // 的是窗口框。可视区放得下但窗口框超出屏幕，一样会被菜单栏/Dock 吃掉下半截。
+        // ⚠️ 默认值取自 `WindowState::default()` 而非写死字面量：这里曾经硬编码
+        // 1400/900，那是 `config.rs` 里同一组数字的**第五份拷贝** —— 只改其中一处，
+        // 小屏判断就会静默失准（表现为「换到小屏笔记本上窗口下半截掉出屏幕」）。
+        // 写成引用就不存在第五处可漂移。
+        let default_size = config::WindowState::default();
+        let want_w = ws.width.max(default_size.width) + WINDOW_SHADOW_MARGIN * 2.0;
+        let want_h = ws.height.max(default_size.height) + WINDOW_SHADOW_MARGIN * 2.0;
         if let Ok(Some(monitor)) = window.current_monitor().or_else(|_| window.primary_monitor()) {
             let scale = monitor.scale_factor();
             let logical_w = monitor.size().width as f64 / scale;
@@ -239,14 +286,18 @@ fn persist_window_state(app: &tauri::AppHandle) {
         }
         if let Ok(pos) = window.outer_position() {
             if let Ok(size) = window.inner_size() {
+                // inner_size() 含外扩带，落盘前扣掉，只存可视区（约定 69）。
+                // 位置存的是**窗口框**左上角且无需换算：外扩带四边对称，
+                // 窗口框与可视区左上角差一个固定的 M，存取都走同一个原点。
+                let visible = to_visible_size(size.width as f64, size.height as f64);
                 let _guard = config::lock();
                 let mut cfg = config::load();
                 cfg.window.x = Some(pos.x as f64);
                 cfg.window.y = Some(pos.y as f64);
-                cfg.window.width = size.width as f64;
-                cfg.window.height = size.height as f64;
+                cfg.window.width = visible.width;
+                cfg.window.height = visible.height;
                 match config::save(&cfg) {
-                    Ok(()) => log::debug!("窗口状态已保存: {}x{} @ ({},{})", size.width, size.height, pos.x, pos.y),
+                    Ok(()) => log::debug!("窗口状态已保存: {}x{} @ ({},{})", visible.width, visible.height, pos.x, pos.y),
                     Err(e) => log::warn!("窗口状态保存失败: {}", e),
                 }
             }
@@ -836,4 +887,33 @@ pub fn run() {
                 std::process::exit(0);
             }
         });
+}
+
+#[cfg(test)]
+mod window_geometry_tests {
+    use super::*;
+
+    /// 外扩带换算的往返必须恒等：落盘存的是可视区、恢复时又要还原回窗口尺寸。
+    /// 一旦两者不是互逆运算，用户每次开关一次应用窗口就会缩水/长大一圈
+    /// （表现是「窗口越用越小」，且不会有任何报错）。
+    #[test]
+    fn visible_window_roundtrip_is_identity() {
+        for (w, h) in [(1400.0, 900.0), (1000.0, 700.0), (2560.0, 1440.0), (333.0, 261.0)] {
+            let win = to_window_size(w, h);
+            assert_eq!(win.width, w + 2.0 * WINDOW_SHADOW_MARGIN, "width {w}x{h}");
+            assert_eq!(win.height, h + 2.0 * WINDOW_SHADOW_MARGIN, "height {w}x{h}");
+            let back = to_visible_size(win.width, win.height);
+            assert!((back.width - w).abs() < 1e-9, "往返 width {w} -> {back:?}");
+            assert!((back.height - h).abs() < 1e-9, "往返 height {h} -> {back:?}");
+        }
+    }
+
+    /// 老配置是在外扩带引入之前写入的裸 inner 尺寸，经 `to_visible_size` 会被
+    /// 扣掉两倍外扩带。必须夹到 ≥1 而不是负数 —— 负尺寸会让 set_size 失败，
+    /// 窗口保持 conf 里的默认尺寸（用户丢掉了自己拖好的几何，且毫无提示）。
+    #[test]
+    fn undersized_legacy_size_clamps_instead_of_going_negative() {
+        let s = to_visible_size(WINDOW_SHADOW_MARGIN, WINDOW_SHADOW_MARGIN);
+        assert!(s.width >= 1.0 && s.height >= 1.0, "夹到 {s:?}");
+    }
 }

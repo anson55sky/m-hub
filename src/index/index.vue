@@ -18,6 +18,7 @@ import ClockCard from '../components/ClockCard.vue'
 import WeatherCard from '../components/WeatherCard.vue'
 import StickyCard from '../components/StickyCard.vue'
 import CountdownCard from '../components/CountdownCard.vue'
+import WindowResizeHandles from '../components/WindowResizeHandles.vue'
 import { useStore } from '../stores/workbench'
 import { isTauri, tauriApi } from '../api/tauri'
 import { convertFileSrc } from '@tauri-apps/api/core'
@@ -1136,6 +1137,9 @@ provide('showToast', showToast)
       </div>
     </Transition>
   </div>
+  <!-- 缩放边缘：必须是 .app-shell 的**兄弟**而非后代 —— 壳上有 contain:paint
+       （圆角裁切所必需），后代会被它裁掉。详见组件头注释。 -->
+  <WindowResizeHandles />
 </template>
 
 <style scoped>
@@ -1187,14 +1191,25 @@ provide('showToast', showToast)
  * 而 fixed 元素默认相对视口定位，**不会被祖先的 overflow/border-radius 裁剪**——
  * 不加 contain 的话就是「内容圆了、壁纸还是方的」，圆角处露出窗口外的桌面。
  * `contain: paint` 让本元素成为 fixed 后代的包含块，壁纸随之被裁成同款圆角。
+ *
+ * `margin: var(--window-shadow-margin)` 是**自绘窗口阴影的容身处**。
+ * AppKit 不给透明窗口画系统阴影（约定 69 已实机取色证伪 `setHasShadow`），
+ * 而 CSS 阴影只能画在窗口以内 —— 窗口不外扩就没有落影的位置。
+ * 外扩由 Rust 侧配平：inner 尺寸 = 可视区 + 2 × margin（lib.rs::WINDOW_SHADOW_MARGIN）。
+ * 最大化时这三个 token 一起归零，见 style.css 的 `html[data-window-maximized]`。
  */
 .app-shell {
-  min-height: 100dvh;
-  height: 100%;
+  /* 高度必须扣掉两倍外扩带：原来 `min-height: 100dvh` 是「至少铺满视口」的意思，
+     带 margin 后 100dvh 比可用高度还大，会把内容顶出窗口下沿。
+     父级（#app）是 `height: 100%`，故用百分比扣减即可，不必再引 100dvh。 */
+  height: calc(100% - var(--window-shadow-margin) * 2);
+  min-height: 0;
+  margin: var(--window-shadow-margin);
   display: flex;
   flex-direction: column;
   background: var(--app-bg, var(--bg-page-surface));
   border-radius: var(--window-radius);
+  box-shadow: var(--window-shadow);
   overflow: hidden;
   position: relative;
   contain: paint;

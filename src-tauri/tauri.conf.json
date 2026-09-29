@@ -15,10 +15,10 @@
     "windows": [
       {
         "title": "m-hub",
-        "width": 1400,
-        "height": 900,
-        "minWidth": 1000,
-        "minHeight": 700,
+        "width": 1464,
+        "height": 964,
+        "minWidth": 1064,
+        "minHeight": 764,
         "resizable": true,
         "fullscreen": false,
         "center": true,

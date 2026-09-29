@@ -161,10 +161,18 @@ m-hub 是一个安静、可靠的本地桌面工作台：用户打开它是为�
   `.app-shell`，否则开弹窗那一帧会用方形遮罩把圆角盖回去。构建期由
   `scripts/check-rounded-window.mjs` 守卫。小而定位的下拉 / 气泡 / tooltip 不受此限
   （它们内缩，碰不到窗口边缘）。见 AGENTS.md 约定 69。
+- **窗口阴影靠自绘，窗口比可视区大一圈** `--window-shadow-margin`(32px)。
+  AppKit 不给透明窗口画系统阴影（`setHasShadow(true)` 无效，已实机取色证伪），
+  而 CSS 阴影只能画在窗口以内 —— 不外扩就没有落影的位置。
+  `.app-shell` 用 `margin: var(--window-shadow-margin)` + `box-shadow: var(--window-shadow)`；
+  尺寸换算（inner = 可视区 + 2×margin）由 Rust 侧配平，四处口径由
+  `scripts/check-window-margin.mjs` 守卫。外扩带同时是 8 向缩放手柄的容身处，
+  最大化时外扩带/圆角/阴影一起归零。完整口径与三条连带的产品行为见 AGENTS.md 约定 69。
 - 启动欢迎页 `#boot-splash::before` 同款圆角，避免启动瞬间「方 → 圆」跳变。
-- **已知代价：主窗没有系统阴影。** 透明窗口在 macOS 上拿不到 AppKit 阴影
-  （`setHasShadow(true)` 无效，已实机取色证伪）。浅色桌面 + 浅色窗口时缺少视觉分隔。
-  补法是「窗口外扩 + CSS box-shadow」，代价见 AGENTS.md 约定 69，**尚未实施**。
+- **已知代价：最大化/还原时可视区宽度会跳 2×margin（= 64px）。** 外扩带在最大化态归零，
+  可视区因此从「窗口 − 64px」变成「整块工作区」。这是一次尺寸变化，与点「最大化」本身的
+  语义一致，不算瑕疵；若日后觉得跳变明显，第一选择是调小 margin 而不是加过渡动画
+  （尺寸过渡会让窗口在动画期间与 CSS 布局不同步，抖动比跳变更难看）。
 
 ### Glass card（基础卡片）
 

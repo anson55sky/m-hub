@@ -44,9 +44,30 @@ function onDragStart(e: MouseEvent) {
 const isMaximized = ref(false)
 let unlistenResize: (() => void) | null = null
 
+// 最大化时必须把 `data-window-maximized` 写到 <html>：主窗为自绘阴影比可视区
+// 大了一圈（`--window-shadow-margin`），最大化时那圈若还在，屏幕四边会露出
+// 一条透出桌面的缝。style.css 据此把外扩带/圆角/阴影三个 token 一起归零。
+// **这里是该属性的唯一写方。** Rust 侧刻意不再 eval 一份，两个理由：
+//   ① 双写方会出现两边状态不一致的窗口期（一边归零一边没归零 = 缝闪一下）
+//   ② 启动期那次 eval 会打在**加载中的空白文档**上 —— 真正页面一换就没了，
+//      而「启动即最大化」（restore_window_state 的小屏分支）恰恰是启动期发生的
+// 本函数已有的 onMounted + onResized 两条入口恰好覆盖「启动即最大化」与
+// 「运行期切换」，不需要新增信号源。
+// 幂等：值没变不写（onResized 在拖拽中每秒触发十几次）。
+function applyMaximizedClass(maximized: boolean) {
+  const el = document.documentElement
+  if (maximized) {
+    if (el.dataset.windowMaximized !== '1') el.dataset.windowMaximized = '1'
+  } else if (el.dataset.windowMaximized !== undefined) {
+    delete el.dataset.windowMaximized
+  }
+}
+
 async function refreshMaximized() {
   if (!appWindow) return
-  isMaximized.value = await appWindow.isMaximized()
+  const next = await appWindow.isMaximized()
+  isMaximized.value = next
+  applyMaximizedClass(next)
 }
 
 onMounted(async () => {
