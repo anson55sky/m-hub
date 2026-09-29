@@ -66,6 +66,14 @@ const DEFAULT_SHORTCUT_VARIANTS = {
   search: { mac: 'CommandOrControl+K', other: 'Ctrl+K' },
   /** AI 对话 */
   chat: { mac: 'CommandOrControl+Shift+K', other: 'Ctrl+Shift+K' },
+  /**
+   * 统一捕获（2026-09-29 新增）：从任何地方一行记下东西，自动路由到
+   * 速记/待办/提示词/倒计时/速达。
+   *
+   * 键位与 shortcut.rs 的 `DEFAULT_CAPTURE_SHORTCUT` 对齐，由
+   * `scripts/check-default-shortcuts.mjs` 锁死。
+   */
+  capture: { mac: 'CommandOrControl+Shift+U', other: 'Ctrl+Shift+U' },
 } as const
 
 export type ShortcutKey = keyof typeof DEFAULT_SHORTCUT_VARIANTS

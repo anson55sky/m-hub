@@ -289,6 +289,8 @@ export interface AppConfig {
   search_shortcut: string
   /** AI 对话呼出快捷键（默认 Ctrl+Shift+K） */
   chat_shortcut: string
+  /** 统一捕获快捷键（2026-09-29 新增），默认 ⇧⌘U */
+  capture_shortcut: string
   /** 剪贴板历史最大条数（含置顶） */
   clipboard_max_items: number
   /** 非置顶记录保留天数 */
@@ -1077,6 +1079,8 @@ export const tauriApi = {
   setGlobalShortcut: (value: string) => invoke<string>('set_global_shortcut', { value }),
   setSearchShortcut: (value: string) => invoke<string>('set_search_shortcut', { value }),
   setChatShortcut: (value: string) => invoke<string>('set_chat_shortcut', { value }),
+  getCaptureShortcut: () => invoke<string>('get_capture_shortcut'),
+  setCaptureShortcut: (value: string) => invoke<string>('set_capture_shortcut', { value }),
   getRunAtStartup: () =>
     invoke<AutostartStatus>('get_run_at_startup'),
   setRunAtStartup: (enabled: boolean) => invoke<void>('set_run_at_startup', { enabled }),

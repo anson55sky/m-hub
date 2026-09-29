@@ -61,6 +61,8 @@ const RUST_KEYS = {
   DEFAULT_CLIPBOARD_SHORTCUT: "clipboard",
   DEFAULT_SEARCH_SHORTCUT: "search",
   DEFAULT_CHAT_SHORTCUT: "chat",
+  // 统一捕获（2026-09-29 新增）
+  DEFAULT_CAPTURE_SHORTCUT: "capture",
 };
 
 // ---- ② TS 镜像（每键存 mac / other 两个分支）----------------------------------
@@ -131,5 +133,5 @@ if (problems.length) {
   process.exit(1);
 }
 console.log(
-  `[shortcuts] 四个默认值口径一致（shortcut.rs ⇄ platform.ts：${Object.values(RUST_KEYS).join("/")}）`,
+  `[shortcuts] 五个默认值口径一致（shortcut.rs ⇄ platform.ts：${Object.values(RUST_KEYS).join("/")}）`,
 );

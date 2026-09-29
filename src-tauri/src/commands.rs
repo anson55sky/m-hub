@@ -1457,6 +1457,8 @@ enum ConfiguredShortcut {
     Clipboard,
     Search,
     Chat,
+    /// 统一捕获（2026-09-29 新增）
+    Capture,
 }
 
 impl ConfiguredShortcut {
@@ -1466,6 +1468,7 @@ impl ConfiguredShortcut {
             ConfiguredShortcut::Clipboard => &mut cfg.clipboard_shortcut,
             ConfiguredShortcut::Search => &mut cfg.search_shortcut,
             ConfiguredShortcut::Chat => &mut cfg.chat_shortcut,
+            ConfiguredShortcut::Capture => &mut cfg.capture_shortcut,
         }
     }
 
@@ -1475,6 +1478,7 @@ impl ConfiguredShortcut {
             ConfiguredShortcut::Clipboard => "剪贴板",
             ConfiguredShortcut::Search => "搜索",
             ConfiguredShortcut::Chat => "AI 对话",
+            ConfiguredShortcut::Capture => "统一捕获",
         }
     }
 }
@@ -1515,6 +1519,7 @@ fn config_field(cfg: &crate::config::AppConfig, which: &ConfiguredShortcut) -> S
         ConfiguredShortcut::Clipboard => cfg.clipboard_shortcut.clone(),
         ConfiguredShortcut::Search => cfg.search_shortcut.clone(),
         ConfiguredShortcut::Chat => cfg.chat_shortcut.clone(),
+        ConfiguredShortcut::Capture => cfg.capture_shortcut.clone(),
     }
 }
 
@@ -1528,6 +1533,19 @@ pub fn set_search_shortcut(app: tauri::AppHandle, value: String) -> Result<Strin
 #[tauri::command]
 pub fn set_chat_shortcut(app: tauri::AppHandle, value: String) -> Result<String, String> {
     set_configured_shortcut(app, value, ConfiguredShortcut::Chat)
+}
+
+#[tauri::command]
+pub fn get_capture_shortcut() -> Result<String, String> {
+    Ok(crate::config::load().capture_shortcut)
+}
+
+/// 改绑统一捕获快捷键。走 `set_configured_shortcut` 统一流程（先试注册新键、
+/// 冲突则回滚旧键、再落盘）—— 单独写一份流程的话，这套「注册失败不落盘」的
+/// 保护就会漏掉一处。
+#[tauri::command]
+pub fn set_capture_shortcut(app: tauri::AppHandle, value: String) -> Result<String, String> {
+    set_configured_shortcut(app, value, ConfiguredShortcut::Capture)
 }
 
 // ---------- 开机自启动 ----------

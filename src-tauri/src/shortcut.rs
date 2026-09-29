@@ -36,6 +36,17 @@ pub const DEFAULT_CHAT_SHORTCUT: &str = "CommandOrControl+Shift+K";
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_CHAT_SHORTCUT: &str = "Ctrl+Shift+K";
 
+/// 统一捕获默认快捷键（2026-09-29 新增）。
+///
+/// 从任何地方一行记下东西，自动路由到速记 / 待办 / 提示词 / 倒计时 / 速达。
+/// 键位选 `⇧⌘U` 而不是 `⇧⌘C`：后者与「拷贝为样式」一类系统/应用级注册相邻，
+/// 抢不到的表现是**静默失效**（注册失败只落在日志里）。这与剪贴板键避开
+/// `⌘⌥V` 属于同一类考虑（见 `DEFAULT_CLIPBOARD_SHORTCUT` 的注释）。
+#[cfg(target_os = "macos")]
+pub const DEFAULT_CAPTURE_SHORTCUT: &str = "CommandOrControl+Shift+U";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_CAPTURE_SHORTCUT: &str = "Ctrl+Shift+U";
+
 /// 判断两个快捷键字符串是否代表同一个物理按键组合
 /// （如 Windows 上 CommandOrControl 与 Ctrl 是同一个键，仅写法不同）
 pub fn same_hotkey(a: &str, b: &str) -> bool {
@@ -80,6 +91,8 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                         let _ = app.emit("search-shortcut", ());
                     } else if same_hotkey(&cfg.chat_shortcut, &pressed) {
                         let _ = app.emit("chat-shortcut", ());
+                    } else if same_hotkey(&cfg.capture_shortcut, &pressed) {
+                        let _ = app.emit("capture-shortcut", ());
                     } else {
                         let _ = app.emit("global-shortcut-toggle", ());
                     }
@@ -104,6 +117,11 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         log::warn!("[快捷键] 注册搜索快捷键失败: {}", e);
     } else {
         log::info!("[快捷键] 已注册搜索快捷键: {}", config.search_shortcut);
+    }
+    if let Err(e) = register_toggle_shortcut(&handle, &config.capture_shortcut) {
+        log::warn!("[快捷键] 注册统一捕获快捷键失败: {}", e);
+    } else {
+        log::info!("[快捷键] 已注册统一捕获快捷键: {}", config.capture_shortcut);
     }
     if let Err(e) = register_toggle_shortcut(&handle, &config.chat_shortcut) {
         log::warn!("[快捷键] 注册 AI 对话快捷键失败: {}", e);

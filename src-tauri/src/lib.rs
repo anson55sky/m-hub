@@ -944,6 +944,8 @@ pub fn run() {
             commands::set_global_shortcut,
             commands::set_search_shortcut,
             commands::set_chat_shortcut,
+            commands::get_capture_shortcut,
+            commands::set_capture_shortcut,
             commands::get_run_at_startup,
             commands::set_run_at_startup,
             commands::get_startup_hidden,

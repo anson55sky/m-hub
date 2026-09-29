@@ -118,6 +118,7 @@ const state = reactive<StoreState>({
     clipboard_shortcut: DEFAULT_SHORTCUTS.clipboard,
     search_shortcut: DEFAULT_SEARCH_SHORTCUT,
     chat_shortcut: DEFAULT_CHAT_SHORTCUT,
+    capture_shortcut: DEFAULT_SHORTCUTS.capture,
     clipboard_max_items: 500,
     clipboard_ttl_days: 7,
     clipboard_paused: false,
@@ -1135,6 +1136,17 @@ export function useStore() {
     return saved
   }
 
+  /** 统一捕获快捷键（2026-09-29 新增）。与 setChatShortcut 同一套「先乐观更新、
+   *  再用后端返回值覆盖」的流程 —— 后端注册失败会回滚并返回旧值，
+   * 覆盖回去用户才能看到「没改成」。 */
+  async function setCaptureShortcut(value: string) {
+    state.config.capture_shortcut = value
+    if (!isTauri()) return value
+    const saved = await tauriApi.setCaptureShortcut(value)
+    state.config.capture_shortcut = saved
+    return saved
+  }
+
   /** 主页面「中上区块」显示内容：token/notes/todo/resources/countdown */
   async function setDashboardMidContent(value: string) {
     state.config.dashboard_mid_content = value
@@ -1637,6 +1649,7 @@ export function useStore() {
     setGlobalShortcut,
     setSearchShortcut,
     setChatShortcut,
+    setCaptureShortcut,
     setDashboardMidContent,
     setDashboardLayout,
     setCountdownSound,

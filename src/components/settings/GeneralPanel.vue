@@ -118,12 +118,30 @@ const {
   showToast,
 })
 
+// 统一捕获快捷键（2026-09-29 新增）
+const {
+  value: captureShortcut,
+  error: captureError,
+  listening: captureListening,
+  inputRef: captureInputRef,
+  commit: commitCaptureShortcut,
+  startListening: startListenCaptureShortcut,
+  onBlur: onCaptureShortcutBlur,
+  onKeydown: onCaptureShortcutKeydown,
+} = useShortcutRecorder({
+  initial: normalizeShortcutDisplay(store.state.config.capture_shortcut ?? 'Ctrl+Shift+U'),
+  label: '统一捕获快捷键',
+  save: (v) => store.setCaptureShortcut(v),
+  showToast,
+})
+
 // inputRef 仅在模板 ref 绑定中使用（把 DOM 输入框连到 recorder 内部，点击「录入」自动聚焦），
 // vue-tsc 不把模板 ref 视为「读取」，这里显式求值一次以通过 noUnusedLocals
 void shortcutInputRef
 void clipInputRef
 void searchInputRef
 void chatInputRef
+void captureInputRef
 
 // ---- 右下角通知驻留时长（秒；后端每条通知都带当前值下发，改完立即生效） ----
 const noticeSeconds = ref(5)
@@ -226,6 +244,8 @@ onMounted(async () => {
   searchShortcut.value = normalizeShortcutDisplay(store.state.config.search_shortcut ?? 'Ctrl+K')
 
   chatShortcut.value = normalizeShortcutDisplay(store.state.config.chat_shortcut ?? 'Ctrl+Shift+K')
+
+  captureShortcut.value = normalizeShortcutDisplay(store.state.config.capture_shortcut ?? 'Ctrl+Shift+U')
 
   noticeSeconds.value = Math.round((store.state.config.notice_duration_ms ?? 5000) / 1000)
 
@@ -502,5 +522,37 @@ onMounted(async () => {
             </div>
           </div>
           <p v-if="chatError" class="shortcut-error">{{ chatError }}</p>
+
+          <!-- 统一捕获（2026-09-29 新增） -->
+          <div class="setting-row shortcut-row">
+            <div class="setting-info">
+              <span class="setting-name">统一捕获快捷键</span>
+              <span class="setting-desc">
+                任何应用中一键记下东西：写「明天下午3点交周报」自动进待办、
+                粘贴链接进速达，其余进速记。落点与时间会在输入时显示出来，存前可核对
+              </span>
+            </div>
+            <div class="shortcut-edit">
+              <div class="shortcut-input-wrap">
+                <Keyboard :size="14" :stroke-width="2" class="shortcut-icon" />
+                <input
+                  ref="captureInputRef"
+                  v-model="captureShortcut"
+                  class="shortcut-input"
+                  type="text"
+                  spellcheck="false"
+                  :readonly="captureListening"
+                  :placeholder="shortcutLabel('capture')"
+                  @keydown="onCaptureShortcutKeydown"
+                  @keydown.enter="commitCaptureShortcut"
+                  @blur="onCaptureShortcutBlur"
+                />
+                <button class="shortcut-record-btn" type="button" @click="startListenCaptureShortcut">
+                  {{ captureListening ? '按下组合键…' : '录入' }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <p v-if="captureError" class="shortcut-error">{{ captureError }}</p>
         </section>
 </template>

@@ -43,6 +43,7 @@ import SettingsSkeleton from '../components/SettingsSkeleton.vue'
 // 大体量/低频视图异步分包按需加载，缩小首屏主 chunk
 const NoteEditor = defineAsyncComponent(() => import('../components/NoteEditor.vue'))
 const GlobalSearch = defineAsyncComponent(() => import('../components/GlobalSearch.vue'))
+const QuickCapture = defineAsyncComponent(() => import('../components/QuickCapture.vue'))
 // 待办视图：自带编辑弹层 / 确认弹窗 / 日期时间字段，体量大且非首屏，同样按需分包
 const TodoView = defineAsyncComponent(() => import('../components/TodoView.vue'))
 // 设置页：加载期间用同骨架占位（**delay 0**：以前设 80ms 是为了避免骨架一闪而过，
@@ -585,6 +586,10 @@ onMounted(async () => {
     unlistenChatShortcut = await on('chat-shortcut', () => {
       toggleChat()
     })
+    // 统一捕获快捷键（全局注册，Rust 分发，2026-09-29 新增）
+    unlistenCaptureShortcut = await on('capture-shortcut', () => {
+      captureVisible.value = !captureVisible.value
+    })
     // 扩展页「去授权」跳转（桥 API mhub.openPermissions）：切到扩展中心并打开该扩展的
     // 设置弹窗（权限管理所在处）。payload = 扩展 id
     unlistenOpenExtSettings = await on<string>('open-extension-settings', (e) => {
@@ -622,6 +627,7 @@ let unlistenBallAction: (() => void) | null = null
 let unlistenOpenChatSettings: (() => void) | null = null
 let unlistenSearchShortcut: (() => void) | null = null
 let unlistenChatShortcut: (() => void) | null = null
+let unlistenCaptureShortcut: (() => void) | null = null
 let unlistenOpenExtSettings: (() => void) | null = null
 let unlistenChatMode: (() => void) | null = null
 
@@ -639,6 +645,7 @@ onUnmounted(() => {
   unlistenOpenChatSettings?.()
   unlistenSearchShortcut?.()
   unlistenChatShortcut?.()
+  unlistenCaptureShortcut?.()
   unlistenOpenExtSettings?.()
   unlistenChatMode?.()
   window.removeEventListener('suda-open-web-panel', onSudaWebPanelEvent)
@@ -696,6 +703,8 @@ function onSaveNote(id: number, title: string, content: string) {
 
 // ---- 全局搜索 / 设置 ----
 const searchVisible = ref(false)
+/** 统一捕获框（2026-09-29 新增） */
+const captureVisible = ref(false)
 const promptManageVisible = ref(false)
 // 正在配置内容的工作台「自定义速达」槽位 id（suda1..suda4；null = 弹窗关闭）
 const sudaCustomEditId = ref<string | null>(null)
@@ -746,6 +755,15 @@ function onOpenCountdown(c: Countdown) {
   } else {
     showToast(`已切到工作台：${c.name}`)
   }
+}
+
+/** 捕获保存成功后的提示：明确说「记到哪了」，而不是只说「已保存」。
+ *  自动判断一定有猜错的时候，猜错时用户唯一能做的就是靠这句话回头找。 */
+function onCaptured(dest: string) {
+  const label: Record<string, string> = {
+    note: '速记', todo: '待办', snippet: '提示词', countdown: '倒计时', url: '速达',
+  }
+  showToast(`已记到「${label[dest] ?? dest}」`)
 }
 
 function onSearchKeydown(e: KeyboardEvent) {
@@ -1222,6 +1240,11 @@ provide('showToast', showToast)
       @open-todo="onOpenTodo"
       @open-snippet="onOpenSnippet"
       @open-countdown="onOpenCountdown"
+    />
+    <QuickCapture
+      :visible="captureVisible"
+      @close="captureVisible = false"
+      @saved="onCaptured"
     />
     <PromptManageDialog
       :visible="promptManageVisible"

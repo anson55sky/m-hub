@@ -156,6 +156,9 @@ pub struct AppConfig {
     /// AI 对话呼出快捷键（默认 Ctrl+Shift+K，可配置，全局注册）
     #[serde(default = "default_chat_shortcut")]
     pub chat_shortcut: String,
+    /// 统一捕获快捷键（2026-09-29 新增）。默认 ⇧⌘U / Ctrl+Shift+U。
+    /// 用来从任何地方一行记下东西，自动路由到速记/待办/提示词/倒计时/速达。
+    pub capture_shortcut: String,
     /// 剪贴板历史最大条数（含置顶；置顶豁免自动清理但计入上限）
     pub clipboard_max_items: i64,
     /// 非置顶记录的保留天数
@@ -446,6 +449,7 @@ impl Default for AppConfig {
             clipboard_shortcut: crate::shortcut::DEFAULT_CLIPBOARD_SHORTCUT.to_string(),
             search_shortcut: crate::shortcut::DEFAULT_SEARCH_SHORTCUT.to_string(),
             chat_shortcut: crate::shortcut::DEFAULT_CHAT_SHORTCUT.to_string(),
+            capture_shortcut: crate::shortcut::DEFAULT_CAPTURE_SHORTCUT.to_string(),
             clipboard_max_items: 500,
             clipboard_ttl_days: 7,
             clipboard_paused: false,
