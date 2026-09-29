@@ -28,6 +28,54 @@ fn table_exists(conn: &Connection, name: &str) -> bool {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
+    // ⚠️ 先修历史遗留的半截状态（2026-09-29）。**必须放在下面那句
+    // `CREATE TABLE IF NOT EXISTS resources` 之前**。
+    //
+    // 下面那段 resources 重建原先是 4 条**独立提交**的 DDL
+    // （RENAME → CREATE → INSERT…SELECT → DROP）。若进程在 RENAME 之后、
+    // DROP 之前被杀（崩溃 / 断电 / 磁盘满），库就停在「只剩 resources_old」的
+    // 中间态。旧代码对此毫无察觉：`PRAGMA table_info(resources)` 查的是
+    // **已不存在的表**，SQLite 对不存在的表返回**空集且不报错**，
+    // 于是 `cols.iter().any(|c| c == "group_id")` 判假、重建被跳过，
+    // 数据永远卡在 `resources_old` 里，而界面上速达列表全空、**没有任何报错**。
+    //
+    // 位置很关键：若放在那句 CREATE TABLE 之后，`resources` 必然已经存在，
+    // 就只能走「把旧表内容并回新表」这条**有损**的路（要逐列对齐、可能因列不匹配而
+    // 整条失败）。放在最前面，则「崩在 RENAME 之后」这种最危险的情形走的是
+    // **无损的改名回填**，之后自然被下面的 group_id 检测接手、完成剩下的迁移。
+    if table_exists(conn, "resources_old") {
+        if table_exists(conn, "resources") {
+            // 新表也在（崩在 CREATE 之后、DROP 之前）：把旧表内容并回来。
+            // ⚠️ 丢弃旧表的 `DROP` **必须**只在并回成功之后才做。
+            // 否则并回因列不匹配等原因失败时，旧表连同数据一起被删掉 ——
+            // 那就从「能救」变成「彻底没了」。
+            match conn.execute(
+                "INSERT OR IGNORE INTO resources
+                   (id, kind, name, target, category, icon, args, sort_order,
+                    last_launched_at, created_at, updated_at)
+                 SELECT id, kind, name, target, category, icon, args, sort_order,
+                        last_launched_at, created_at, updated_at
+                   FROM resources_old",
+                [],
+            ) {
+                Ok(_) => {
+                    let _ = conn.execute("DROP TABLE IF EXISTS resources_old", []);
+                    log::warn!("已修复上次迁移遗留的 resources_old（速达数据已并回）");
+                }
+                Err(e) => log::error!(
+                    "检测到上次迁移遗留的 resources_old，但并回失败：{e}。**已保留该表未删**，\
+                     速达数据仍在其中，需人工处理（导出 resources_old 表内容）"
+                ),
+            }
+        } else {
+            // 新表根本不在（崩在 RENAME 之后、CREATE 之前）：直接改回原名，无损
+            match conn.execute("ALTER TABLE resources_old RENAME TO resources", []) {
+                Ok(_) => log::warn!("已从 resources_old 恢复 resources 表（速达数据已救回）"),
+                Err(e) => log::error!("resources 缺失且 resources_old 存在，改名恢复失败: {e}"),
+            }
+        }
+    }
+
     // 全新安装：直接建合一的 resources 表（kind 含 app/web/file，不再有分组）
     conn.execute_batch(
         "
@@ -244,7 +292,15 @@ fn migrate(conn: &Connection) -> Result<()> {
         if !cols.iter().any(|c| c == "last_launched_at") {
             conn.execute("ALTER TABLE resources ADD COLUMN last_launched_at TEXT", [])?;
         }
-        conn.execute_batch(
+        // ⚠️ 这 4 步必须同事务（2026-09-29 补）。SQLite 的 DDL 是事务性的，
+        // 所以这能保证「要么全做完、要么一步没做」，从根上消除上面那种半截状态。
+        // `execute_batch` 不接受事务作用域（它自己管理隐式事务），故逐条走 tx。
+        //
+        // 源表行数必须在**批处理之前**取：批次最后一条是 `DROP TABLE resources_old`，
+        // 之后再去查它就会得到 "no such table"。
+        let expected: i64 = conn.query_row("SELECT COUNT(*) FROM resources", [], |r| r.get(0))?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
             "
             ALTER TABLE resources RENAME TO resources_old;
             CREATE TABLE resources (
@@ -264,7 +320,20 @@ fn migrate(conn: &Connection) -> Result<()> {
               SELECT id, kind, name, target, icon, args, sort_order, last_launched_at, created_at, updated_at FROM resources_old;
             DROP TABLE resources_old;
             ",
-        )?;
+        )
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        // 校验行数没丢再提交：INSERT…SELECT 是静默的，少拷了行也不会报错
+        let copied: i64 = tx.query_row("SELECT COUNT(*) FROM resources", [], |r| r.get(0))?;
+        if copied != expected {
+            // 不提交：回滚后仍是原表，用户数据毫发无损
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                std::io::Error::other(format!(
+                    "resources 重建行数不符：期望 {expected} 实得 {copied}，已回滚"
+                )),
+            )));
+        }
+        tx.commit()?;
+        log::info!("resources 表已由分组模型迁移为合一模型（{copied} 行）");
     }
 
     // 旧 files 表：全部并入 resources（kind='file'，target=path，category 保留），然后删除
@@ -796,5 +865,177 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 0);
+    }
+
+    /// 旧代码的非原子重建会在崩溃/断电后留下 `resources_old`。
+    /// 那种库必须能**自动救回**，否则速达数据永远卡在旧表里、界面全空且无报错。
+    ///
+    /// 这里刻意不模拟崩溃，而是直接构造出崩溃后的**终态**（两种都测）：
+    ///   ① 有 `resources_old` 但**没有** `resources`（崩在 RENAME 之后、CREATE 之前）
+    ///   ② 两者都有（新表已建好但没 DROP 完）
+    ///
+    /// ① 尤其关键：那种状态下 `PRAGMA table_info(resources)` 返回**空集且不报错**
+    /// （查的是不存在的表），所以光靠列名检测会判假、跳过一切恢复 ——
+    /// 这正是旧代码把数据丢干净的那一步。
+    #[test]
+    fn recovers_from_half_renamed_resources_table() {
+        // ① 崩在 RENAME 之后：只剩 resources_old
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE resources_old (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               kind TEXT NOT NULL,
+               name TEXT NOT NULL,
+               target TEXT NOT NULL,
+               category TEXT,
+               icon TEXT, args TEXT,
+               sort_order INTEGER NOT NULL DEFAULT 0,
+               last_launched_at TEXT,
+               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+             );
+             INSERT INTO resources_old (kind, name, target) VALUES
+               ('app', '速达甲', 'https://a.example'),
+               ('app', '速达乙', 'https://b.example');",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+
+        assert!(table_exists(&conn, "resources"), "resources 表应被救回");
+        assert!(!table_exists(&conn, "resources_old"), "resources_old 应被清理");
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM resources ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(names, vec!["速达甲", "速达乙"], "速达数据必须一条不少地救回");
+
+        // ② 新表已在、残留 resources_old：内容并回，已有的行不被覆盖
+        let conn2 = Connection::open_in_memory().unwrap();
+        conn2.execute_batch(
+            "CREATE TABLE resources_old (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               kind TEXT NOT NULL, name TEXT NOT NULL, target TEXT NOT NULL,
+               category TEXT, icon TEXT, args TEXT,
+               sort_order INTEGER NOT NULL DEFAULT 0, last_launched_at TEXT,
+               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+             );
+             INSERT INTO resources_old (id, kind, name, target) VALUES (1,'app','旧行','x');
+             CREATE TABLE resources (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               kind TEXT NOT NULL CHECK (kind IN ('app','web','file')),
+               name TEXT NOT NULL, target TEXT NOT NULL, category TEXT, icon TEXT, args TEXT,
+               sort_order INTEGER NOT NULL DEFAULT 0, last_launched_at TEXT,
+               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+             );
+             INSERT INTO resources (id, kind, name, target) VALUES (9,'app','新行','y');",
+        )
+        .unwrap();
+        migrate(&conn2).unwrap();
+
+        assert!(!table_exists(&conn2, "resources_old"), "残留的 resources_old 应被清理");
+        let mut names: Vec<String> = conn2
+            .prepare("SELECT name FROM resources ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["新行".to_string(), "旧行".to_string()],
+            "新表已有行要保住，残留旧表的行要并回来"
+        );
+    }
+
+    /// 并回**失败**时必须保留 `resources_old`，不能顺手把它删掉。
+    ///
+    /// 这条是被变异测试逼出来的：把 `DROP TABLE resources_old` 挪到
+    /// `if let Err(..)` 分支里（无论成败都删）后，`recovers_from_half_renamed_resources_table`
+    /// **照样通过** —— 因为它构造的旧表列是全对的、合并根本不会失败。
+    /// 于是「失败时也删」这个真实存在的数据丢失写法，没有任何测试拦得住。
+    ///
+    /// 这里的做法是**故意让合并失败**：旧表缺 `icon` 列，而并回的 SELECT
+    /// 显式列出了 `icon`，SQLite 直接报 "no such column: icon"。
+    /// 正确行为是：报错、但**表还在**、数据一条不少。
+    #[test]
+    fn failed_merge_keeps_resources_old() {
+        // 必须**两张表都在**才能走到「并回」分支：只有 resources_old 时，
+        // 恢复逻辑会走更前面的「改名回填」（无损，同样保住了数据），
+        // 根本到不了这里。要构造的是「崩在 CREATE 之后、DROP 之前」那个中间态。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE resources (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               kind TEXT NOT NULL CHECK (kind IN ('app','web','file')),
+               name TEXT NOT NULL, target TEXT NOT NULL, category TEXT,
+               icon TEXT, args TEXT, sort_order INTEGER NOT NULL DEFAULT 0,
+               last_launched_at TEXT,
+               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+             );
+             CREATE TABLE resources_old (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               kind TEXT NOT NULL, name TEXT NOT NULL, target TEXT NOT NULL,
+               category TEXT,
+               -- 故意缺 icon / args / sort_order / last_launched_at / 时间戳，
+               -- 好让并回的 SELECT 必然失败（no such column: icon）
+               junk TEXT
+             );
+             INSERT INTO resources_old (kind, name, target, junk) VALUES ('app','救我','t', 'j');",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+
+        assert!(
+            table_exists(&conn, "resources_old"),
+            "并回失败时**必须**保留 resources_old —— 删掉就从「能救」变成「彻底没了」"
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM resources_old", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "数据必须一条不少地留在旧表里");
+    }
+
+    /// 重建后行数必须与源表一致（少拷了行 INSERT…SELECT 不会报错）。
+    /// 校验放在提交前 —— 不一致就回滚，用户数据毫发无损。
+    #[test]
+    fn resources_rebuild_preserves_row_count() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE resources (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               group_id INTEGER NOT NULL REFERENCES groups(id),
+               kind TEXT NOT NULL CHECK (kind IN ('app','web')),
+               name TEXT NOT NULL, target TEXT NOT NULL,
+               icon TEXT, args TEXT, sort_order INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+             );",
+        )
+        .unwrap();
+        for i in 0..25 {
+            conn.execute(
+                "INSERT INTO groups (id, name) VALUES (?1, ?2)",
+                rusqlite::params![i, format!("组{i}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO resources (group_id, kind, name, target) VALUES (?1,'app',?2,?3)",
+                rusqlite::params![i, format!("速达{i}"), format!("t{i}")],
+            )
+            .unwrap();
+        }
+        migrate(&conn).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM resources", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 25, "重建后行数必须与源表一致");
     }
 }

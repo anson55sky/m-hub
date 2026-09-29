@@ -448,12 +448,19 @@ fn dock_hidden_pos(cx: f64, cy: f64, dx: i32, dy: i32, half: f64, peek: i32) -> 
 /// 用户刚拖走的球按旧记忆拽回屏边（表现为拖到任意位置都弹回去）。
 fn edge_tick(app: &AppHandle) {
     use std::sync::atomic::Ordering;
-    let Some(win) = app.get_webview_window(LABEL) else { return };
-    if !win.is_visible().unwrap_or(false) {
+    // ⚠️ `lmb_down()` 必须排在**任何 Tauri 调用**之前（2026-09-29 修）。
+    // 它是纯 CGEvent 调用，不跨线程、零开销；而 `win.is_visible()` 走
+    // `send_user_message`，是到主线程的**阻塞式往返**。macOS 拖拽走 AppKit 的
+    // 模态循环（performWindowDragWithEvent:），主线程陷在嵌套 run loop 里，
+    // 此时这次 IPC 可能长时间不返回 —— 而本函数存在的目的正是
+    // 「拖拽期间别动窗口」。检查顺序颠倒了，拖拽期间边缘线程会整段卡住；
+    // 更糟的是 `tick_clipboard_overlay` 排在 `edge_tick` 之后（见 start_edge_watch），
+    // 于是剪贴板浮层的「点外部收起」会跟着一起停摆。
+    if lmb_down() {
         return;
     }
-    // 左键按下 = 原生拖拽/按住操作中，窗口位置正被模态循环接管，跳过本跳
-    if lmb_down() {
+    let Some(win) = app.get_webview_window(LABEL) else { return };
+    if !win.is_visible().unwrap_or(false) {
         return;
     }
     // 左键已释放且拖拽标志还在 = 拖拽刚结束的第一跳：模态循环已退出、窗口位置
@@ -641,9 +648,31 @@ pub fn start_edge_watch(app: &AppHandle) {
     STARTED.call_once(move || {
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(EDGE_POLL_MS));
-            edge_tick(&handle);
-            // 借这一跳顺带做剪贴板浮层的「点外部收起」（macOS 专用，见 tick_clipboard_overlay）
-            tick_clipboard_overlay(&handle);
+            // panic 隔离（2026-09-29 补）。
+            //
+            // 这个循环承担着 悬停滑出 / 拖拽落位吸附 / 救球 / 剪贴板浮层点外部收起
+            // 四项能力，而它是**唯一**的实现 —— 一次 panic 就让这四项**永久**静默失效，
+            // 且没有任何报错（`STARTED` 是 Once，重启不了）。
+            //
+            // release 包里 `panic = "abort"` 会连整个进程一起带走，症状反而明显；
+            // 真正危险的是 `tauri dev` 的 dev profile（unwind）：线程安静地消失，
+            // 悬浮球再也不滑出、浮层也点外部收不起来，看上去像「偶发卡顿」。
+            //
+            // 所以每次 tick 单独 catch：坏掉的那一跳被记进日志，**下一跳照常**。
+            // catch_unwind 要求闭包 UnwindSafe，用 AssertUnwindSafe 兜住 ——
+            // 这里捕获的 `&handle` 是 AppHandle，本身不提供更强保证，
+            // 而 panic 已经发生、不捕获只会让整条链路一起死，这个取舍是划算的。
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                edge_tick(&handle);
+                // 借这一跳顺带做剪贴板浮层的「点外部收起」（macOS 专用，见 tick_clipboard_overlay）
+                tick_clipboard_overlay(&handle);
+            }));
+            if r.is_err() {
+                log::error!(
+                    "[悬浮球] 边缘监视本跳 panic，已跳过本跳（悬停滑出/落位吸附/救球/浮层点外部收起 \
+                     仍会在下一跳继续工作）。若是持续 panic 请看上面那条 panic 回溯。"
+                );
+            }
         });
     });
 }

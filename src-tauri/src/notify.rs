@@ -413,7 +413,6 @@ fn cursor_point_logical() -> Option<(f64, f64)> {
 /// 取光标所在屏而非窗口所在屏：通知应出现在用户正在操作的那块屏上（多屏体验一致）。
 #[cfg(not(target_os = "windows"))]
 fn simple_bottom_right(win: &WebviewWindow, width_logical: f64, height_logical: f64) {
-    let scale = win.scale_factor().unwrap_or(1.0);
     // 光标位置 → 所在屏；取不到光标（异常）则退回窗口所在屏，再退回主屏。
     // `monitor_from_point` 收的是**逻辑点**，与 `mac::cursor_point()` 的单位一致。
     let monitor = cursor_point_logical()
@@ -421,6 +420,15 @@ fn simple_bottom_right(win: &WebviewWindow, width_logical: f64, height_logical: 
         .or_else(|| win.current_monitor().ok().flatten())
         .or_else(|| win.primary_monitor().ok().flatten());
     let Some(m) = monitor else { return };
+
+    // ⚠️ scale 必须取**目标屏**的，不能取窗口自己所在屏的（2026-09-29 修）。
+    // 原先这里是 `win.scale_factor()`，而下面的落点用的是 `m.work_area()` ——
+    // 两者是**不同的屏**。混合 DPI（Retina 笔记本 + 非 Retina 外接，或两台
+    // Retina 但「缩放」档位不同）时，通知窗停在一块屏上、而落点算在另一块屏的
+    // 工作区里，尺寸与边距会按错误的 scale 换算 —— 偏移量 = (scale_a - scale_b) × 368，
+    // 表现为通知**不贴目标屏的右下角**。
+    // 顺序也必须跟着改：monitor 要先拿到，才能取它的 scale。
+    let scale = if m.scale_factor() > 0.0 { m.scale_factor() } else { 1.0 };
 
     let work = m.work_area(); // 物理 px，已避让任务栏 / Dock / 菜单栏
     let w = (width_logical * scale).round() as i32;
