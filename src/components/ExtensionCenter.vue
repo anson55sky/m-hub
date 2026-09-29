@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import NewDevExtensionDialog from './NewDevExtensionDialog.vue'
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
@@ -303,6 +304,34 @@ async function loadDevMode() {
   } catch {
     // 后端不可用（浏览器预览）时静默：该标签页只在桌面端有意义
   }
+}
+
+/** 「新建」对话框是否打开 */
+const newDevOpen = ref(false)
+
+/**
+ * 骨架创建成功后的处理。
+ *
+ * `registered: false` 分支值得单独说：目录**已经建好了**，只是没能自动挂上
+ * （典型是与已装扩展 id 冲突）。这时如果只报「失败」，用户会去重试一遍 ——
+ * 而重试必然又被「目录已存在」挡下，看起来像坏了。所以分开说清：
+ * 文件在哪、以及为什么没挂上。
+ */
+async function onDevCreated(dir: string) {
+  newDevOpen.value = false
+  await load()
+  showToast(`已生成 ${dir}`)
+  // 直接把目录在文件管理器里打开：用户下一步就是要改它，
+  // 让他自己再找一次路径是纯摩擦。
+  // 走既有的 openDir（它按扩展 id 调后端），所以要在**刷新后的清单**里
+  // 按路径找回刚建的那一条 —— 直接拿路径调后端会是另一条路径口径。
+  const created = devMode.value.extensions.find(
+    (d) => normalizePath(d.path) === normalizePath(dir),
+  )
+  // devEntryFor 已存在且按同一套 normalizePath 口径匹配 —— 复用它，
+  // 不另写一份路径比较（两处口径不一致就会出现「扩展在跑但按钮不见了」那类 bug）
+  const entry = created ? devEntryFor(created) : undefined
+  if (entry) await openDir(entry)
 }
 
 /** 添加本机扩展源码目录（须含 manifest.json） */
@@ -685,6 +714,14 @@ function onMore(e: ExtensionEntry) {
       </div>
       <div class="ec-actions">
         <template v-if="tab === 'dev'">
+          <!--
+            「新建」放在「选择目录」**前面**：第一次用本机扩展的人根本没有目录可选，
+            先让他看到「新建」才不至于卡在「选择目录」上不知道从哪来。
+          -->
+          <button class="pill-btn" type="button" :disabled="devBusy" @click="newDevOpen = true">
+            <Plus :size="14" :stroke-width="2" aria-hidden="true" />
+            新建
+          </button>
           <button class="pill-btn" type="button" :disabled="devBusy" @click="pickDevDir">
             <FolderCog :size="14" :stroke-width="2" aria-hidden="true" />
             选择目录
@@ -838,10 +875,16 @@ function onMore(e: ExtensionEntry) {
       <div v-else-if="devMode.extensions.length === 0" class="ec-empty">
         <FolderCog :size="40" :stroke-width="1.5" aria-hidden="true" />
         <h3>还没有添加本机扩展</h3>
-        <p>选一个含 manifest.json 的源码目录，改完保存就能在宿主里看到效果</p>
-        <button class="pill-btn" type="button" :disabled="devBusy" @click="pickDevDir">
-          选择源码目录
-        </button>
+        <p>新建一个能直接跑的骨架，或选一个已有的含 manifest.json 的源码目录</p>
+        <div class="ec-empty-actions">
+          <button class="pill-btn" type="button" :disabled="devBusy" @click="newDevOpen = true">
+            <Plus :size="14" :stroke-width="2" aria-hidden="true" />
+            新建扩展
+          </button>
+          <button class="pill-btn" type="button" :disabled="devBusy" @click="pickDevDir">
+            选择源码目录
+          </button>
+        </div>
       </div>
 
       <div v-else class="ec-list">
@@ -1060,6 +1103,8 @@ function onMore(e: ExtensionEntry) {
     <!-- 发布扩展：本机打包 → 上传平台 → 展示服务端返回的关卡逐项结论（客户端只问不判） -->
     <ExtensionPublishDialog :extension="publishTarget" @close="publishTarget = null" />
   </div>
+
+  <NewDevExtensionDialog :visible="newDevOpen" @close="newDevOpen = false" @created="onDevCreated" />
 </template>
 
 <style scoped>
@@ -1622,5 +1667,13 @@ function onMore(e: ExtensionEntry) {
 }
 .ec-mcard-foot .ghost-btn {
   min-width: 64px;
+}
+
+.ec-empty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 </style>

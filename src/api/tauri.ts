@@ -1283,6 +1283,22 @@ export const tauriApi = {
   // ---- 「我的扩展」（本机源码目录直挂，登记即加载；见 docs/adr/0005） ----
   getDevModeStatus: () => invoke<DevModeStatus>('get_dev_mode_status'),
   addDevExtension: (path: string) => invoke<DevModeStatus>('add_dev_extension', { path }),
+  /**
+   * 新建本机扩展骨架并立即挂载（2026-09-29 新增）。
+   *
+   * 返回 `registered: false` 表示**目录已建好、但没能自动挂上**
+   * （例如与已装扩展 id 冲突）—— 这不是调用失败，所以不 reject，
+   * 由 UI 如实告诉用户「文件在，挂在这一步没成」。
+   */
+  createDevExtension: (
+    parentDir: string,
+    id: string,
+    name: string,
+    kind: string,
+  ) => invoke<{ dir: string; files: string[]; registered: boolean; error?: string }>(
+    'create_dev_extension',
+    { parentDir, id, name, kind },
+  ),
   removeDevExtension: (path: string) => invoke<DevModeStatus>('remove_dev_extension', { path }),
   /** 本机源码目录内容戳（全目录 FNV+mtime；变化即热重载对应 iframe） */
   devExtensionsStamp: () => invoke<number>('dev_extensions_stamp'),

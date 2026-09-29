@@ -589,6 +589,51 @@ pub fn get_dev_mode_status(app: tauri::AppHandle) -> Result<DevModeStatus, Strin
     Ok(dev_mode_status(&app))
 }
 
+/// 新建一个本机扩展骨架，并**立即**挂载加载。
+///
+/// 与 [`add_dev_extension`] 分开而不是加个 `create: bool` 参数：
+/// 前者改的是配置（挂一个已存在的目录），后者**写磁盘**。混在一个函数里的话，
+/// 「只改配置不碰磁盘」这条性质就不再能从函数签名上看出来 —— 而这正是脚手架
+/// 最需要能被一眼确认的事。
+///
+/// 顺序：先建骨架（可能失败），再建配置（可能失败）。
+/// 第二步失败时**不回收目录**：脚手架文件已经落盘，用户可以在「我的扩展」里
+/// 手动加上那个目录；擅自删掉反而会把他可能已经改过的内容弄丢。
+#[tauri::command]
+pub fn create_dev_extension(
+    app: tauri::AppHandle,
+    parent_dir: String,
+    id: String,
+    name: String,
+    kind: String,
+) -> Result<serde_json::Value, String> {
+    // 先在 &str 上判空再转 PathBuf —— PathBuf 没有 trim()，在它上面判空是类型错误
+    let parent_raw = parent_dir.trim();
+    if parent_raw.is_empty() {
+        return Err("INVALID_ARGUMENT: 请先选择保存位置".to_string());
+    }
+    // `~` 在后端统一展开（前端没有可靠的 home，且这条规则所有入口都要用）
+    let parent = crate::ext_scaffold::expand_tilde(parent_raw);
+    let scaffold = crate::ext_scaffold::create(&parent, id.trim(), name.trim(), kind.trim())?;
+
+    // 登记失败（如与已装扩展 id 冲突）不该让用户以为白干了：把目录如实返回，
+    // 提示语里说清「文件已生成，但没能自动挂上」。
+    match add_dev_extension(app.clone(), scaffold.dir.to_string_lossy().into_owned()) {
+        Ok(status) => Ok(serde_json::json!({
+            "dir": scaffold.dir.to_string_lossy(),
+            "files": scaffold.files,
+            "status": status,
+            "registered": true,
+        })),
+        Err(e) => Ok(serde_json::json!({
+            "dir": scaffold.dir.to_string_lossy(),
+            "files": scaffold.files,
+            "error": e,
+            "registered": false,
+        })),
+    }
+}
+
 /// 添加一个本机扩展源码目录（含 manifest.json 的目录）；保存后立即放行并加载，无需重启
 #[tauri::command]
 pub fn add_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevModeStatus, String> {

@@ -207,6 +207,28 @@ pub fn rotate(dir: &std::path::Path, keep: i64) -> Result<usize, String> {
 mod tests {
     use super::*;
 
+    /**
+     * 一个**保证独占**的临时目录。
+     *
+     * 原先这里用的是**写死**的名字（两个固定字面量）。写死的名字在同一个测试
+     * 进程里靠「彼此不同」勉强不撞，但只要同时跑两份测试二进制（比如一边
+     * `cargo test` 一边 `tauri build` 也在跑测试），两边就会 `remove_dir_all`
+     * 掉对方的目录 —— flaky，且症状与真因隔了好几层。
+     *
+     * 改用 `create_dir` 原子地「创建或失败」、失败就加后缀重试：没有
+     * 「先查再建」的 TOCTOU 窗口，也不再依赖「名字要够独特」这种约定。
+     */
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir();
+        for n in 0..10_000u32 {
+            let d = base.join(format!("mhub_{tag}_{}_{}", std::process::id(), n));
+            if std::fs::create_dir(&d).is_ok() {
+                return d;
+            }
+        }
+        panic!("连续 10000 次都建不出临时目录（{tag}）");
+    }
+
     fn cfg_with(dir: &str, hours: i64, last: i64) -> config::AppConfig {
         let mut c = config::AppConfig::default();
         c.auto_backup_dir = dir.to_string();
@@ -261,7 +283,7 @@ mod tests {
     /// 轮转：只删自己写的文件，且只删超出份数的那些。
     #[test]
     fn rotate_keeps_newest_n_and_ignores_foreign_files() {
-        let dir = std::env::temp_dir().join("mhub_rotate_test");
+        let dir = tmp_dir("rotate");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // 5 份自己的备份 + 3 个不该动的文件
@@ -288,7 +310,7 @@ mod tests {
 
     #[test]
     fn rotate_is_noop_when_under_limit() {
-        let dir = std::env::temp_dir().join("mhub_rotate_test2");
+        let dir = tmp_dir("rotate_noop");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for i in 1..=3 {

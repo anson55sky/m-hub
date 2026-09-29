@@ -13,6 +13,7 @@ mod countdown_ticker;
 mod countdown_window;
 mod db;
 mod dnd;
+mod ext_scaffold;
 mod extension;
 mod ext_protocol;
 mod floating_ball;
@@ -1062,6 +1063,7 @@ pub fn run() {
             extension::set_extension_permission,
             extension::get_dev_mode_status,
             extension::add_dev_extension,
+            extension::create_dev_extension,
             extension::remove_dev_extension,
             extension::dev_extensions_stamp,
             // 扩展开发技能包（Skills）：内置 m-hub-extension 一键装到本机 AI 助手的 skills 目录
