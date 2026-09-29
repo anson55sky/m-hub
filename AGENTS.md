@@ -384,6 +384,58 @@ m-hub/
       `#[cfg]` **分叉**的、两平台**允许不同**（剪贴板 mac `⌃⌘V` / win `Ctrl+\``），
       故 TS 镜像**每个键存 mac / other 两个分支**，两侧都要对上 ——
       `other` 分支只在该平台被读到，开发机上验不出来，所以更要锁。
+72. **凡是「删掉旧的东西 / 换上新的东西」的操作，必须是「先落新、再原子换、最后才删旧」**（2026-09-29 一次数据丢失排查的总结）：
+    - 三处独立的同款缺陷，症状都是**静默的不可逆数据丢失**：
+      ① `apply_pending_restore` 原来是「先删正式库 → copy → 删备份」，且每步 `let _ =` 吞错
+      —— copy 失败时原库已删、备份也删、什么都不剩，日志还写「已应用待恢复的数据」；
+      ② 我自己写的 `resources_old` 恢复里 `DROP TABLE` 放在 `if/else` **外面**，
+      并回因列不匹配失败时旧表连同数据一起被删 —— 从「能救」变成「彻底没了」；
+      ③ 剪贴板清理的 `doomed` 图片列表在**事务提交前**就 unlink，回滚后留下
+      「记录还在、图片没了」的行，且记录还在 → 后续清理不会再删该孤儿文件，永久残留。
+    - 正确形状：**复制到暂存名 → 校验内容真的有效 → 同目录 `rename` 原子替换 → 才删旧**。
+      Unix 的 `rename(2)` 本身即原子替换，**不需要先删目标**。
+      任何一步失败都完整保留「原件 + 暂存 + 标记」，让下次启动自然重试 ——
+      恢复要么完整成功，要么完全没发生，**没有中间态**。
+    - 校验那步不能省：`copy` 返回 `Ok` **不等于**内容有效（磁盘写满时会只写一半）。
+      不校验就替换，用户会拿到一个打不开的库，而原库已被覆盖。
+    - 涉及**跨设备/跨目录的产物**（备份 zip）时，存绝对路径的列要写成可移植形式
+      （本工程用 `mhub-rel://` 前缀，打包时写、解包时按**当前**根还原）。
+      「不改 schema、只在传输格式里改写」比「把库里全改成相对路径」安全一个量级。
+      判据：**这个产物换台机器还能用吗**。
+73. **测试必须先证明自己会失败，才算数**（2026-09-29 连续踩中三次）：
+    - 三次都是「测试绿了但它守的东西根本不会被它抓到」：
+      ① 剪贴板「图片必须在 commit 后删」—— 我把 unlink 挪到 commit 前重跑，用例**照样通过**
+      （成功路径结束时文件都没了，测不出顺序差别）；
+      ② 备份路径改写只测了辅助函数 `rewrite_db_paths`，把生产代码里那句调用删掉**照样全绿**；
+      ③ `resources_old` 恢复里把 `DROP` 改成无条件执行，**照样通过**。
+    - 结论：**每加一条守卫，都要先把它守的东西破坏掉、确认它变红**，再确认修回去。
+      写完就绿不代表它是守卫，只代表它没报错。
+    - 补测的顺序是：先想「这段代码出错了会怎样」，再把那个错误**真的制造出来**。
+      制造不出来（如「commit 失败」需要故障注入）就在注释里**写明这条验不到什么**，
+      别留一条虚假守卫 —— 它比没有更糟，因为会让人以为该处已被覆盖。
+      真正能造出来的优先造：③ 就是靠「故意让并回因缺列而失败」才补上的。
+    - 造不出用例的场合，退一步把**调用点**做成可测：② 里 `backup_data` 其实不需要
+      Tauri handle，于是抽出 `make_backup(conn, target)` 让测试跑生产路径本身。
+74. **「只在 macOS 显形」的 bug 有一个共同形状：数据源换了口径，匹配的代码没跟着换**（2026-09-29）：
+    - 这批修复大多是这个形状，且都能在 Windows 上量不出来（那边 scale 恒为 1、
+      扩展名是 `.exe`、有系统热键与系统缩放边框）：
+      · `outer_position()` 返回 `PhysicalPosition`，落盘存原值、恢复用 `LogicalPosition`
+        → Retina 上主窗位置**每次重启翻倍**，第 4~5 次飞出屏幕且无法拖回；
+      · 三个浮窗把主窗**物理**坐标与浮窗**逻辑**尺寸相加，结果喂给
+        `WindowBuilder::position()`（文档明写收逻辑像素）；同一份代码里 `chat_window`
+        那份是对的 —— 正确写法一直在工程里，只是没人抄；
+      · `window_resize` 全程用**物理** px，而 `minWidth` 是**逻辑** px，不乘 scale
+        则 Retina 上算出的下限只有真实值的一半。
+    - **修法优先「消灭重复」而不是「各打一个补丁」**：那三份浮窗落点是**三份逐字重复**，
+      抽成唯一的 `lib.rs::centered_on_main` 让四处共用，比补三处更能防将来再漂。
+    - 反向自查：`grep` 一下所有**坐标/尺寸的取用点**，逐个确认单位；
+      `Physical*` 与 `Logical*` 混用编译器不报错、`clamp` 也不报错，
+      只在非 1.0 的 scale 下错。
+    - ⚠️ 还有一处**同源但需实机确认**：`mac::cursor_physical()` 用「光标所在屏」的
+      backing scale，而 tao 的 `outer_position()` 用「窗口所在屏」的 scale ——
+      混合 DPI 多显示器下两者不在同一坐标系。修法是「几何比较全用全局点空间，
+      只在最终 `set_position` 时换算」（`clipboard.rs::anchor_position` 已是这个范式）。
+
 
 ---
 
@@ -558,7 +610,7 @@ cd src-tauri && cargo test --lib    # Rust 单元测试（macOS 直接跑，无�
 - **数据目录：** 数据根默认 `app.path().app_data_dir()/` = `%APPDATA%\m-hub`（identifier 为 `m-hub`；旧标识 `com.workbench.desktop` 的数据在启动时自动迁移一次，且 `lib.rs::fix_icon_paths` 会把数据库中的旧图标路径批量替换为新目录）；支持设置中「更改数据存储路径」（迁移后重启生效）与**便携版**（exe 同目录放空文件 `portable` → 数据固定为 `exe\data`），统一由 `paths.rs` 解析
 - **日志：** `tauri-plugin-log` 文件日志 → `%APPDATA%\m-hub\logs\m-hub.log`（Info 级别），同时输出 Stdout + Webview；所有命令入口记录成功/失败，数据查询类用 `log::debug!` 防噪音；启动程序遇 os error 740（需要管理员权限）自动经 PowerShell `Start-Process -Verb RunAs` 触发 UAC 提权
 - **配置位置：** 数据根目录下 `app.json`（与数据库同目录，随「更改数据目录」一起迁移；`config.rs` AppConfig 全字段 serde default，新增字段天然兼容老配置）。主要字段：主题三件套（theme_mode/theme_preset/accent_color）+ 外观（wallpaper_path/wallpaper_blur/wallpaper_veil/wallpaper_immersive/glass_opacity）、sidebar_toggle、window、global_shortcut、dashboard_layout（工作台网格）+ dashboard_mid_content（废弃遗留）、countdown_sound、clock_quote、通知驻留时长（notice_duration_ms，毫秒；由 notify.rs 随每条通知下发给通知窗，改设置立即生效）、联网（online_enabled/weather_city/weather_lat/weather_lng/quote_source）、AI 对话（chat_models/chat_panel_width/open/side/height/opacity + 独立窗形态 chat_window_mode/width/height/x/y/pinned，其中 mode 经 chat_window_save_mode、几何由后端记忆，save_config 均以磁盘为准）、剪贴板（clipboard_shortcut/max_items/ttl_days/paused/paste_method/image_enabled/file_enabled）、字号（font_scale/font_sticky/font_notes/font_prompt/font_todo）、扩展（runtime_strategy/sidebar_extensions/extension_open_modes + **已废弃**的 market_endpoint —— 自 v0.6.1 起客户端不再直连对象存储，市场/升级地址按 `config::DEFAULT_SERVER_URL` 拼服务端接口，两个字段只作兼容占位、装载时被 `config.rs::migrate_legacy_endpoints` 归一落盘 + **后端单独写盘**的 dev_extensions、skill_roots，dev_mode_enabled 废弃仅兼容）、自启动（run_at_startup）、自动更新（auto_update_enabled/update_interval_hours/skipped_update_version + **已废弃**的 update_endpoint，同上）
-- **「后端单独写盘」的配置字段必须在 `merge_disk_authoritative` 里以磁盘为准，且必须登记进 `BACKEND_MANAGED_FIELDS`（否则被前端旧快照清空）：** 前端 `state.config` 是**启动快照、之后不再刷新**，而 `setDashboardLayout` 等操作会把整份配置发回 `save_config` 落盘；凡是只由后端命令写、前端从不回写的字段（现有 22 个：`clipboard_paste_method`（粘贴方式）、`chat_panel_width/height/open`（对话抽屉几何）、`window`（主窗位置尺寸，整块）、`dev_extensions`、`skill_roots`、`skipped_update_version`、`floating_ball_*`（6）、`chat_models`、独立窗 `chat_window_*`（6，经 `chat_window::preserve_disk_fields`）、已废弃的 `dev_mode_enabled`）都必须在 `config.rs::merge_disk_authoritative` 里显式取磁盘值（`commands.rs::save_config` 只负责调用它）。已踩过两次：`dev_extensions`（加完本机源码目录后拖一下工作台卡片 → 「我的扩展」列表凭空清空，但扩展本次会话仍在跑）、`skipped_update_version`（点过「跳过此版本」被下次任意设置保存重置）；`skill_roots` 是第三次的未遂（同一剧本，当场补上）。
+- **「后端单独写盘」的配置字段必须在 `merge_disk_authoritative` 里以磁盘为准，且必须登记进 `BACKEND_MANAGED_FIELDS`（否则被前端旧快照清空）：** 前端 `state.config` 是**启动快照、之后不再刷新**，而 `setDashboardLayout` 等操作会把整份配置发回 `save_config` 落盘；凡是只由后端命令写、前端从不回写的字段（⚠️ **不要在这里写条目数或罗列字段名** —— 那本身就是第 N+1 份拷贝，必然会漂；真相源是 `config.rs::BACKEND_MANAGED_FIELDS`，由 `backend_managed_field_list_is_real_and_effective` 逐条守着「名字存在 + 合并后确实取磁盘值」，`backend_only_fields_survive_a_snapshot_save` 守着「快照覆盖不掉它们」。要查有哪些，看那个常量。**尚未自动化的一点**：新增一个「只由后端写盘」的字段时，如果忘了登记，现有测试**不会**自动报出来 —— 两条测试守的是「清单内」与「已知的漏登记实例」，不是「所有后端独占写字段」这个集合本身（要自动判定就得扫描各模块的写盘点，那会非常脆）。所以**加这类字段时，记得顺手在 `backend_only_fields_survive_a_snapshot_save` 里加一段断言**，把「它会被快照吃掉」这个失败模式钉住。
   **⚠️ 判据：「这个字段在不在 `src/api/tauri.ts` 的 `AppConfig` 里」既不是必要条件、也不是保护手段。** 前端认识它 → 提交的是启动快照里的旧值；前端不认识它 → 整份提交后反序列化按 `AppConfig::default()` 的**同名字段值**补缺（容器级 `#[serde(default)]`，不是字段类型的 `Default`），**两种照样覆盖磁盘**——`skill_roots` 恰恰因为不在类型里才被悄无声息地补成空数组。所以「不放进 `AppConfig`」救不了你，唯一的保护是「合并 + 登记 + 测试」这三件套。
   新增此类字段时**必须同时**改四处：字段注释、`merge_disk_authoritative` 合并、`config.rs` 的 `BACKEND_MANAGED_FIELDS` 清单、`src/api/tauri.ts` 的 `AppConfig` 注释清单；漏登会被 `config::tests::merge_keeps_backend_managed_fields` / `backend_managed_field_list_is_real_and_effective` 直接判红（合并逻辑做成纯函数就是为了能在 config.rs 里无 `AppHandle` 地回归；注意登记表靠人维护，忘登则测试是绿的，所以这四处同步没有捷径）。
 - **数据恢复：** `backup_data`/`restore_data` 命令只把备份暂存为 `restore.db`/`restore_icons` 并写 `.restore_pending` 标记，重启时 `apply_pending_restore` 才替换正式数据（lib.rs）
