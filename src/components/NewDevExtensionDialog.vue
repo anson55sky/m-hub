@@ -145,10 +145,10 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <Teleport to="body">
     <Transition name="search-fade">
-      <div v-if="visible" class="nde-mask" @mousedown.self="emit('close')">
+      <div v-if="visible" class="modal-mask nde-mask" @mousedown.self="emit('close')">
         <div
           ref="cardRef"
-          class="nde-card"
+          class="modal-card nde-card"
           role="dialog"
           aria-modal="true"
           aria-label="新建本机扩展"
@@ -244,17 +244,24 @@ function onKeydown(e: KeyboardEvent) {
 </template>
 
 <style scoped>
-.nde-mask {
-  position: fixed;
-  /* 铺满整个窗口。外扩带已移除，所以圆角与内容圆角落在同一个「窗口角」 */
-  border-radius: var(--window-radius);
-  inset: 0;
-  z-index: 200;
-  display: grid;
-  place-items: center;
-  background: var(--scrim);
-}
+/*
+ * 遮罩层刻意**不**自己写，直接用共享的 `.modal-mask` / `.modal-card`：
+ *
+ * 第一版只抄了 `background: var(--bg-card-solid)`，结果在暗色主题下几乎透明 ——
+ * `--bg-card-solid` 在暗色是 `rgba(255,255,255,0.2)`，那是**常驻玻璃卡片**的口径
+ * （ADR 0003：表面只属于卡片，弹层才用真 blur）。让 20% 的底色独自承担
+ * 「对话框」的可读性，后面的内容就直接透了过来（用户反馈「看不清」）。
+ *
+ * 真正让这个底色可读的是 `.modal-card` 上的
+ * `backdrop-filter: blur(18px) saturate(160%)` —— 共享类已经带了。
+ * 自己重写一遍等于把 blur 弄丢，而且下次改共享样式时这里不会跟着变。
+ * 共享类还顺带给了 `--scrim` 遮罩、`--window-radius` 圆角与入场动画，
+ * 都在 check-rounded-window.mjs 的守��范围内 —— 自己写就得重复这些约定。
+ *
+ * 弹层 z-index 高于普通内容（100 > 常驻卡片），符合共享约定，故不覆写。
+ */
 .nde-card {
+  /* 尺寸与排布是本对话框自己的，底色/模糊/圆角/动画一律继承共享类 */
   width: 520px;
   max-width: calc(100vw - 48px);
   max-height: calc(100vh - 96px);
@@ -263,10 +270,6 @@ function onKeydown(e: KeyboardEvent) {
   flex-direction: column;
   gap: 12px;
   padding: 18px;
-  background: var(--bg-card-solid);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-dock);
 }
 .nde-title {
   margin: 0;
