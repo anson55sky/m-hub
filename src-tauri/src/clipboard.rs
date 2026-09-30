@@ -857,6 +857,71 @@ fn normalize_bmp_alpha(img: image::DynamicImage) -> image::DynamicImage {
 mod tests {
     use super::*;
 
+    /// 浮层定位夹取：夹的是**工作区**，不是整块屏。
+    ///
+    /// 这组用例对着用户报的那个症状写：「浮层跳到下方挡住的地方」。
+    /// 取一块典型的 1512×982 屏、Dock 吃掉底部 ~80pt 的工作区
+    /// （visibleFrame ≈ 0,0,1512,902）作为夹取基准。
+    #[cfg(target_os = "macos")]
+    mod anchor {
+        use super::super::anchor_in_work_area;
+
+        const W: f64 = 520.0;
+        const H: f64 = 440.0;
+        // 工作区（逻辑点）：Dock 让底部 80pt 不可用
+        const AX: f64 = 0.0;
+        const AY: f64 = 0.0;
+        const AW: f64 = 1512.0;
+        const AH: f64 = 902.0;
+
+        #[test]
+        fn cursor_middle_centers_and_sits_above_cursor() {
+            let (x, y) = anchor_in_work_area(756.0, 450.0, W, H, AX, AY, AW, AH).unwrap();
+            assert_eq!(x, 496, "水平应居中于光标");
+            assert_eq!(y, 420, "应落在光标上方 30pt");
+        }
+
+        /// 用户报的那个症状：光标在屏幕下部时，浮层**不能**被摆到工作区之外。
+        /// 改用整屏矩形夹取时这里会算出 542（982-440），下半截正好压在 Dock 底下。
+        #[test]
+        fn cursor_near_bottom_clamps_inside_work_area() {
+            let (_, y) = anchor_in_work_area(756.0, 900.0, W, H, AX, AY, AW, AH).unwrap();
+            assert_eq!(y + H as i32, AH as i32, "浮层底边应正好贴工作区底边");
+            assert!(y + H as i32 <= AH as i32, "浮层不得超出工作区");
+        }
+
+        #[test]
+        fn cursor_near_top_clamps_to_work_area_top() {
+            let (x, y) = anchor_in_work_area(756.0, 0.0, W, H, AX, AY, AW, AH).unwrap();
+            assert_eq!(y, 0, "顶部应夹回工作区上边");
+            assert_eq!(x, 496);
+        }
+
+        #[test]
+        fn cursor_near_right_edge_stays_inside() {
+            let (x, _) = anchor_in_work_area(1510.0, 450.0, W, H, AX, AY, AW, AH).unwrap();
+            assert_eq!(x + W as i32, AW as i32, "右缘应贴工作区右边");
+        }
+
+        /// 工作区比浮层还窄（极小屏 / 显示器枚举异常）时不能 panic：
+        /// clamp 的下界大于上界会直接 panic，浮层就会停在上次旧位置或屏幕外。
+        #[test]
+        fn work_area_smaller_than_panel_does_not_panic() {
+            let r = anchor_in_work_area(100.0, 100.0, W, H, 0.0, 0.0, 300.0, 200.0);
+            assert!(r.is_some(), "应仍给出结果而不是 None");
+        }
+
+        /// 非主屏：工作区原点不是 0 时必须整体平移，不能当成主屏。
+        #[test]
+        fn second_monitor_nonzero_origin_is_respected() {
+            // 第二块屏在主屏右侧：逻辑 (1600, 0, 1512, 902)
+            let (x, _) = anchor_in_work_area(2400.0, 450.0, W, H, 1600.0, 0.0, 1512.0, 902.0)
+                .unwrap();
+            assert!(x >= 1600, "不得跑到第二块屏左边之外");
+            assert!(x + W as i32 <= 1600 + 1512, "不得超出第二块屏右缘");
+        }
+    }
+
     /// 构造 32bpp BI_RGB 的 BMP 文件字节（自底向上像素序，同 GDI 写剪贴板的形态）
     #[cfg(target_os = "windows")]
     fn bmp32_file(width: u32, height: u32, px: &[[u8; 4]]) -> Vec<u8> {
@@ -1574,7 +1639,7 @@ fn show_ready_overlay(win: &tauri::WebviewWindow, app: &AppHandle) {
     // 先恢复内存级别再显示（webview_mem：Low 态缓存已吐，首帧前回 Normal）
     crate::webview_mem::on_shown(app, CLIPBOARD_WINDOW_LABEL);
     // 每次唤起都重新定位到鼠标附近（窗口可能被拖走过、或显示器布局变化）
-    if let Some((px, py)) = cursor_anchor_position() {
+    if let Some((px, py)) = cursor_anchor_position(win) {
         let _ = win.set_position(anchor_position(px, py));
     }
     show_overlay_no_activate(win);
@@ -2076,23 +2141,90 @@ fn anchor_position(x: i32, y: i32) -> tauri::Position {
     tauri::Position::Logical(tauri::LogicalPosition::new(x as f64, y as f64))
 }
 
-/// 计算浮层初始位置：光标附近，并夹在光标所在显示器的范围内。
+/// 计算浮层初始位置：光标附近，并夹在光标所在显示器的**工作区**内。
 ///
 /// 返回**逻辑点**（左上原点），与 [`anchor_position`] 配套。
-/// 显示器边界用 `CGDisplayBounds`（整块屏，含菜单栏与 Dock 区域）——
-/// CoreGraphics 没有「工作区」概念，AppKit 的 `NSScreen.visibleFrame`
-/// 又只能在主线程取（而我们在监听线程调用）。macOS 本就允许浮窗压在
-/// 菜单栏上，夹到整屏范围内已经够用。
+///
+/// ## 为什么是工作区而不是整块屏
+///
+/// macOS 的 Dock 与菜单栏会吃掉屏幕边缘，Tauri 的 `Monitor::work_area()` 内部走
+/// `NSScreen.visibleFrame`。夹到**整屏**矩形的后果是浮层可以被摆到 Dock 底下、
+/// 下半截被遮住 —— 用户报的正是「浮层跳到下方挡住的地方」。
+///
+/// Windows 那条路径取的是 `GetMonitorInfoW` 的 `rcWork`（本来就是工作区），
+/// 移植到 macOS 时这一处被换成了整屏 `CGDisplayBounds`，并用「macOS 本就允许
+/// 浮窗压在菜单栏上」把差异合理化了。但那条只对**很矮**的浮层成立：
+/// 520×440 的面板压到 Dock 上是实打实的遮挡，而且是稳定复现的那种。
 #[cfg(target_os = "macos")]
-fn cursor_anchor_position() -> Option<(i32, i32)> {
+fn cursor_anchor_position(win: &tauri::WebviewWindow) -> Option<(i32, i32)> {
     let (cx, cy) = crate::mac::cursor_point()?;
-    let (left, top, width, height) = crate::mac::display_bounds_at(cx, cy);
-    let w = CLIPBOARD_WIDTH;
-    let h = CLIPBOARD_HEIGHT;
-    let x = (cx - w / 2.0).clamp(left, left + width - w);
-    // 浮层在光标上方展开（与 Windows 一致）：y = 光标 - 30，再夹进屏幕
-    let y = (cy - 30.0).clamp(top, top + height - h);
+    let (ax, ay, aw, ah) = work_area_logical_at(win, cx, cy)?;
+    anchor_in_work_area(cx, cy, CLIPBOARD_WIDTH, CLIPBOARD_HEIGHT, ax, ay, aw, ah)
+}
+
+/// 把浮层摆在光标附近并夹进工作区。**纯函数**（无窗口、无光标），所以下面每条
+/// 边界都能被单测直接覆盖 —— 这段是本模块唯一会算错的地方，而它所在的
+/// 「监听线程 + 真实显示器」环境没法在测试里搭出来。
+///
+/// `(cx, cy)` 光标逻辑点；`(ax, ay, aw, ah)` 工作区逻辑点；`w`/`h` 浮层逻辑尺寸。
+#[cfg(target_os = "macos")]
+fn anchor_in_work_area(
+    cx: f64,
+    cy: f64,
+    w: f64,
+    h: f64,
+    ax: f64,
+    ay: f64,
+    aw: f64,
+    ah: f64,
+) -> Option<(i32, i32)> {
+    // 上界用 `.max()`：工作区真比浮层还窄时（极小屏 / 显示器枚举异常）宁可让浮层
+    // 略微超屏，也不能让 clamp 因 min > max 而 panic —— 定位一旦 panic，浮层会
+    // 停在上一次的旧位置甚至屏幕外，且没有任何报错。
+    let x = (cx - w / 2.0).clamp(ax, (ax + aw - w).max(ax));
+    // 浮层在光标上方展开（与 Windows 一致）：y = 光标 - 30，再夹进工作区
+    let y = (cy - 30.0).clamp(ay, (ay + ah - h).max(ay));
     Some((x.round() as i32, y.round() as i32))
+}
+
+/// 光标所在显示器的**工作区**，换算成逻辑点 `(x, y, w, h)`（左上原点）。
+///
+/// `Monitor::work_area()` / `position()` / `size()` 给的都是**物理** px，而本模块的
+/// 浮层尺寸与 [`anchor_position`] 都是逻辑点，故整块除以该显示器的 scale。
+///
+/// 选显示器：优先取**包含光标**的那块（浮层要跟着光标走，而不是跟着浮层上次
+/// 待的位置走）；点不到就依次回退主显示器 / 浮层所在显示器；再取不到返回
+/// `None` —— 调用方保持原位置不动，**不拿整屏矩形顶替**（那正是本函数要修的错）。
+#[cfg(target_os = "macos")]
+fn work_area_logical_at(
+    win: &tauri::WebviewWindow,
+    cx: f64,
+    cy: f64,
+) -> Option<(f64, f64, f64, f64)> {
+    let monitors = win.available_monitors().ok()?;
+    let fallback = win
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| win.current_monitor().ok().flatten());
+    let pick = monitors
+        .iter()
+        .find(|m| {
+            let s = m.scale_factor().max(0.01);
+            let (px, py) = (m.position().x as f64 / s, m.position().y as f64 / s);
+            let (pw, ph) = (m.size().width as f64 / s, m.size().height as f64 / s);
+            cx >= px && cx < px + pw && cy >= py && cy < py + ph
+        })
+        .cloned()
+        .or(fallback)?;
+    let s = pick.scale_factor().max(0.01);
+    let r = pick.work_area();
+    Some((
+        r.position.x as f64 / s,
+        r.position.y as f64 / s,
+        r.size.width as f64 / s,
+        r.size.height as f64 / s,
+    ))
 }
 
 /// 无激活显示浮层：把 NSWindow 改成 `NonactivatingPanel` 后再 `show()`。

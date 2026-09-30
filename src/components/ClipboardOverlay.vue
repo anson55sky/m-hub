@@ -164,10 +164,18 @@ onMounted(async () => {
   appWindow?.onFocusChanged(onFocusChanged)
   if (isTauri()) await listen('clipboard-shown', onShown)
   document.addEventListener('keydown', onKeydown)
+  // 拖动阈值判定挂 window：指针一旦按下就可能移出搜索栏细条，
+  // 绑在元素上会漏掉后续 mousemove（见 onDragMouseMove 的注释）。
+  window.addEventListener('mousemove', onDragMouseMove)
+  window.addEventListener('mouseup', onDragMouseUp)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeydown)
+  // 必须成对摘除：这个浮层是隐藏常驻的，监听器漏摘会一直挂在 window 上，
+  // 下一个挂载的实例就会多出一份 dragPending 竞争。
+  window.removeEventListener('mousemove', onDragMouseMove)
+  window.removeEventListener('mouseup', onDragMouseUp)
   if (searchTimer) clearTimeout(searchTimer)
 })
 
@@ -390,7 +398,17 @@ function onHeaderMouseDown(e: MouseEvent) {
   dragPending = { x: e.screenX, y: e.screenY }
 }
 
-function onHeaderMouseMove(e: MouseEvent) {
+// mousemove / mouseup 挂在 **window** 上，不挂在搜索栏元素上。
+//
+// 原先三个事件都绑在 `.cb-search` 这条约 40pt 高的细条上，外加一个 `@mouseleave`
+// 取消待定拖动 —— 两个后果：
+//   ① 指针一离开细条就取消，手稍快就永远等不到那 4px 阈值，表现为「拖不动」；
+//   ② 元素外的 mousemove 根本收不到，阈值只能在指针**仍压在那条细线上**时才可能达成。
+//
+// 只管「启动前」这一段就够了：一旦启动，AppKit 的 `performWindowDragWithEvent:`
+// 进入自己的模态循环，后续事件走系统路径。挂 window 既能跨出细条范围，
+// 又不会和那个模态循环抢事件。
+function onDragMouseMove(e: MouseEvent) {
   if (!dragPending || !appWindow) return
   const dx = e.screenX - dragPending.x
   const dy = e.screenY - dragPending.y
@@ -400,7 +418,7 @@ function onHeaderMouseMove(e: MouseEvent) {
   }
 }
 
-function onHeaderMouseUp() {
+function onDragMouseUp() {
   dragPending = null
 }
 
@@ -489,9 +507,6 @@ function fileName(item: ClipboardItem): string {
       <div
         class="cb-search"
         @mousedown="onHeaderMouseDown"
-        @mousemove="onHeaderMouseMove"
-        @mouseup="onHeaderMouseUp"
-        @mouseleave="onHeaderMouseUp"
       >
         <Search :size="15" :stroke-width="2.2" class="cb-search-icon" />
         <input

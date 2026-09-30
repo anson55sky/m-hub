@@ -2,6 +2,7 @@ import { computed, ref, watch } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, tauriApi } from '../api/tauri'
 import { useStore } from '../stores/workbench'
+import { unresolvedExtIds, EXT_REGISTRY_RETRY_DELAYS_MS } from './dashExtCells'
 import { effectiveLayout } from './dashLayoutGeometry'
 
 /**
@@ -205,6 +206,11 @@ const extensionModules = ref<DashModuleDef[]>([])
 
 export function registerExtensionModules(mods: DashModuleDef[]) {
   extensionModules.value = mods
+}
+
+/** 当前已注册的扩展模块 id 列表（供 unresolvedExtIds 对账用） */
+function registeredExtIds(): string[] {
+  return extensionModules.value.map((m) => m.id)
 }
 
 export function dashModuleDef(id: string): DashModuleDef | undefined {
@@ -469,8 +475,8 @@ function syncCommitted() {
 /** 加载声明 module 形态的扩展，注册进工作台模块库（id 用 `ext:<扩展id>` 前缀与内置模块区分）。
  *  manifest.moduleVariants 声明的形态直接进模块库（形态芯片 / 尺寸钳制 / 适配徽标全生效）；
  *  未声明则注册单个默认形态（沿用历史 min 2×2 / ideal 4×3）。 */
-export async function loadExtensionModules() {
-  if (!isTauri()) return
+export async function loadExtensionModules(): Promise<boolean> {
+  if (!isTauri()) return false
   try {
     const exts = await tauriApi.listExtensions()
     registerExtensionModules(
@@ -499,10 +505,15 @@ export async function loadExtensionModules() {
           }
         }),
     )
+    return true
   } catch {
-    // 命令未就绪时保持无扩展模块
+    // 命令未就绪时保持无扩展模块。
+    // ⚠️ 返回 false 而不是静默：调用方要靠它区分「扩展表确实为空」与「还没问出结果」，
+    // 见下方 unresolvedExtIds / 恢复布局的重试。
+    return false
   }
 }
+
 
 // config 就绪后：先加载扩展模块再恢复布局（避免 config 里的 ext: 模块在 parse 时被过滤）
 // 优先读 AppConfig.dashboard_layout；为空则把 localStorage 老数据迁移进 config；否则回退推荐布局
@@ -510,12 +521,28 @@ watch(
   () => store.state.loaded,
   async (loaded) => {
     if (!loaded) return
-    await loadExtensionModules()
+    let registryOk = await loadExtensionModules()
     const cfg = store.state.config.dashboard_layout
     if (cfg) {
+      // 布局里有 ext: 格子却没解析出来 → 多半是扩展注册表**还没就绪**，而不是扩展被卸载了。
+      // 照单接受过滤结果会让这些格子被丢掉，而下一次 persist() 就把这次丢失**写进配置**，
+      // 变成永久性的（见 unresolvedExtIds 的注释）。所以先重试问几次。
+      for (const delay of EXT_REGISTRY_RETRY_DELAYS_MS) {
+        if (!unresolvedExtIds(cfg, registeredExtIds()).length) break
+        await new Promise((r) => setTimeout(r, delay))
+        registryOk = (await loadExtensionModules()) || registryOk
+      }
       const parsed = parsePlacements(cfg)
       if (parsed) {
         placements.value = parsed
+        if (!registryOk) {
+          // 注册表始终没问出结果：仍按解析结果加载（界面可用），但明确留痕，
+          // 便于事后从日志判断「格子是被卸载了，还是被启动竞态吃掉了」。
+          console.warn(
+            '[dash] 扩展注册表未能加载，布局中的 ext: 格子可能已丢失：',
+            unresolvedExtIds(cfg, registeredExtIds()),
+          )
+        }
         // 已迁移到 config，清理旧 localStorage 数据
         try {
           localStorage.removeItem(STORAGE_KEY)
