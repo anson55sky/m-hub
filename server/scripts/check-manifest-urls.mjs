@@ -107,6 +107,27 @@ for (const e of registry.extensions ?? []) {
     if (typeof e.size === 'number' && e.size !== size) {
       fail(`${where}：包大小与清单不符（清单 ${e.size} / 实际 ${size}）`)
     }
+    // sha256 与清单一致**不等于**包可用：两者可以「一致地错」（打包时打错了、
+    // sha256 也是对着错文件算的）。而客户端的失败点在解包，症状是
+    // 「下载成功 → 解压失败」，与 404 是完全不同的现象、却同样只在实机暴露。
+    // 故这里真的解一遍，并要求 manifest.json 在**包根**（客户端的硬要求）。
+    if (file.endsWith('.xhpack')) {
+      try {
+        const { execFileSync } = await import('node:child_process')
+        const list = execFileSync('unzip', ['-Z1', file], { encoding: 'utf8' })
+          .split('\n')
+          .map((x) => x.trim())
+          .filter(Boolean)
+        if (!list.includes('manifest.json')) {
+          fail(
+            `${where}：包根没有 manifest.json（实际条目：${list.join(', ') || '空'}）。\n` +
+              '    客户端要求 manifest 在包根，否则安装后扩展不可用。',
+          )
+        }
+      } catch (e) {
+        fail(`${where}：扩展包无法解开（${String(e).slice(0, 60)}）—— 客户端会在解包阶段失败`)
+      }
+    }
     // 清单里的 sha256/size 必须是**本机算出来的**，不是手抄的
     if (!e.sha256) fail(`${where}：缺 sha256（客户端会拒绝安装）`)
   }
