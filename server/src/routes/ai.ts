@@ -101,7 +101,12 @@ async function todayQuota(ctx: Ctx, userId: number) {
   const used = r?.used ?? 0
   if (!r) {
     await ctx.env.DB.prepare(
-      `INSERT OR IGNORE INTO ai_quota (user_id, day, granted, used) VALUES (?1, ?2, ?3, 0)`,
+      // ⚠️ `ON CONFLICT DO NOTHING` 是 PostgreSQL 版的「INSERT OR IGNORE」。
+      // 数据层会把 `INSERT OR IGNORE` 改写成 `INSERT`，但**补不出 ON CONFLICT**
+      // （那需要知道冲突目标），所以子句必须显式写在这里。
+      // 没有它的话 PG 会直接语法报错 —— 属「应用自身问题」，看日志尾即可定位。
+      `INSERT INTO ai_quota (user_id, day, granted, used) VALUES (?1, ?2, ?3, 0)
+       ON CONFLICT (user_id, day) DO NOTHING`,
     )
       .bind(userId, day, DAILY_GRANT)
       .run()
@@ -113,7 +118,9 @@ async function todayQuota(ctx: Ctx, userId: number) {
 async function consumeQuota(ctx: Ctx, userId: number): Promise<number> {
   const day = new Date().toISOString().slice(0, 10)
   await ctx.env.DB.prepare(
-    `INSERT OR IGNORE INTO ai_quota (user_id, day, granted, used) VALUES (?1, ?2, ?3, 0)`,
+    // 同上：ON CONFLICT 子句必须显式写（PG 无「OR IGNORE」等价物）
+    `INSERT INTO ai_quota (user_id, day, granted, used) VALUES (?1, ?2, ?3, 0)
+     ON CONFLICT (user_id, day) DO NOTHING`,
   )
     .bind(userId, day, DAILY_GRANT)
     .run()

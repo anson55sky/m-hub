@@ -8,15 +8,15 @@ FROM node:24-alpine
 
 WORKDIR /app
 
-# ⚠️ 顺序有讲究：package.json 单独先拷，让依赖层能被缓存。
-# 改业务代码不会触发依赖重跑 —— 构建更快，且平台日志更干净。
+# ⚠️ 依赖安装：**不能省**。原先这里是空的（当时零依赖），但配对页选过托管库
+# 之后引入了 `pg`（PostgreSQL 客户端，唯一成熟的纯 JS 实现）——
+# 少这一步，容器里 `import pg` 直接失败，报 `Cannot find module 'pg'`。
+# 那属于协议 §3.4 的「应用自身问题」，看日志尾要绕一圈才想得到是缺安装步骤。
 #
-# **刻意不跑 `npm ci` / `npm install`**：本服务零运行时依赖（全部 Node 内置
-# 模块：node:http / node:sqlite / node:crypto / node:fs / node:url）。
-# devDependencies 只有 typescript（本地类型检查用），生产不需要。
-# 少一步 = 少一个构建失败点 —— 协议 §3.4 把「依赖安装失败」列为独立的
-# 故障类别，零依赖就等于把这一整类故障从可能变成不可能。
-COPY package.json ./
+# 用 `npm ci`（有 lockfile、可复现）而不是 `npm install`（会改动 lockfile）。
+# 单独先拷这两个文件，让依赖层能被缓存：改业务代码不会触发重装。
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY tsconfig.json ./
 COPY schema.sql ./

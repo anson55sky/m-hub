@@ -453,7 +453,7 @@ fn default_note_editor_mode() -> String {
 /// 账号登录 / AI 额度 / 扩展市场 / 应用升级这几项直接不可用）。要真正独立分发，
 /// 换地址时**只改这一个常量**并重新发版即可（设置页没有地址入口，约定 52）——
 /// 但别只改一半：清单、升级、登录、AI 全部打这一个地址，改完要一起验证。
-pub const DEFAULT_SERVER_URL: &str = "https://m-hub.xfactor.top";
+pub const DEFAULT_SERVER_URL: &str = "https://m-hub-server.pocketbay.app";
 
 /// 市场清单接口路径（服务端代理，客户端不再知道 COS 在哪里）。
 pub const MARKET_REGISTRY_PATH: &str = "/api/v1/market/registry";

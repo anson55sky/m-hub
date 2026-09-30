@@ -21,9 +21,10 @@ import { existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { STATIC } from './lib/paths.ts'
+import { DYNAMIC, STATIC } from './lib/paths.ts'
 import { SqliteDb } from './lib/sqlite.ts'
-import { D1Shape, type Db } from './lib/d1shape.ts'
+import { PostgresDb } from './lib/postgres.ts'
+import { D1Shape } from './lib/d1shape.ts'
 import type { Env, User } from './lib/http.ts'
 import { devicePoll, deviceStart } from './routes/github.ts'
 import { deviceRevoke, deviceTokens, me, redeem } from './routes/me.ts'
@@ -51,26 +52,96 @@ const dbPath = process.env.POCKETBAY_DATA_DIR
   ? join(process.env.POCKETBAY_DATA_DIR, 'm-hub.db')
   : join(HERE, '..', 'data', 'm-hub.db')
 
-let sqlite: SqliteDb | null = null
+/** 仅 SQLite 路径需要（PG 由池管理，退出时 end 即可） */
+let sqliteDb: SqliteDb | null = null
 let env: Env | null = null
 
 async function boot(): Promise<Env> {
   if (env) return env
-  const dir = dirname(dbPath)
-  const { mkdirSync } = await import('node:fs')
-  mkdirSync(dir, { recursive: true })
 
-  sqlite = new SqliteDb(dbPath)
-  const db = new D1Shape(sqlite as unknown as Db)
+  // ---- 选哪个库：看**意图**，不看「有没有 DATABASE_URL」 ----
+  //
+  // ⚠️ 这里踩过一次真实的坑：最初写成「有 DATABASE_URL 就用 PG，否则 SQLite」。
+  // 但 `DATABASE_URL` 是平台在**配对页选过托管库时注入**的，且会**持续存在** ——
+  // 即使用户后来改选 D（文件库放 /data），那个变量也还在。
+  // 结果：用户明确选了 SQLite，应用却连了 PostgreSQL，而那些表**从未建过**
+  // （dump 被平台以「仅支持 pg_dump -Fc」拒绝），于是每个查询都失败。
+  // 而日志还打印 `db = /data/m-hub.db`（无条件打印的假信息），看着一切正常。
+  //
+  // 两条教训：① **配置项存在 ≠ 用户想要它**，选型必须由显式意图决定；
+  // ② 日志里每行都必须是真的 —— 假日志比没日志更坏（它会让人查错方向）。
+  //
+  // 现在的口径：
+  //   `MHUB_DB=postgres` → 托管库（须由用户在配对页选 A 并完成 dump 导入）
+  //   其它（含未设置）  → SQLite 文件库，落 `POCKETBAY_DATA_DIR`（默认 ./data）
+  //
+  // 选了 PG 但表不存在 → **明确报错并退出**，不静默降级、不假装正常。
+  const wantPostgres = (process.env.MHUB_DB ?? '').toLowerCase() === 'postgres'
+  const dbUrl = process.env.DATABASE_URL
+  let db: D1Shape
+  let sqliteDb2: SqliteDb | null = null
 
-  // 建表：schema.sql 是多语句脚本，SQLite 语法，与 D1 共用同一份
-  const schemaPath = join(HERE, '..', 'schema.sql')
-  if (existsSync(schemaPath)) {
-    await sqlite.exec(await readFile(schemaPath, 'utf8'))
-    console.log(`[m-hub] schema 已应用（${dbPath}）`)
+  if (wantPostgres) {
+    if (!dbUrl) {
+      console.error(
+        '[m-hub] ✗ MHUB_DB=postgres 但没有 DATABASE_URL。' +
+          '请在配对页选托管库，或把 MHUB_DB 去掉改用 SQLite。',
+      )
+      process.exit(1)
+    }
+    const pg = new PostgresDb(dbUrl)
+    // 验库：托管库的表是否存在。**不验的后果**是每个接口都返回 500，
+    // 而日志里只有一句「数据库 = 平台托管库」，看不出是空库。
+    let probe: { n: number } | null = null
+    try {
+      probe = await pg.first<{ n: number }>(
+        `SELECT count(*) AS n FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name IN (?1, ?2, ?3, ?4, ?5, ?6)`,
+        'users',
+        'sessions',
+        'submissions',
+        'dev_applications',
+        'submission_assets',
+        'ai_quota',
+      )
+    } catch (e) {
+      // 连不上托管库要**说清是谁的问题**：否则用户看到 ECONNREFUSED 会去查
+      // 自己的网络，而故障在平台侧。
+      console.error(
+        `[m-hub] ✗ 连不上平台托管库：${(e as Error).message}\n` +
+          '        这不是你的应用问题，是平台数据库侧未就绪。\n' +
+          '        去掉 MHUB_DB=postgres 可改用 SQLite 文件库（落 POCKETBAY_DATA_DIR）。',
+      )
+      process.exit(1)
+    }
+    if ((probe?.n ?? 0) < 6) {
+      console.error(
+        `[m-hub] ✗ 托管库里只有 ${probe?.n ?? 0}/6 张表。` +
+          '结构未导入 —— 平台只接受 pg_dump -Fc 格式的 dump。' +
+          '要么导入结构，要么去掉 MHUB_DB 改用 SQLite。',
+      )
+      process.exit(1)
+    }
+    db = new D1Shape(pg)
+    console.log('[m-hub] 数据库 = 平台托管库（PostgreSQL），6 张表已就位')
   } else {
-    console.error(`[m-hub] ⚠️ 找不到 schema.sql（${schemaPath}），数据库可能未初始化`)
+    const dir = dirname(dbPath)
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(dir, { recursive: true })
+    sqliteDb2 = new SqliteDb(dbPath)
+    db = new D1Shape(sqliteDb2)
+    const schemaPath = join(HERE, '..', 'schema.sql')
+    if (existsSync(schemaPath)) {
+      await sqliteDb2.exec(await readFile(schemaPath, 'utf8'))
+      console.log(`[m-hub] 数据库 = SQLite（${dbPath}），schema 已应用`)
+    } else {
+      console.error(`[m-hub] ⚠️ 找不到 schema.sql（${schemaPath}），数据库可能未初始化`)
+    }
+    if (dbUrl) {
+      console.log('[m-hub] 注：检测到 DATABASE_URL，但未设 MHUB_DB=postgres，按 SQLite 处理')
+    }
   }
+  sqliteDb = sqliteDb2
 
   env = {
     // 路线层用的是 D1 形状（`ctx.env.DB.prepare().bind()`），
@@ -192,6 +263,31 @@ function match(method: string, pathname: string): { handler: Handler; params: Re
 const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   const started = Date.now()
   try {
+    // 根路径 + 健康检查。
+    //
+    // 平台部署时会探测「首页」与「健康路径」，两者都没有响应就判 `probe_failed`
+    // （首次部署实测：`error_category: probe_failed`，而 runtime 日志显示服务
+    // **已经正常启动** —— 纯粹是探活没处可探）。
+    //
+    // ⚠️ 本服务是**纯接口 + 静态清单**，没有前端页面。故根路径返回一份
+    // 自述 JSON 而不是 404，也算「有响应」。这比另配 `pocketbay.yaml`
+    // 声明检查路径更省 —— 后者要额外维护一份与代码不同步的配置。
+    if (req.url === '/' || req.url === '/health' || req.url === '/healthz') {
+      const body = JSON.stringify({
+        service: 'm-hub-server',
+        status: 'ok',
+        // 列出真实能力，省得排查时逐个试
+        endpoints: {
+          static: Object.values(STATIC),
+          api: Object.values(DYNAMIC).length + 1 + ' 条（登录 / 账号 / 开发者 / 发布 / 平台 AI）',
+        },
+        db: process.env.DATABASE_URL ? 'postgresql' : 'sqlite',
+      })
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(body)
+      return
+    }
+
     const e = await boot()
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
     const method = req.method ?? 'GET'
@@ -271,7 +367,9 @@ function readBody(req: IncomingMessage): Promise<ArrayBuffer> {
 
 server.listen(PORT, HOST, () => {
   console.log(`[m-hub] listening on ${HOST}:${PORT}（pid ${process.pid}）`)
-  console.log(`[m-hub] db = ${dbPath}`)
+  // ⚠️ 这里**不能**无条件打印 dbPath —— 用托管库时那行是假信息，
+  // 而假日志比没日志更坏（实测踩过：日志说 db=/data/m-hub.db，实际连的是 PG）。
+  // 库的实际选择已在 boot() 里如实打印，这里不再重复。
   // 协议 §3.4：不要求健康接口，但有一个成本极低且便于排查
   console.log(`[m-hub] 注册路由 ${Object.keys(routes).length} 条 + 静态 ${Object.keys(STATIC).length} 份清单`)
 })
@@ -281,12 +379,12 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   process.on(sig, () => {
     console.log(`[m-hub] 收到 ${sig}，关闭中…`)
     server.close(() => {
-      sqlite?.close()
+      sqliteDb?.close()
       process.exit(0)
     })
     // 兜底：3s 内没关干净就强退，避免平台等太久判定启动失败
     setTimeout(() => {
-      sqlite?.close()
+      sqliteDb?.close()
       process.exit(0)
     }, 3000).unref()
   })

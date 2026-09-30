@@ -1,3 +1,6 @@
+# 本地打包扩展的中间产物（由 seed-manifests.mjs 生成，不进镜像）
+manifests
+.deployed-url
 node_modules
 data
 *.log

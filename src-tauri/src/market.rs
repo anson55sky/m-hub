@@ -1,7 +1,7 @@
 //! 扩展市场（spec §11 安装页「市场」tab）。
 //!
 //! 数据源为**远端市场清单**：内置地址 `config::market_registry_url()`
-//! （`https://m-hub.xfactor.top/api/v1/market/registry`，v0.6.1 起走平台服务端接口——
+//! （`{DEFAULT_SERVER_URL}/api/v1/market/registry`，v0.6.1 起走平台服务端接口——
 //! 服务端代理 COS 并把清单里的下载/图标地址改写成服务端地址后再用发布私钥重签；
 //! 此前是配置项 `market_endpoint`，直连 COS 桶，已废弃）。客户端拉取清单后做
 //! Ed25519 验签（`signing` 模块），通过才原子缓存到 `data_root()/market/registry.json`；

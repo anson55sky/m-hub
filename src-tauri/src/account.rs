@@ -145,8 +145,8 @@ pub fn server_url() -> String {
 /// 而实测这台机器上真实的失败原因是：
 ///
 /// ```text
-/// $ nslookup m-hub.xfactor.top
-/// ** server can't find m-hub.xfactor.top: NXDOMAIN
+/// $ nslookup <一个不存在的域名>
+/// ** server can't find <域名>: NXDOMAIN
 /// ```
 ///
 /// 即 **`DEFAULT_SERVER_URL` 那个域名根本不存在**。用户检查一百遍自己的网络
