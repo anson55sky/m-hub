@@ -66,3 +66,7 @@ dev-dialog-preview/
 # 截图产物（shot-m-hub.sh / screencapture 落在这里）
 win*.png
 mhub.png
+
+# 签名私钥（绝不入库；脚本默认写在仓库之外的 ~/.m-hub-signing/）
+*.pem
+market_private*

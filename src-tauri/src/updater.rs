@@ -7,7 +7,7 @@
 //!
 //! 流程（对应文档 §6.2）：
 //!   ① `check_for_update`：拉取 update.json + .sig → 验签 → semver 比较 +
-//!      `minimumUpgradable` 跳级保护 → 平台匹配（便携版优先 portableUrl）→
+//!      `minimumUpgradable` 跳级保护 → 平台匹配（键名见 platform_key；便携版优先 portableUrl）→
 //!      广播 `update-available`（版本/说明/大小）。
 //!   ② `download_update`：按清单下载新版本 zip → 边下边算 sha256（与清单
 //!      比对）→ 落 `data_root()/updates/<version>/m-hub.zip` →
@@ -86,7 +86,7 @@ struct UpdateManifest {
     /// 更新说明摘要（下载前给用户看）
     #[serde(default)]
     notes: String,
-    /// 平台条目：`windows-x86_64` → 下载信息
+    /// 平台条目：`macos-aarch64` 等，键名见 [`platform_key`]
     #[serde(default)]
     platforms: std::collections::HashMap<String, PlatformEntry>,
 }
@@ -244,9 +244,46 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     crate::market::version_cmp(a, b)
 }
 
-/// 解析平台条目：取 `windows-x86_64`；便携版优先 portableUrl。
+/// 本构建对应的清单平台键，形如 `macos-aarch64` / `macos-x86_64`。
+///
+/// ## ⚠️ 这里原先硬编码 `windows-x86_64`（2026-09-30 修）
+///
+/// 上游是 Windows 独占，平台键是写死的常量。移植到 macOS 后**它没跟着换**，
+/// 于是 `platforms.get("windows-x86_64")` 在 macOS 上永远取不到条目 ——
+/// 清单里就算发了 macOS 的包也读不到，实机表现是日志一行
+/// 「更新源无当前平台条目（windows-x86_64）」且**永远不提示更新**。
+///
+/// 这属于约定 P9 点名的形态：「上游换了数据源，下游的匹配代码没跟着换」，
+/// 而且**没有论证注释**（= 不属于有意取舍，是移植遗漏）。
+///
+/// 键名由**构建目标**算出而不是写死：换架构（Apple Silicon ↔ Intel）时
+/// 服务端发哪个键就认哪个，不需要再改代码。清单里的键名是这个函数
+/// 决定的唯一契约，改它要同步告知服务端。
+// `concat!` 只接受字面量、不能拼 const，所以这里用「cfg 挂在 return 上」这个惯用法：
+// 每个分支在编译期就定死，函数体里不会留下任何运行时字符串拼接。
+//
+// 键名带 OS 段：同一个 `aarch64` 在 macOS 与其它平台含义不同，
+// 只按架构索引会让跨平台的清单互相串味。
+pub fn platform_key() -> &'static str {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return "macos-aarch64";
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return "macos-x86_64";
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return "windows-x86_64";
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    return "windows-aarch64";
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return "linux-x86_64";
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return "linux-aarch64";
+    #[allow(unreachable_code)]
+    "unknown-unknown"
+}
+
+/// 解析平台条目：取本构建对应的平台键；便携版优先 portableUrl。
 fn platform_entry(manifest: &UpdateManifest) -> Option<(PlatformEntry, bool)> {
-    let entry = manifest.platforms.get("windows-x86_64")?;
+    let entry = manifest.platforms.get(platform_key())?;
     let portable = crate::paths::is_portable();
     let available = if portable {
         !entry.portable_url.is_empty()
@@ -334,7 +371,7 @@ pub async fn check_for_update(
     let (entry, portable) = match platform_entry(&manifest) {
         Some(p) => p,
         None => {
-            log::warn!("更新源无当前平台条目（windows-x86_64）");
+            log::warn!("更新源无当前平台条目（{}）", platform_key());
             return Ok(UpdateInfo::none(&current));
         }
     };
@@ -467,7 +504,7 @@ pub async fn download_update(
         ));
     }
     let (entry, portable) = platform_entry(&manifest).ok_or_else(|| {
-        format!("更新源无当前平台条目（windows-x86_64，版本 v{version}）")
+        format!("更新源无当前平台条目（{}，版本 v{version}）", platform_key())
     })?;
     let (url, sha256) = if portable {
         (entry.portable_url.clone(), entry.portable_sha256.clone())
@@ -1204,7 +1241,7 @@ mod tests {
             "minimumUpgradable": "0.1.0",
             "notes": "v0.4.0: 新增更新中心",
             "platforms": {
-                "windows-x86_64": {
+                platform_key(): {
                     "url": "https://dist/m-hub-0.4.0.zip",
                     "portableUrl": "https://dist/m-hub-0.4.0-portable.zip",
                     "sha256": "abc",
@@ -1217,8 +1254,72 @@ mod tests {
         assert_eq!(m.schema_version, 1);
         assert_eq!(m.version, "0.4.0");
         assert_eq!(m.minimum_upgradable, "0.1.0");
-        let e = m.platforms.get("windows-x86_64").expect("有平台条目");
+        let e = m.platforms.get(platform_key()).expect("有平台条目");
         assert_eq!(e.portable_url, "https://dist/m-hub-0.4.0-portable.zip");
+    }
+
+    /// 平台键必须是「本构建真的能认出来」的那个。
+    ///
+    /// 这条是补一个真实的漏测：移植到 macOS 后 `platform_entry` 仍按
+    /// `windows-x86_64` 取条目，于是 macOS 构建永远匹配不到自己 ——
+    /// 而**没有任何测试覆盖这件事**（`parses_manifest` 只测 JSON 解析，
+    /// 用的是 Windows 键当夹具，看起来一切正常）。
+    #[test]
+    fn current_build_matches_its_own_platform_entry() {
+        // 升级清单的 schema 是 v1（市场清单才是 v2 —— 两份清单各有一套版本号）
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "version": "9.9.9",
+            "platforms": {
+                platform_key(): {
+                    "url": "https://dist/m-hub.dmg",
+                    "sha256": "abc",
+                    "size": 1
+                }
+            }
+        });
+        let m = parse_manifest(&serde_json::to_vec(&json).unwrap()).unwrap();
+        let (entry, _portable) = platform_entry(&m).expect("本构建应能认出自己的平台条目");
+        assert_eq!(entry.url, "https://dist/m-hub.dmg");
+    }
+
+    /// 键名带 OS 段：本工程是 macOS，键必须是 `macos-*`。
+    /// 键名是客户端与服务端之间**唯一的契约**，写错就两边永远对不上。
+    #[test]
+    fn platform_key_names_the_running_os() {
+        let k = platform_key();
+        if cfg!(target_os = "macos") {
+            assert!(
+                k.starts_with("macos-"),
+                "macOS 构建的平台键必须以 macos- 开头，实际: {k}"
+            );
+            assert!(
+                k.ends_with("-aarch64") || k.ends_with("-x86_64"),
+                "键名必须带架构段，否则换机器就认不出来，实际: {k}"
+            );
+        }
+        assert!(!k.contains("unknown"), "未识别的平台组合不该产出 unknown 键: {k}");
+    }
+
+    /// 只有 Windows 条目时，macOS 构建必须**取不到**（而不是误取到 Windows 的包，
+    /// 那会下载错平台的安装包）。这一条钉住「宁可无更新，不可错更新」。
+    #[test]
+    fn does_not_fall_back_to_a_foreign_platform_entry() {
+        if !cfg!(target_os = "macos") {
+            return; // 只在 macOS 上有意义
+        }
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "version": "9.9.9",
+            "platforms": {
+                "windows-x86_64": { "url": "https://dist/m-hub.exe", "sha256": "abc", "size": 1 }
+            }
+        });
+        let m = parse_manifest(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(
+            platform_entry(&m).is_none(),
+            "macOS 构建不得取用 Windows 平台条目"
+        );
     }
 
     #[test]
