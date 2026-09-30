@@ -201,59 +201,103 @@ pub async fn refresh_market_registry() -> Result<MarketStatus, String> {
         .build()
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
 
-    let content = match fetch_bytes(&client, &endpoint).await {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = sanitize_market_error(format!("拉取市场清单失败：{e}"), &endpoint, &sig_url);
-            return Ok(fallback_cache(msg));
+    // ⚠️ 冷启动窗口：平台托管服务空闲后会休眠，唤醒的头几秒请求可能得到
+    // 502 / 204（实测休眠 5.5 分钟后首个请求 502、1.4s）。
+    //
+    // 清单与签名是**两次独立请求**，一次成功一次失败时拼在一起**必然验签失败**，
+    // 症状是「市场源异常：验签失败」而服务端完全正常（实机 20:02 踩到，
+    // 20:05 重试即成功）。故整段重试，退避给平台 ~23s 醒来。
+    //
+    // **验签失败也要重试**：在这个场景下它极可能是「拿到了不一致的两个版本」，
+    // 而非「有人伪造」。真被篡改的话重试 3 次也不会过 —— 不降低安全性。
+    //
+    // ⚠️ 重试用尽后仍必须走 `fallback_cache`（回退缓存 + 显示原因），
+    // **不许**假装成功：那会让用户以为市场是新的，而它其实可能是空的。
+    const ATTEMPTS: usize = 4;
+    const BACKOFF_MS: [u64; 3] = [2_000, 6_000, 15_000];
+    debug_assert_eq!(BACKOFF_MS.len() + 1, ATTEMPTS);
+
+    let mut last_msg = String::new();
+    for i in 0..ATTEMPTS {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(BACKOFF_MS[i - 1])).await;
+            log::info!("市场清单第 {} 次重试（服务端可能正在从休眠唤醒）", i + 1);
         }
-    };
+        match fetch_market_once(&client, &endpoint, &sig_url).await {
+            Ok(registry) => {
+                let content = registry.raw.clone();
+                let registry = registry.parsed;
+
+                // 原子写缓存（临时文件 + rename）
+                let path = registry_path()?;
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let tmp = path.with_extension("json.tmp");
+                std::fs::write(&tmp, &content).map_err(|e| format!("写入市场缓存失败: {e}"))?;
+                std::fs::rename(&tmp, &path).map_err(|e| format!("更新市场缓存失败: {e}"))?;
+
+                log::info!(
+                    "市场清单刷新成功：{} 个扩展（schema v{}，updatedAt={}）",
+                    registry.extensions.len(),
+                    registry.schema_version,
+                    if registry.updated_at.is_empty() { "无" } else { &registry.updated_at }
+                );
+                // 复用原有的 `status()` 构造：它还处理 revoked（`id@version` 列表），
+                // 直接手写 MarketStatus 会**漏掉**这一项 —— 而它关系到
+                // 「已下架扩展不再提供更新入口」（约定 60）。
+                return Ok(status(
+                    registry.extensions,
+                    registry.updated_at,
+                    registry.revoked,
+                    "remote",
+                    None,
+                ));
+            }
+            Err(e) => {
+                log::warn!("市场清单拉取/验签失败（第 {}/{ATTEMPTS} 次）: {e}", i + 1);
+                last_msg = e;
+            }
+        }
+    }
+    Ok(fallback_cache(last_msg))
+}
+
+/// 单次尝试：拉清单 → 拉签名 → 验签 → 解析（不含缓存写入与版本上限判定）。
+///
+/// 单独拆出来是为了让重试循环与「一次尝试」职责分离 —— 之前两者写在一起，
+/// 任何一次失败都直接 `return`，于是**没有任何重试**。
+struct FetchedRegistry {
+    parsed: MarketRegistry,
+    /// 原始字节：验签与缓存写盘都要用它，不能用解析后的结构（会丢未知字段）
+    raw: Vec<u8>,
+}
+
+async fn fetch_market_once(
+    client: &reqwest::Client,
+    endpoint: &str,
+    sig_url: &str,
+) -> Result<FetchedRegistry, String> {
+    let content = fetch_bytes(client, endpoint)
+        .await
+        .map_err(|e| sanitize_market_error(format!("拉取市场清单失败：{e}"), endpoint, sig_url))?;
     // 签名拉取失败也禁止放行：未验签的清单一律不信任（宁可回退缓存）
-    let sig = match fetch_bytes(&client, &sig_url).await {
-        Ok(s) => s,
-        Err(e) => {
-            let msg = sanitize_market_error(format!("拉取清单签名失败：{e}"), &endpoint, &sig_url);
-            return Ok(fallback_cache(msg));
-        }
-    };
+    let sig = fetch_bytes(client, sig_url)
+        .await
+        .map_err(|e| sanitize_market_error(format!("拉取清单签名失败：{e}"), endpoint, sig_url))?;
     let sig = String::from_utf8_lossy(&sig).into_owned();
-    if let Err(e) = crate::signing::verify_detached(&content, &sig) {
-        return Ok(fallback_cache(format!("市场清单验签失败：{e}")));
-    }
+    crate::signing::verify_detached(&content, &sig)
+        .map_err(|e| format!("市场清单验签失败：{e}"))?;
 
-    let registry: MarketRegistry = match serde_json::from_slice(&content) {
-        Ok(r) => r,
-        Err(e) => return Ok(fallback_cache(format!("市场清单解析失败：{e}"))),
-    };
-    if registry.schema_version > 2 {
-        return Ok(fallback_cache(format!(
+    let parsed: MarketRegistry = serde_json::from_slice(&content)
+        .map_err(|e| format!("市场清单解析失败：{e}"))?;
+    if parsed.schema_version > 2 {
+        return Err(format!(
             "市场清单 schemaVersion={} 高于宿主支持的 v2，请升级 m-hub",
-            registry.schema_version
-        )));
+            parsed.schema_version
+        ));
     }
-
-    // 原子写缓存（临时文件 + rename）
-    let path = registry_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &content).map_err(|e| format!("写入市场缓存失败: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("更新市场缓存失败: {e}"))?;
-
-    log::info!(
-        "市场清单刷新成功：{} 个扩展（schema v{}，updatedAt={}）",
-        registry.extensions.len(),
-        registry.schema_version,
-        if registry.updated_at.is_empty() { "无" } else { &registry.updated_at }
-    );
-    Ok(status(
-        registry.extensions,
-        registry.updated_at.clone(),
-        registry.revoked.clone(),
-        "remote",
-        None,
-    ))
+    Ok(FetchedRegistry { parsed, raw: content })
 }
 
 /// 回退本地缓存（refresh 失败时的降级路径，详情作为 error 透出）

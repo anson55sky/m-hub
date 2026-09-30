@@ -220,15 +220,65 @@ fn update_endpoint() -> String {
 }
 
 /// 拉取更新清单并验签（未验签通过一律不信任）。返回 `(清单, 原字节)`。
+/// 拉清单 + 签名，**并验签**。
+///
+/// ## ⚠️ 平台侧有休眠，冷启动期间两次请求可能落在不同状态
+///
+/// 平台托管的服务会在空闲后休眠，被唤醒的头几秒里请求会得到
+/// `502` / `204`（实测：休眠 5.5 分钟后首个请求 502，1.4s；第二个 204，1.3s）。
+///
+/// 而清单与签名是**两次独立请求**。若第一次拿到旧版本、第二次拿到新版本
+/// （或一次成功一次 5xx），拼在一起**必然验签失败** —— 症状是
+/// 「市场源异常：验签失败 / 签名非法」，而服务端其实完全正常。
+/// 实机踩到过一次：20:02 报验签失败，20:05 重试即成功，扩展也装上了。
+///
+/// 故两条约束：
+/// ① 两次请求**共用一次「唤醒窗口」**：任一失败就整体重试（下面 3 轮）
+/// ② **验签失败也重试** —— 验签失败在冷启动场景下极可能是「拿到了不一致的两个版本」，
+///    而不是「有人伪造」。真被篡改的话重试 3 次也不会过，重试不降低安全性。
+///
+/// ⚠️ 重试仍失败时**必须如实报错**，不许降级成「已是最新版本」——
+/// 那会让用户以为一切正常，而市场其实是空的。
 async fn fetch_manifest(client: &reqwest::Client) -> Result<(UpdateManifest, Vec<u8>), String> {
     let endpoint = update_endpoint();
     let sig_url = format!("{endpoint}.sig");
-    let content = fetch_bytes(client, &endpoint)
+
+    // 冷启动窗口：逐步退避，给平台最多 ~23s 醒来
+    // ⚠️ 退避数组**不**写成 `[u64; ATTEMPTS - 1]` —— 那依赖 const 泛型求值
+    // （`generic_const_exprs`），稳定版 Rust 编译不过。
+    const ATTEMPTS: usize = 4;
+    const BACKOFF_MS: [u64; 3] = [2_000, 6_000, 15_000];
+    debug_assert_eq!(BACKOFF_MS.len() + 1, ATTEMPTS);
+
+    let mut last_err = String::new();
+    for i in 0..ATTEMPTS {
+        if i > 0 {
+            tokio::time::sleep(Duration::from_millis(BACKOFF_MS[i - 1])).await;
+            log::info!("更新清单第 {} 次重试（服务端可能正在从休眠唤醒）", i + 1);
+        }
+        match fetch_manifest_once(client, &endpoint, &sig_url).await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                log::warn!("更新清单拉取/验签失败（第 {}/{ATTEMPTS} 次）: {e}", i + 1);
+                last_err = e;
+            }
+        }
+    }
+    Err(last_err)
+}
+
+/// 单次尝试：拉清单 → 拉签名 → 验签 → 解析。
+async fn fetch_manifest_once(
+    client: &reqwest::Client,
+    endpoint: &str,
+    sig_url: &str,
+) -> Result<(UpdateManifest, Vec<u8>), String> {
+    let content = fetch_bytes(client, endpoint)
         .await
-        .map_err(|e| sanitize_update_error(format!("拉取更新清单失败：{e}"), &endpoint, &sig_url))?;
-    let sig = fetch_bytes(client, &sig_url)
+        .map_err(|e| sanitize_update_error(format!("拉取更新清单失败：{e}"), endpoint, sig_url))?;
+    let sig = fetch_bytes(client, sig_url)
         .await
-        .map_err(|e| sanitize_update_error(format!("拉取清单签名失败：{e}"), &endpoint, &sig_url))?;
+        .map_err(|e| sanitize_update_error(format!("拉取清单签名失败：{e}"), endpoint, sig_url))?;
     let sig = String::from_utf8_lossy(&sig).into_owned();
     crate::signing::verify_detached(&content, &sig)
         .map_err(|e| format!("更新清单验签失败：{e}"))?;
