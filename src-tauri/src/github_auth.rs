@@ -56,8 +56,17 @@ pub struct GithubDeviceStart {
 }
 
 /// 轮询一步的结果
+///
+/// ⚠️ `tag = "status"` 不能少（2026-09-30 实测踩到）。
+/// 只写 `rename_all = "camelCase"` 的话，serde 作用在**枚举**上只是把**变体名**
+/// 改成小写，产出的 JSON 是裸值 `"pending"` / `{"failed":{"message":...}}`，
+/// 而前端 `GithubLocalPoll` 读的是 `{ status, message }` —— 对不上，
+/// `r.status` 与 `r.message` 全是 `undefined`，界面直接显示「登录失败：undefined」。
+///
+/// **这类错 TypeScript 抓不到**：invoke 的返回类型是我们自己写的，两边都「符合」
+/// 各自的声明，只有真跑起来才对得上。所以下面有序列化测试把线格式钉死。
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "status", rename_all = "camelCase")]
 pub enum GithubPoll {
     /// 还在等用户去授权
     Pending,
@@ -429,6 +438,80 @@ mod tests {
             }
             other => panic!("未知错误码必须判失败，实际: {other:?}"),
         }
+    }
+
+    /// 线格式必须与 `src/api/tauri.ts` 的 `GithubLocalPoll` 逐字对上。
+    ///
+    /// 这些断言就是为上面那个 bug 存在的：枚举少写 `tag = "status"` 时，
+    /// 类型检查、前端构建、界面全绿，只有真跑起来才炸成「登录失败：undefined」。
+    #[test]
+    fn poll_serializes_to_the_shape_the_frontend_expects() {
+        // { status: 'pending' }
+        let v = serde_json::to_value(GithubPoll::Pending).unwrap();
+        assert_eq!(v["status"], "pending");
+        assert_eq!(v.as_object().unwrap().len(), 1, "pending 不该带多余字段");
+
+        // { status: 'done' }
+        let v = serde_json::to_value(GithubPoll::Done).unwrap();
+        assert_eq!(v["status"], "done");
+        assert_eq!(v.as_object().unwrap().len(), 1);
+
+        // { status: 'failed', message: '...' } —— message 必须平级，
+        // 不能是 { failed: { message } }（那是漏了 tag 的症状）
+        let v = serde_json::to_value(GithubPoll::Failed {
+            message: "码过期了".into(),
+        })
+        .unwrap();
+        assert_eq!(v["status"], "failed");
+        assert_eq!(v["message"], "码过期了");
+        assert!(
+            v.get("failed").is_none(),
+            "出现了嵌套的 `failed` 字段 = 少了 serde(tag = \"status\")"
+        );
+    }
+
+    /// 设备码第一步的线格式（前端 `GithubLocalDeviceStart`）
+    #[test]
+    fn device_start_serializes_camel_case() {
+        let v = serde_json::to_value(GithubDeviceStart {
+            device_code: "dc".into(),
+            user_code: "ABCD-1234".into(),
+            verification_uri: "https://github.com/login/device".into(),
+            interval: 5,
+            expires_in: 900,
+        })
+        .unwrap();
+        assert_eq!(v["deviceCode"], "dc");
+        assert_eq!(v["userCode"], "ABCD-1234");
+        assert_eq!(v["verificationUri"], "https://github.com/login/device");
+        assert_eq!(v["interval"], 5);
+        assert_eq!(v["expiresIn"], 900);
+    }
+
+    /// 身份与登录态的线格式（前端 `GithubLocalIdentity` / `GithubLocalStatus`）
+    #[test]
+    fn identity_and_status_serialize_camel_case() {
+        let v = serde_json::to_value(GithubIdentity {
+            login: "anson55sky".into(),
+            name: "sky".into(),
+            avatar_url: "https://avatars.githubusercontent.com/u/1".into(),
+            email: "a@b.c".into(),
+            html_url: "https://github.com/anson55sky".into(),
+        })
+        .unwrap();
+        assert_eq!(v["login"], "anson55sky");
+        assert_eq!(v["avatarUrl"], "https://avatars.githubusercontent.com/u/1");
+        assert_eq!(v["htmlUrl"], "https://github.com/anson55sky");
+
+        let v = serde_json::to_value(GithubStatus {
+            logged_in: true,
+            needs_client_id: false,
+            identity: None,
+        })
+        .unwrap();
+        assert_eq!(v["loggedIn"], true);
+        assert_eq!(v["needsClientId"], false);
+        assert!(v["identity"].is_null());
     }
 
     #[test]
