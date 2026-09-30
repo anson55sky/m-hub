@@ -62,3 +62,7 @@ dev-dialog-preview/
 
 # 本地文档（含 ADR / 原型 / 方案稿），只留本地不入库
 /docs/
+
+# 截图产物（shot-m-hub.sh / screencapture 落在这里）
+win*.png
+mhub.png
