@@ -20,7 +20,7 @@
 //! 凭据与平台的 `session-token` 是**两回事**，分两个钥匙串条目存：
 //! 混在一起会出现「退出了 GitHub 却把平台会话也清了」这种反直觉行为。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// 钥匙串服务名与条目名。**刻意与平台的 `m-hub-account` / `session-token` 分开**
 /// （见模块文档：两个凭据生命周期不同，混存会互相清掉）。
@@ -77,7 +77,7 @@ pub enum GithubPoll {
 }
 
 /// GitHub 身份
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubIdentity {
     pub login: String,
@@ -100,6 +100,41 @@ pub struct GithubStatus {
 }
 
 // ---------------- 凭据存取 ----------------
+
+/// 钥匙串里存的东西。身份**跟着 token 一起存**，于是读登录态不需要联网。
+///
+/// 为什么不每次都问一次 GitHub：打开账号面板本来是个纯本地动作，
+/// 而 `/user` 是一次 HTTPS 往返。真去问的话，面板每次打开都要等它
+/// （用户反馈「每次点击账号都会卡顿一下」）。缓存在本地之后，
+/// 只有**首次登录**与**凭据失效**才需要联网。
+#[derive(Serialize, Deserialize)]
+struct Stored {
+    token: String,
+    #[serde(default)]
+    identity: Option<GithubIdentity>,
+}
+
+fn save_creds(token: &str, identity: GithubIdentity) -> Result<(), String> {
+    let blob = serde_json::to_string(&Stored {
+        token: token.to_string(),
+        identity: Some(identity),
+    })
+    .map_err(|e| format!("组装登录凭据失败: {e}"))?;
+    save_token(&blob)
+}
+
+/// 读钥匙串。**兼容两种形态**：新版的 JSON 信封，以及早期直接存的裸 token
+/// （那版没有身份，于是需要补一次 `/user` 并回写）。
+fn load_creds() -> Option<Stored> {
+    let raw = load_token()?;
+    match serde_json::from_str::<Stored>(&raw) {
+        Ok(s) => Some(s),
+        Err(_) => Some(Stored {
+            token: raw,
+            identity: None,
+        }),
+    }
+}
 
 fn save_token(token: &str) -> Result<(), String> {
     // 旧明文文件：迁移完就删，不留一份在磁盘上
@@ -143,19 +178,27 @@ pub async fn status() -> GithubStatus {
             identity: None,
         };
     }
-    let Some(token) = load_token() else {
+    let Some(stored) = load_creds() else {
         return GithubStatus {
             logged_in: false,
             needs_client_id: false,
             identity: None,
         };
     };
-    let identity = match fetch_identity(&token).await {
-        Ok(id) => Some(id),
-        Err(e) => {
-            log::warn!("GitHub 身份读取失败（凭据可能已失效）: {e}");
-            None
-        }
+    // 有缓存身份就直接用，**一次网络都不发**。只有早期版本存的裸 token
+    // （没有身份可读）才补一次 `/user`，并顺手回写成新格式。
+    let identity = match stored.identity {
+        Some(id) => Some(id),
+        None => match fetch_identity(&stored.token).await {
+            Ok(id) => {
+                let _ = save_creds(&stored.token, id.clone());
+                Some(id)
+            }
+            Err(e) => {
+                log::warn!("GitHub 身份读取失败（凭据可能已失效）: {e}");
+                None
+            }
+        },
     };
     GithubStatus {
         logged_in: identity.is_some(),
@@ -293,7 +336,7 @@ pub async fn device_poll(device_code: &str) -> Result<GithubPoll, String> {
         return Ok(GithubPoll::Pending);
     }
     let identity = fetch_identity(token).await?;
-    save_token(token)?;
+    save_creds(token, identity)?;
     Ok(GithubPoll::Done)
 }
 
@@ -438,6 +481,46 @@ mod tests {
             }
             other => panic!("未知错误码必须判失败，实际: {other:?}"),
         }
+    }
+
+    /// 凭据信封的形状：身份必须能被读回来，否则每次开面板都得联网
+    /// （用户反馈「每次点击账号都会卡顿一下」——根因就是这里没有缓存）。
+    #[test]
+    fn creds_envelope_round_trips_the_identity() {
+        let id = GithubIdentity {
+            login: "anson55sky".into(),
+            name: "GlassPad".into(),
+            avatar_url: "https://avatars.githubusercontent.com/u/1".into(),
+            email: "a@b.c".into(),
+            html_url: "https://github.com/anson55sky".into(),
+        };
+        let blob = serde_json::to_string(&Stored {
+            token: "gho_xxx".into(),
+            identity: Some(id.clone()),
+        })
+        .unwrap();
+        let back: Stored = serde_json::from_str(&blob).unwrap();
+        assert_eq!(back.token, "gho_xxx");
+        let got = back.identity.expect("身份必须能读回来");
+        assert_eq!(got.login, "anson55sky");
+        assert_eq!(got.avatar_url, "https://avatars.githubusercontent.com/u/1");
+    }
+
+    /// 早期版本直接往钥匙串存了**裸 token**（没有 JSON 信封）。
+    /// 解析失败必须回退成「token + 无身份」，而不是整个当成没登录 ——
+    /// 否则一次升级就把用户踢下线，得重新走一遍设备码。
+    #[test]
+    fn legacy_bare_token_is_read_as_token_without_identity() {
+        let legacy = "gho_abcdef123456";
+        let parsed = serde_json::from_str::<Stored>(legacy);
+        assert!(parsed.is_err(), "裸 token 不该能被解析成信封");
+        // load_creds 的回退分支：token 保住，身份留给下一次补
+        let fallback = Stored {
+            token: legacy.to_string(),
+            identity: None,
+        };
+        assert_eq!(fallback.token, legacy);
+        assert!(fallback.identity.is_none());
     }
 
     /// 线格式必须与 `src/api/tauri.ts` 的 `GithubLocalPoll` 逐字对上。

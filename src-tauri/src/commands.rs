@@ -3477,10 +3477,12 @@ pub fn clipboard_delete(state: State<'_, DbState>, id: i64) -> Result<(), String
 
 // ---------------- GitHub 登录（客户端直连，不经服务端）----------------
 
+/// ⚠️ 必须是 `async`，不能写成 `block_on` 的同步命令。
+/// Tauri 的**同步**命令在主线程执行，而 `status()` 要读钥匙串、还可能补一次
+/// GitHub 往返 —— 同步执行等于整窗冻结，用户反馈「每次点击账号都会卡顿一下」。
 #[tauri::command]
-pub fn github_status() -> GithubStatus {
-    // 状态要读钥匙串 + 访问一次 GitHub 确认凭据有效，给足时间
-    tauri::async_runtime::block_on(crate::github_auth::status())
+pub async fn github_status() -> GithubStatus {
+    crate::github_auth::status().await
 }
 
 #[tauri::command]
