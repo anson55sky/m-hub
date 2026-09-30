@@ -164,6 +164,10 @@ struct DragAnchor {
     press_y: i32,
     /// 光标所在显示器的 scale：窗口尺寸是逻辑值，乘它才得到物理尺寸
     scale: f64,
+    /// 光标所在显示器的工作区（物理 px），**在 begin 时取一次**。
+    ///
+    /// 绝不能放进轮询里取 —— 理由见 `work_area_physical` 的注释。
+    wa: (i32, i32, u32, u32),
 }
 
 #[cfg(target_os = "macos")]
@@ -223,6 +227,8 @@ pub fn drag_begin(win: &tauri::Webview) -> Result<(), String> {
     let scale = display_scale_for(win, press_x as f64 / 2.0, press_y as f64 / 2.0)
         .unwrap_or_else(|| win.window().scale_factor().unwrap_or(1.0))
         .max(0.01);
+    // 工作区在这里取**一次**（一次阻塞调用，按下时付掉），而不是每帧取
+    let wa = work_area_physical(&win.window().clone());
     {
         let mut slot = DRAG_ANCHOR.lock().map_err(|e| e.to_string())?;
         *slot = Some(DragAnchor {
@@ -231,6 +237,7 @@ pub fn drag_begin(win: &tauri::Webview) -> Result<(), String> {
             press_x,
             press_y,
             scale,
+            wa,
         });
     }
     LOGGED_FIRST_APPLY.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -262,7 +269,13 @@ fn drag_loop(win: tauri::Window<tauri::Wry>) {
             let dx = (cx - anchor.press_x) as f64;
             let dy = (cy - anchor.press_y) as f64;
             if dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
-                let wa = work_area_physical(&win);
+                // 用 begin 时缓存的工作区。拖到别的显示器时才重取 ——
+                // 光标一旦离开缓存矩形就说明换屏了，此时才付那一次阻塞调用的代价。
+                let wa = if inside_wa((cx, cy), anchor.wa) {
+                    anchor.wa
+                } else {
+                    work_area_physical(&win)
+                };
                 let (nx, ny) = drag_target(
                     anchor,
                     dx,
@@ -346,6 +359,26 @@ fn drag_target(
 }
 
 /// 光标所在显示器的工作区（物理 px），取不到时用一个极大矩形（= 不夹）。
+///
+/// ## ⚠️ 这是一次**阻塞**调用，绝不能放进 16ms 的轮询里
+///
+/// `Window::available_monitors()` 在 tauri-runtime-wry 里走 `window_getter!` 宏：
+/// 建一个 channel、把消息发给主线程、然后 **`rx.recv()` 死等回包**。
+/// 也就是说每调一次都要**同步往返主线程一趟**。放进拖动循环就是每秒 60 次阻塞 —/
+/// 主线程只要在忙（WKWebView 合成、100ms 的边缘监视循环也在抢），
+/// 每一帧就得多等几毫秒到几十毫秒，**窗口就明显跟不上鼠标**（实机表现：
+/// 「能拖动，不跟手」）。
+///
+/// 同一文件里 `set_position` 走的是 `send_user_message`，**不阻塞**，所以每帧调它没问题。
+/// 这个「getter 阻塞 / setter 不阻塞」的差别在别处同样成立，改本工程任何
+/// 「后台线程轮询窗口状态」的代码前都该记住。
+#[cfg(target_os = "macos")]
+fn inside_wa(p: (i32, i32), wa: (i32, i32, u32, u32)) -> bool {
+    p.0 >= wa.0
+        && p.0 < wa.0 + wa.2 as i32
+        && p.1 >= wa.1
+        && p.1 < wa.1 + wa.3 as i32
+}
 #[cfg(target_os = "macos")]
 fn work_area_physical(win: &tauri::Window<tauri::Wry>) -> (i32, i32, u32, u32) {
     let fallback = || (i32::MIN / 4, i32::MIN / 4, u32::MAX / 2, u32::MAX / 2);
@@ -1166,7 +1199,7 @@ mod tests {
     /// 拖动目标位置：位移换算 + 工作区夹取
     #[cfg(target_os = "macos")]
     mod drag {
-        use super::super::{drag_target, DragAnchor};
+        use super::super::{drag_target, inside_wa, DragAnchor};
 
         /// 1512×982 屏、scale 2（Retina）、工作区 0,0,3024,1804（物理）
         const WA: (i32, i32, u32, u32) = (0, 0, 3024, 1804);
@@ -1174,7 +1207,7 @@ mod tests {
         const H: f64 = 880.0; // 440 逻辑 × 2
 
         fn anchor() -> DragAnchor {
-            DragAnchor { x: 100, y: 200, press_x: 0, press_y: 0, scale: 2.0 }
+            DragAnchor { x: 100, y: 200, press_x: 0, press_y: 0, scale: 2.0, wa: (0, 0, 3024, 1804) }
         }
 
         /// 位移现在**已经是物理像素**（Rust 侧直接读 `cursor_physical()`），
@@ -1188,8 +1221,8 @@ mod tests {
         /// 无论 scale 是多少，位移都是 1:1 —— 否则 Retina 上拖动速度会差一倍
         #[test]
         fn delta_is_scale_independent() {
-            let a1 = DragAnchor { x: 500, y: 500, press_x: 0, press_y: 0, scale: 1.0 };
-            let a2 = DragAnchor { x: 500, y: 500, press_x: 0, press_y: 0, scale: 2.0 };
+            let a1 = DragAnchor { x: 500, y: 500, press_x: 0, press_y: 0, scale: 1.0, wa: (0, 0, 3024, 1804) };
+            let a2 = DragAnchor { x: 500, y: 500, press_x: 0, press_y: 0, scale: 2.0, wa: (0, 0, 3024, 1804) };
             let p1 = drag_target(a1, 37.0, -11.0, W, H, WA);
             let p2 = drag_target(a2, 37.0, -11.0, W, H, WA);
             assert_eq!(p1, p2, "位移已是物理像素，scale 不得再影响它");
@@ -1219,6 +1252,16 @@ mod tests {
         #[test]
         fn 工作区比浮层窄时不_panic() {
             let _ = drag_target(anchor(), 500.0, 500.0, W, H, (0, 0, 300, 200));
+        }
+
+        /// 换屏检测：光标离开缓存的工作区矩形就说明拖到别的显示器上了，
+        /// 此时才该重新取工作区（那次调用是阻塞的，平时不能碰）
+        #[test]
+        fn cursor_leaving_cached_work_area_means_monitor_changed() {
+            let wa = (0, 0, 3024, 1804);
+            assert!(inside_wa((1500, 900), wa), "主屏内不该触发重取");
+            assert!(!inside_wa((3300, 900), wa), "跑到第二块屏就该触发重取");
+            assert!(!inside_wa((1500, -50), wa), "跑到屏幕上方（负坐标屏）也要触发");
         }
 
         /// 非零原点的第二块屏：夹取必须跟着工作区走，不能当成主屏
