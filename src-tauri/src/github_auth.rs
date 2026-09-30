@@ -35,7 +35,7 @@ fn legacy_token_file() -> std::path::PathBuf {
 ///
 /// **需要你填**：GitHub → Settings → Developer settings → OAuth Apps → New OAuth App
 /// 建好后复制 Client ID。设备码流程不需要 client_secret，所以只有这一项。
-pub const GITHUB_CLIENT_ID: &str = "";
+pub const GITHUB_CLIENT_ID: &str = "Ov23liN7tC1bDfc7Wb0M";
 
 // ---------------- 对外的类型 ----------------
 
@@ -212,6 +212,16 @@ pub async fn device_start() -> Result<GithubDeviceStart, String> {
     let field = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let device_code = field("device_code");
     if device_code.is_empty() {
+        // 这个错误码实测得到过（2026-09-30）：OAuth App **默认没开** Device Flow，
+        // 而应用侧看不到任何提示，只能拿到一句英文。必须翻成「去哪儿勾什么」。
+        if field("error") == "device_flow_disabled" {
+            return Err(
+                "这个 GitHub OAuth App 没有开启设备码登录。到 \
+                 Settings → Developer settings → OAuth Apps → 点开你的应用 → \
+                 OAuth Application Settings 里勾上 **Enable Device Flow**，保存后回来重试"
+                    .into(),
+            );
+        }
         let msg = field("error_description");
         return Err(if msg.is_empty() {
             "GitHub 没有下发设备码".to_string()
@@ -433,23 +443,28 @@ mod tests {
 
     /// Client ID 填错是**最可能**的填错方式：把 client_secret 粘进来、
     /// 或粘了一整行 `client_id=xxx`。那不会编译失败，只会在 GitHub 那边
-    /// 报一个看不懂的错误。所以这里直接按形状拦一道。
+    /// 报一个看不懂的错误。所以这里拦一道。
+    ///
+    /// ⚠️ **不要断言「40 位十六进制」** —— 那是我的错误假设。实测（2026-09-30）
+    /// GitHub 对新应用签发的是 **20 位字母数字串**（`Ov23liN7tC1bDfc7Wb0M`），
+    /// 而老的确实是 40 位十六进制。把格式写死会直接挡掉一个**合法**的 Client ID
+    /// —— 守卫变成拦路石，那比不写更糟。所以这里只拦真正要拦的：空、带空白、
+    /// 明显不是标识符（含 `/` `:` `=` 等，多半是粘了 URL 或整行 `client_id=`）。
     #[test]
-    fn client_id_is_empty_or_a_40_hex_string() {
+    fn client_id_is_filled_and_looks_like_an_identifier() {
         let id = GITHUB_CLIENT_ID.trim();
-        if id.is_empty() {
-            return; // 还没填：合法状态
-        }
-        assert_eq!(
-            id.len(),
-            40,
-            "GitHub OAuth App 的 Client ID 是 40 位十六进制；这一串长度 {}，\
-             多半是粘错了（client_secret / 带前缀 / 带了空格）",
-            id.len()
+        assert!(!id.is_empty(), "Client ID 还是空的：登录入口会一直显示「还没配置」");
+        assert_eq!(id, GITHUB_CLIENT_ID, "Client ID 首尾不该有空白（多半粘贴时带上了）");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "Client ID 只应是标识符字符，实际: {id:?}\
+             （含 / : = 多半是粘了整行 `client_id=...` 或 URL）"
         );
         assert!(
-            id.chars().all(|c| c.is_ascii_hexdigit()),
-            "Client ID 只应含十六进制字符，实际: {id:?}"
+            (16..=64).contains(&id.len()),
+            "Client ID 长度 {} 不在合理区间（实测新应用 20 位、老应用 40 位）",
+            id.len()
         );
     }
 }
