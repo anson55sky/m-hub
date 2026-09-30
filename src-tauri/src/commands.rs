@@ -3427,6 +3427,18 @@ pub fn clipboard_copy(state: State<'_, DbState>, id: i64) -> Result<(), String> 
     set_item_clipboard(&item)
 }
 
+/// 把一段**任意文本**写入系统剪贴板（供多选合并复制用）。
+///
+/// 与 [`clipboard_copy`] 的区别：那条按 id 取一条记录，这条收调用方拼好的字符串 ——
+/// 多选合并的内容并不存在于历史里，没有 id 可取。
+///
+/// 不注入粘贴、不挪动任何条目。与单条复制一样，写入会触发剪贴板监听、
+/// 按去重规则落一条新历史（内容与某条已有记录相同时是刷新那条而非新增）。
+#[tauri::command]
+pub fn clipboard_copy_text(text: String) -> Result<(), String> {
+    crate::clipboard::set_clipboard(&text, None)
+}
+
 /// 粘贴到唤起前窗口：写入剪贴板 → 条目挪到最前 → 本应用主窗口直接插入 / 外部窗口注入 Ctrl+V
 #[tauri::command]
 pub fn clipboard_paste(app: tauri::AppHandle, state: State<'_, DbState>, id: i64) -> Result<(), String> {
@@ -3460,6 +3472,16 @@ pub fn clipboard_delete(state: State<'_, DbState>, id: i64) -> Result<(), String
         }
     }
     clipboard::delete(&conn, id).map_err(err_str)
+}
+
+/// 合并多条**文本**剪贴板记录为一条新的，并删掉原来那几条。
+///
+/// 顺序与「是否置顶/来源/截断」的口径全在 `repo::clipboard::merge_texts` 里，
+/// 命令层只做锁与错误转字符串 —— 别在这里另写一份拼接逻辑。
+#[tauri::command]
+pub fn clipboard_merge(state: State<'_, DbState>, ids: Vec<i64>) -> Result<ClipboardItem, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    clipboard::merge_texts(&conn, &ids).map_err(err_str)
 }
 
 #[tauri::command]

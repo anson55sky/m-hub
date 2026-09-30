@@ -1252,6 +1252,14 @@ export const tauriApi = {
   clipboardPaste: (id: number) => invoke<void>('clipboard_paste', { id }),
   clipboardTogglePin: (id: number) => invoke<ClipboardItem>('clipboard_toggle_pin', { id }),
   clipboardDelete: (id: number) => invoke<void>('clipboard_delete', { id }),
+  /**
+   * 合并多条**文本**记录为一条新的并删掉原来几条。
+   * 顺序由后端按列表顺序决定（is_pinned DESC, updated_at DESC, id DESC），
+   * 与前端勾选先后无关 —— 想要别的顺序只能改后端那一处。
+   */
+  clipboardMerge: (ids: number[]) => invoke<ClipboardItem>('clipboard_merge', { ids }),
+  /** 把一段任意文本写入系统剪贴板（多选合并复制用；不注入粘贴、不动历史条目） */
+  clipboardCopyText: (text: string) => invoke<void>('clipboard_copy_text', { text }),
   clipboardClear: () => invoke<void>('clipboard_clear'),
   clipboardSetPaused: (paused: boolean) => invoke<void>('clipboard_set_paused', { paused }),
   setClipboardMediaEnabled: (image: boolean, file: boolean) =>

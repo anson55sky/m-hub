@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
 import { emit, listen } from '@tauri-apps/api/event'
-import { Boxes, Copy, Download, FileText, Link2, ListTodo, Pin, PinOff, Search, Trash2, X, ZoomIn } from 'lucide-vue-next'
+import { Boxes, Combine, Copy, Download, FileText, Link2, ListTodo, Pin, PinOff, Search, Trash2, X, ZoomIn } from 'lucide-vue-next'
 import { isTauri, tauriApi, type ClipboardInfo, type ClipboardItem } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { useTheme } from '../composables/useTheme'
@@ -195,12 +195,83 @@ async function pasteItem(item: ClipboardItem) {
 // 浮层以无激活方式显示时 WebView 不持有焦点，click（mouseup 合成）在部分场景不可靠；
 // 改在 mousedown 即触发粘贴，并 preventDefault 阻止 WebView 抢走输入焦点
 // （否则源应用的输入框会失焦，注入的粘贴键找不到目标）。按钮等控件走 @click.stop 不受影响。
+// ---- 多选（合并 / 批量复制）----
+//
+// 交互约定：**裸点击仍然粘贴**（那是这个浮层最常用的动作，不能被多选抢走），
+// 所以多选一律走修饰键：
+//   ⌘/Ctrl + 点击 = 切换选中
+//   ⇧ + 点击     = 选中一段（从上一次落点连到当前）
+//   Esc          = 清空选中
+//
+// `picked` 存的是 **id 集合**而不是下标：列表会因搜索/滚动/合并而重排，
+// 存下标会在重排后指向别的条目 —— 那是「我明明勾了 A，合并的却是 B」这类怪事。
+const picked = ref<Set<number>>(new Set())
+/** ⇧ 连选的锚点（列表下标）。null = 下次 ⇧ 点击从当前项开始 */
+let rangeAnchor: number | null = null
+
+const pickedCount = computed(() => picked.value.size)
+/** 选中的条目，按**列表顺序**（与后端合并用的排序一致） */
+const pickedItems = computed(() => items.value.filter((i) => picked.value.has(i.id)))
+
+function clearPicked() {
+  picked.value = new Set()
+  rangeAnchor = null
+}
+
 function onItemMouseDown(e: MouseEvent, item: ClipboardItem) {
   if (e.button !== 0) return
   const t = e.target as HTMLElement
   if (t.closest('button')) return
   e.preventDefault()
+
+  const idx = items.value.findIndex((i) => i.id === item.id)
+  if (e.metaKey || e.ctrlKey) {
+    const next = new Set(picked.value)
+    if (next.has(item.id)) next.delete(item.id)
+    else next.add(item.id)
+    picked.value = next
+    rangeAnchor = idx
+    return
+  }
+  if (e.shiftKey) {
+    // 连选：锚点缺失时以当前项为起点，避免「第一次 ⇧ 点击什么也没选」
+    const from = rangeAnchor ?? idx
+    const [lo, hi] = from <= idx ? [from, idx] : [idx, from]
+    picked.value = new Set(items.value.slice(lo, hi + 1).map((i) => i.id))
+    return
+  }
   void pasteItem(item)
+}
+
+async function mergePicked() {
+  const chosen = pickedItems.value
+  if (chosen.length < 2) return
+  try {
+    // id 按列表顺序给（后端也会自己再排一次，这里给的是可读性）
+    const merged = await tauriApi.clipboardMerge(chosen.map((i) => i.id))
+    clearPicked()
+    await loadList()
+    toast(`已合并 ${chosen.length} 条`)
+    void merged
+  } catch (e) {
+    toast(`合并失败：${String(e)}`)
+  }
+}
+
+async function copyPicked() {
+  const chosen = pickedItems.value
+  if (!chosen.length) return
+  // 非文本条目（图片/文件）没有「内容」可拼，直接拒绝而不是静默跳过 ——
+  // 悄悄少复制几条，用户会以为是自己选错了。
+  const bad = chosen.find((i) => i.kind !== 'text')
+  if (bad) return toast('批量复制只支持文本条目')
+  try {
+    await tauriApi.clipboardCopyText(chosen.map((i) => i.content).join('\n'))
+    clearPicked()
+    toast(`已复制 ${chosen.length} 条`)
+  } catch (e) {
+    toast(`复制失败：${String(e)}`)
+  }
 }
 
 async function onCopy(item: ClipboardItem) {
@@ -431,6 +502,12 @@ function scrollSelectedIntoView() {
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     e.preventDefault()
+    // 有多选时 Esc 只清选中，不收浮层：否则用户想「取消选择」却把面板关了，
+    // 下次唤起又得重新找。面板本身再按一次 Esc 才收。
+    if (pickedCount.value > 0) {
+      clearPicked()
+      return
+    }
     // 图片预览打开时先关预览，否则收起浮层
     if (preview.value) {
       preview.value = null
@@ -522,6 +599,35 @@ function fileName(item: ClipboardItem): string {
         <span class="cb-count">{{ countText }}</span>
       </div>
 
+      <!-- 多选操作条：只在有选中时出现，插在搜索栏与列表之间 -->
+      <div v-if="pickedCount > 0" class="cb-pickbar">
+        <span class="cb-pickcount">已选 {{ pickedCount }} 条</span>
+        <div class="cb-pickacts">
+          <button
+            class="cb-pickbtn"
+            type="button"
+            :disabled="pickedCount < 2"
+            :title="pickedCount < 2 ? '至少选两条才能合并' : '按列表顺序换行拼成一条新的，并删掉原来几条'"
+            @click="mergePicked"
+          >
+            <Combine :size="13" :stroke-width="2.2" />
+            合并
+          </button>
+          <button
+            class="cb-pickbtn"
+            type="button"
+            title="按列表顺序换行拼接后复制到系统剪贴板"
+            @click="copyPicked"
+          >
+            <Copy :size="13" :stroke-width="2.2" />
+            复制
+          </button>
+          <button class="cb-pickbtn cb-pickbtn-ghost" type="button" @click="clearPicked">
+            取消
+          </button>
+        </div>
+      </div>
+
       <!-- 列表 -->
       <div ref="listRef" class="cb-list" @scroll="onListScroll">
         <template v-if="items.length">
@@ -531,7 +637,7 @@ function fileName(item: ClipboardItem): string {
             :key="item.id"
             :data-cb-idx="idx"
             class="cb-item"
-            :class="{ selected: idx === selected }"
+            :class="{ selected: idx === selected, picked: picked.has(item.id) }"
             @mousedown="onItemMouseDown($event, item)"
             @contextmenu="onContextMenu($event, item)"
           >
@@ -787,6 +893,59 @@ function fileName(item: ClipboardItem): string {
   background: var(--brand-50);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
 }
+
+/* 多选高亮刻意与「键盘游标」的 selected 区分开：
+   游标是一行、随上下键移动；多选是一批、用 ⌘/⇧ 点出来的。
+   两者同色会让人以为「已经选中的那条」=「正在操作的那条」。 */
+.cb-item.picked {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* ---- 多选操作条 ---- */
+.cb-pickbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 10px 6px;
+  padding: 5px 6px 5px 10px;
+  border-radius: 8px;
+  background: var(--bg-card-soft);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+}
+.cb-pickcount {
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.cb-pickacts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.cb-pickbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--brand-500);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.08s ease-out, opacity 0.12s ease-out;
+}
+.cb-pickbtn:active { transform: scale(0.96); }
+.cb-pickbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+.cb-pickbtn-ghost {
+  background: transparent;
+  color: var(--text-2);
+}
+.cb-pickbtn-ghost:hover { background: var(--hover-soft); }
 .cb-pin {
   flex: none;
   color: var(--c-yellow-ink);

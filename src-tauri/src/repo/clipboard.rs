@@ -236,6 +236,139 @@ pub fn delete(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// 合并多条**文本**为一条新的，并删掉原来那几条。
+///
+/// ## 三个关键决定
+///
+/// **① 顺序 = 列表顺序**，即 `list()` 的 `ORDER BY is_pinned DESC, updated_at DESC, id DESC`。
+/// 用户勾选的先后**不影响**结果——他看到的是面板上的顺序，合并出来就该是那个顺序。
+/// 这条不能靠调用方把 id 排好再传进来：那等于让前端复制一份排序口径，两边必然漂移。
+///
+/// **② 永远 INSERT 新行，不走 `insert_typed` 的去重。**
+/// 去重那套是给「后台监听剪贴板」用的：同一段内容再次被复制，视作同一条刷新时间。
+/// 而合并是用户的**一次性显式动作**，他说「合成一条新的」。若在这里走去重，
+/// 拼出来的内容一旦与某条已有记录相同，就会去**顶替那条无关记录**（改它的
+/// 时间戳和来源），而原条目照样被删——用户看到的是「我明明新建了一条，
+/// 结果有条不相干的记录被改了」。两种语义不能混用。
+///
+/// **③ 置顶取「任一为置顶」。** 置顶是用户对这批内容价值的判断，合并掉其中一条
+/// 不该把那个判断悄悄丢掉。
+///
+/// ## 原子性
+///
+/// 建新与删旧在**同一个事务**里。中途失败（磁盘满、锁冲突）必须整体回滚：
+/// 只建不删 = 多出一条重复；只删不建 = **内容直接丢了**，后者是不可接受的。
+///
+/// 事务内**不做** `cleanup_throttled`（它会连带清理图片文件，跨文件操作无法随
+/// 事务回滚）；交由调用方在提交后触发，与普通写入同一套节奏。
+///
+/// ⚠️ **本函数验不到什么**（写明以免误以为已被覆盖）：
+/// 「建新成功、删旧中途失败」需要故障注入（磁盘写满 / 锁冲突 / 在两条 DELETE
+/// 之间 kill 进程）才能造出来，本工程的测试环境造不出来。已覆盖的是**能造出来**
+/// 的那些失败路径：少于两条、id 已消失、含非文本 —— 三种都断言「一条都没被删」。
+/// 事务原子性本身靠 rusqlite 保证，未经测试证明。
+///
+/// 返回合并后的新条目。`ids` 少于 2 条、含非文本、或含已不存在的 id 都直接报错
+/// —— 宁可不做，也不要「悄悄少合了几条」。
+pub fn merge_texts(conn: &Connection, ids: &[i64]) -> Result<ClipboardItem> {
+    if ids.len() < 2 {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "至少要选两条才能合并".into(),
+        ));
+    }
+    let tx = conn.unchecked_transaction()?;
+
+    // 按列表顺序取出（与 list() 同一条 ORDER BY）
+    let placeholders = std::iter::repeat("?")
+        .take(ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id, content, source_app, is_pinned FROM clipboard_history
+         WHERE id IN ({placeholders})
+         ORDER BY is_pinned DESC, updated_at DESC, id DESC"
+    );
+    // 语句必须**先于 commit 析构**（它借着 tx），所以全部圈进块里。
+    // 直接把 prepare 的结果 collect 完再 commit 会报 E0505「不能 move 出 tx」。
+    let rows: Vec<(i64, String, Option<String>, bool)> = {
+        let mut stmt = tx.prepare(&sql)?;
+        // 先把 query_map 的结果绑成变量再 collect（同 list() 的写法）：
+        // 直接写成链式表达式会让迭代器活到块尾，和 stmt 一起析构 → E0597。
+        let mapped = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((
+                r.get(0)?,
+                r.get::<_, String>(1)?,
+                r.get(2)?,
+                r.get::<_, i64>(3)? != 0,
+            ))
+        })?;
+        let collected = mapped.collect::<std::result::Result<_, _>>()?;
+        collected
+    };
+
+    if rows.len() != ids.len() {
+        // 有 id 已不存在（可能刚被 TTL 清理）。报明确错，而不是少合几条——
+        // 少合的结果是「我明明选了 5 条，它只用了 4 条」且无任何提示。
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "有 {} 条已不在剪贴板历史里（可能刚被过期清理），请重新选择",
+            ids.len() - rows.len()
+        )));
+    }
+
+    // 非文本条目（图片/文件）无法按行拼接：把二进制当文本合并出来的只会是乱码。
+    let non_text: Vec<(i64, String)> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT id, kind FROM clipboard_history WHERE id IN ({placeholders}) AND kind <> 'text'"
+        ))?;
+        let mapped = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        // 每行出错就跳过：这条查询只用来「告诉用户哪几条不能合」，
+        // 单行读不出来不该让整个合并失败（下面的条数对账仍会兜住少合的问题）
+        let collected = mapped.filter_map(|r| r.ok()).collect::<Vec<_>>();
+        collected
+    };
+    if !non_text.is_empty() {
+        let kinds: Vec<String> = non_text
+            .iter()
+            .map(|(_, k)| match k.as_str() {
+                "image" => "图片".to_string(),
+                "file" => "文件".to_string(),
+                other => other.to_string(),
+            })
+            .collect();
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "只能合并文本条目，其中含：{}",
+            kinds.join("、")
+        )));
+    }
+
+    let content: String = rows
+        .iter()
+        .map(|(_, c, _, _)| c.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let truncated: String = content.chars().take(MAX_ITEM_LEN).collect();
+    let pinned = rows.iter().any(|(_, _, _, p)| *p);
+    // 来源取列表里最靠前那条（它通常是用户最后复制的那条）
+    let source = rows.first().and_then(|(_, _, s, _)| s.clone());
+    let ts = now();
+
+    tx.execute(
+        "INSERT INTO clipboard_history (content, html, source_app, kind, is_pinned, created_at, updated_at)
+         VALUES (?1, NULL, ?2, 'text', ?3, ?4, ?4)",
+        params![truncated, source, pinned as i64, ts],
+    )?;
+    let new_id = tx.last_insert_rowid();
+
+    for (id, _, _, _) in &rows {
+        tx.execute("DELETE FROM clipboard_history WHERE id = ?1", params![id])?;
+    }
+    tx.commit()?;
+
+    get(conn, new_id)
+}
+
 pub fn clear(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM clipboard_history", [])?;
     Ok(())
@@ -280,6 +413,151 @@ mod tests {
 
     fn setup() -> Connection {
         init_in_memory().unwrap()
+    }
+
+    /// 插入 n 条并返回它们的 id（按插入顺序）
+    fn seed(conn: &Connection, items: &[&str]) -> Vec<i64> {
+        items
+            .iter()
+            .map(|t| {
+                insert(conn, t, None, None).unwrap();
+                last_id(conn)
+            })
+            .collect()
+    }
+
+    fn last_id(conn: &Connection) -> i64 {
+        conn.last_insert_rowid()
+    }
+
+    fn contents(conn: &Connection) -> Vec<String> {
+        list(conn, None, 50, 0).unwrap().into_iter().map(|i| i.content).collect()
+    }
+
+    /// 合并后只剩一条，内容按**列表顺序**（新→旧）换行拼接
+    #[test]
+    fn merge_joins_in_list_order_and_removes_originals() {
+        let conn = setup();
+        let ids = seed(&conn, &["A", "B", "C"]);
+        // 列表顺序是 C,B,A（updated_at DESC）
+        let merged = merge_texts(&conn, &ids).unwrap();
+        assert_eq!(merged.content, "C\nB\nA");
+        let left = contents(&conn);
+        assert_eq!(left.len(), 1, "原来三条必须都没了，只剩合并结果");
+        assert_eq!(left[0], "C\nB\nA");
+    }
+
+    /// 传进去的 id 顺序**不该**影响结果：用户勾选的先后与看到的列表顺序无关
+    #[test]
+    fn merge_result_is_independent_of_id_argument_order() {
+        // 两个独立库：同一批 id 不能合并两次（第一次就把它们删了）
+        let c1 = setup();
+        let c2 = setup();
+        let ids1 = seed(&c1, &["A", "B", "C"]);
+        let ids2 = seed(&c2, &["A", "B", "C"]);
+        let forward = merge_texts(&c1, &ids1).unwrap();
+        let shuffled = merge_texts(&c2, &[ids2[2], ids2[0], ids2[1]]).unwrap();
+        assert_eq!(forward.content, shuffled.content);
+    }
+
+    /// 置顶的那条排在列表最前，所以合并结果应当以它开头；
+    /// 且合并结果继承「任一为置顶」。
+    #[test]
+    fn merge_puts_pinned_first_and_keeps_pinned_flag() {
+        let conn = setup();
+        let ids = seed(&conn, &["A", "B"]);
+        toggle_pin(&conn, ids[0]).unwrap();
+        let merged = merge_texts(&conn, &ids).unwrap();
+        assert_eq!(merged.content, "A\nB", "置顶项应排在最前");
+        assert!(merged.is_pinned, "任一为置顶 → 合并结果置顶");
+    }
+
+    /// 合并是显式动作，**不走** insert_typed 的去重：
+    /// 拼出来的内容若与某条已有记录相同，必须新建一条，而不是顶替它。
+    #[test]
+    fn merge_always_inserts_even_if_content_already_exists() {
+        let conn = setup();
+        seed(&conn, &["A", "B"]);
+        // 先放一条内容恰好等于合并结果的记录
+        insert(&conn, "B\nA", None, Some("原记录")).unwrap();
+        let before = list(&conn, None, 50, 0).unwrap();
+        let victim = before.iter().find(|i| i.content == "B\nA").unwrap().clone();
+
+        // 只选 A、B 两条 —— 「原记录」不参与，否则拼出来是 "B\nA\nB\nA"
+        let picked: Vec<i64> = before
+            .iter()
+            .filter(|i| i.content == "A" || i.content == "B")
+            .map(|i| i.id)
+            .collect();
+        let merged = merge_texts(&conn, &picked).unwrap();
+
+        assert_eq!(merged.content, "B\nA");
+        // 原来那条「原记录」必须**原封不动**还在（没被顶替：时间戳/来源不变）
+        let still = get(&conn, victim.id).unwrap();
+        assert_eq!(still.source_app.as_deref(), Some("原记录"));
+        assert!(merged.id != victim.id, "必须是一条新行，而不是复用旧行");
+    }
+
+    #[test]
+    fn merge_rejects_single_id() {
+        let conn = setup();
+        let ids = seed(&conn, &["only"]);
+        assert!(merge_texts(&conn, &ids).is_err());
+        assert_eq!(contents(&conn).len(), 1, "失败时不得改动任何数据");
+    }
+
+    /// id 少一条时要**报错**，不能悄悄少合几条
+    #[test]
+    fn merge_rejects_when_some_id_vanished() {
+        let conn = setup();
+        let ids = seed(&conn, &["A", "B"]);
+        let missing = 999_999;
+        let err = merge_texts(&conn, &[ids[0], ids[1], missing]).unwrap_err();
+        assert!(err.to_string().contains("已不在剪贴板历史"), "实际: {err}");
+        assert_eq!(contents(&conn).len(), 2, "失败时原条目必须都还在");
+    }
+
+    /// 图片/文件不能按行拼：报错，且一条都不许删
+    #[test]
+    fn merge_rejects_non_text_and_keeps_everything() {
+        let conn = setup();
+        insert(&conn, "文本", None, None).unwrap();
+        let text_id = last_id(&conn);
+        insert_image(&conn, "img-dedup-key", "/tmp/shot.png", None).unwrap();
+        let img_id = last_id(&conn);
+        let err = merge_texts(&conn, &[text_id, img_id]).unwrap_err();
+        assert!(err.to_string().contains("只能合并文本"), "实际: {err}");
+        assert_eq!(contents(&conn).len(), 2, "失败时文本与图片都必须还在");
+    }
+
+    /// 超出 MAX_ITEM_LEN 时截断，且**不留半截尾巴**
+    #[test]
+    fn merge_truncates_overlong_content() {
+        let conn = setup();
+        let long = "x".repeat(MAX_ITEM_LEN + 500);
+        let ids = seed(&conn, &["short", &long]);
+        let merged = merge_texts(&conn, &ids).unwrap();
+        assert_eq!(merged.content.chars().count(), MAX_ITEM_LEN);
+    }
+
+    /// 新条目排在最前（用户合并完就该在顶部看到它）
+    #[test]
+    fn merged_item_appears_at_top_of_list() {
+        let conn = setup();
+        let ids = seed(&conn, &["A", "B"]);
+        insert(&conn, "更新的内容", None, None).unwrap();
+        // 期望值取自**合并前**的列表顺序，而不是写死 —— 同一毫秒插入的条目
+        // 靠 `id DESC` 定序，写死 "A\nB" 是在断言一个我没验证过的猜测。
+        let expected = list(&conn, None, 50, 0)
+            .unwrap()
+            .iter()
+            .filter(|i| i.content == "A" || i.content == "B")
+            .map(|i| i.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let merged = merge_texts(&conn, &ids).unwrap();
+        assert_eq!(merged.content, expected);
+        assert_eq!(contents(&conn)[0], expected, "合并结果应出现在列表最前");
     }
 
     #[test]

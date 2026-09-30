@@ -1042,6 +1042,8 @@ pub fn run() {
             commands::clipboard_paste,
             commands::clipboard_toggle_pin,
             commands::clipboard_delete,
+            commands::clipboard_merge,
+            commands::clipboard_copy_text,
             commands::clipboard_clear,
             commands::clipboard_set_paused,
             commands::clipboard_activate,
