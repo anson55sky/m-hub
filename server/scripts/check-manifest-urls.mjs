@@ -34,6 +34,21 @@ const UPDATE = join(PUBLIC, 'api/v1/app/update')
 const problems = []
 const fail = (m) => problems.push(m)
 
+/**
+ * 清单里 URL 预期使用的主机。
+ *
+ * ⚠️ 为什么要钉：迁移托管处（Workers → Pages → PocketBay）时，**最容易漏的
+ * 就是这个**。清单里的 `downloadUrl` 是签名前写死的字节，改了地址忘了重签 /
+ * 忘了重跑 seed 脚本，就会出现「清单取自新部署、包却指向旧部署」的跨部署混用。
+ *
+ * 症状很有欺骗性：清单验签**通过**（它确实被正确签过）、包也能下载，
+ * 只是版本对不上 —— 或者旧部署被关掉后变成 404。这类问题要等到
+ * 真实安装或版本替换时才暴露。
+ */
+const EXPECTED_HOST = (process.env.MHUB_SERVER_URL || 'https://m-hub-server.pages.dev')
+  .replace(/\/+$/, '')
+  .replace(/^https?:\/\//, '')
+
 if (!existsSync(REGISTRY)) {
   console.error('✗ 市场清单不存在。请先在 server/ 下跑 npm run seed:manifests')
   process.exit(1)
@@ -71,6 +86,14 @@ for (const e of registry.extensions ?? []) {
     }
     // 只在**本服务端**托管时才做离线校验；外链（如对象存储 CDN）跳过，
     // 但要提醒 —— 外链的存在性无法在构建期保证。
+    if (u.host !== EXPECTED_HOST) {
+      fail(
+        `${where}：downloadUrl 的主机是 ${u.host}，预期 ${EXPECTED_HOST}。\n` +
+          `    改了托管处必须重跑 seed-manifests（清单是签名前的字节），\n` +
+          `    否则会出现「清单来自新部署、包却指向旧部署」的跨部署混用。`,
+      )
+      continue
+    }
     if (!u.pathname.startsWith('/packages/')) {
       fail(
         `${where}：downloadUrl 指向外部主机（${u.host}）。\n` +

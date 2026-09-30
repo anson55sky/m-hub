@@ -1,0 +1,20 @@
+# Cloudflare Pages 的 _headers：静态托管的响应头。
+#
+# ⚠️ 签名机制的关键：清单与 .sig 必须**逐字节一致**。任何重新序列化
+# （gzip 重压缩 / JSON 美化 / 多一个尾随换行）都会让 Ed25519 验签失败。
+#
+# 故对 .json 与 .sig 明确 `Content-Encoding: identity` —— 告诉 CDN
+# 不要压缩它们。包与安装包（.xhpack / .dmg）不在此列，它们是二进制、
+# 本来就是压缩格式，压了反而浪费，且客户端只在下载**后**校验 sha256、
+# 不校验传输层编码，故压缩无害。
+/api/v1/*
+  Content-Encoding: identity
+  Cache-Control: public, max-age=60
+
+/packages/*
+  Cache-Control: public, max-age=300
+  Content-Type: application/octet-stream
+
+/downloads/*
+  Cache-Control: public, max-age=300
+  Content-Type: application/octet-stream

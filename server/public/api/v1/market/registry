@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "updatedAt": "2026-09-30T08:50:55.150Z",
+  "updatedAt": "2026-09-30T12:55:02.580Z",
   "revoked": [],
   "extensions": [
     {
@@ -10,7 +10,7 @@
       "description": "",
       "runtime": "web",
       "author": "",
-      "downloadUrl": "https://m-hub-server.pocketbay.app/packages/local.calculator/0.1.0/local.calculator-0.1.0.xhpack",
+      "downloadUrl": "https://m-hub-server.pages.dev/packages/local.calculator/0.1.0/local.calculator-0.1.0.xhpack",
       "sha256": "21f6793e0dd4be4b819fd750547fc61c3306ef545880c135459f1e27cee088f0",
       "size": 7852,
       "icon": ""

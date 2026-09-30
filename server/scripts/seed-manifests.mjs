@@ -25,7 +25,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSy
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 
 // 本脚本在 server/scripts/ 下，故 dirname/.. = server 目录。两层根要分清：
 // 产物落 server/，而版本号要读**客户端**的 tauri.conf.json（在上一层）。
@@ -44,11 +45,19 @@ const PRIV = join(KEY_DIR, 'market_private.pem')
 // 唯一的契约（约定 47 的精神）。这里手写而不是从 Rust import，因为脚本是
 // 独立的 Node 进程；`check-api-spec-conformance.mjs` 负责在构建期对账。
 /**
- * 服务端公开地址。**必须与客户端 `config.rs::DEFAULT_SERVER_URL` 逐字一致** ——
+ * 服务端公开地址。**必须与清单实际托管处逐字一致** ——
  * 写错的症状是「清单取得到、里面的 downloadUrl 取不到」，且失败现场在安装阶段、
- * 离改动点很远（约定 47 的精神）。
+ * 离改动点很远（约定 47 的精神）。这个坑我踩过一次。
+ *
+ * ⚠️ **清单里写进去的是签名前的字节**，所以改地址后必须重跑本脚本重新签名；
+ * 直接手改 JSON 会让验签失败。
+ *
+ * 用法：
+ *   MHUB_SERVER_URL=https://<你的域名> npm run seed:manifests --dmg <路径>
  */
-const PUBLIC_BASE_URL = (process.env.MHUB_SERVER_URL || 'https://m-hub-server.pocketbay.app').replace(/\/+$/, '')
+const PUBLIC_BASE_URL = (
+  process.env.MHUB_SERVER_URL || 'https://m-hub-server.pages.dev'
+).replace(/\/+$/, '')
 
 const PLATFORM_KEY =
   process.platform === 'darwin' && process.arch === 'arm64' ? 'macos-aarch64'
@@ -94,6 +103,37 @@ if (!existsSync(PRIV)) {
 }
 
 // ---------------------------------------------------------------- 2. 市场清单
+
+// ---------------------------------------------------------------- 3a. 先校验并暂存 --dmg
+//
+// ⚠️ 顺序是这个脚本里最容易写错的一处，2026-09-30 真的踩了。
+//
+// 下面第 3b 步会 `rmSync(public/downloads)` 清空输出目录。若 `--dmg` 指向的
+// 文件**就在这个目录里**（`--dmg public/downloads/0.7.3/xxx.dmg` 这种写法
+// 看起来最顺手），那么：清空先发生 → 随后的 `existsSync` 检查必然失败 →
+// 脚本 die。而 die 之前的清空**已经生效**，于是留下一棵半重建的树：
+// 扩展包被重新打包、更新清单没重签、`public/downloads/` 空了。
+// 实测后果：DMG 从工作区消失（只剩 git 里有），而清单指向一个不存在的文件。
+//
+// 关键点：**失败时的状态比错误信息更糟** —— 它是「看起来跑过了」的假象。
+// 所以这里必须在任何写操作之前就把输入取出来。
+//
+// 做法不是「报错说别这么传」（那只是把坑换个形状，用户下次还会踩），
+// 而是**把它复制到暂存目录**再往下走：两种传法都对，且清空顺序不再是隐患。
+const dmgArgIdx = process.argv.indexOf('--dmg')
+let dmgStaged = null // null = 本次不带更新包
+if (dmgArgIdx > -1) {
+  const raw = process.argv[dmgArgIdx + 1]
+  if (!raw || raw.startsWith('--')) die(`--dmg 后面缺路径（收到：${raw ?? '（无）'}）`)
+  const abs = resolve(raw)
+  if (!existsSync(abs)) die(`--dmg 指定的文件不存在：${raw}`)
+  if (statSync(abs).isDirectory()) die(`--dmg 指向的是目录，不是 .dmg 文件：${raw}`)
+
+  // 只有落在 public/ 内部才需要暂存；外部路径（构建产物目录）本来就不受影响，
+  // 但统一走暂存可以让「清空输出」这件事对输入完全透明，不必再关心来源。
+  dmgStaged = join(tmpdir(), `m-hub-seed-dmg-${process.pid}-${Date.now()}.dmg`)
+  copyFileSync(abs, dmgStaged)
+}
 
 mkdirSync(join(PUBLIC, 'api/v1/market'), { recursive: true })
 mkdirSync(join(PUBLIC, 'api/v1/app'), { recursive: true })
@@ -167,13 +207,12 @@ console.log(`\n✓ 市场清单 ${extensions.length} 个扩展 → server/public
 
 // ---------------------------------------------------------------- 3. 应用更新清单
 
-const dmgIdx = process.argv.indexOf('--dmg')
+// `dmgStaged` 在第 3a 步（清空输出**之前**）就已校验并存好，这里只消费它。
 const version = (process.env.MHUB_VERSION || JSON.parse(readFileSync(join(CLIENT_ROOT, 'src-tauri/tauri.conf.json'), 'utf8')).version)
 const platforms = {}
 
-if (dmgIdx > -1) {
-  const dmg = process.argv[dmgIdx + 1]
-  if (!dmg || !existsSync(dmg)) die(`--dmg 指定的文件不存在：${dmg}`)
+if (dmgStaged) {
+  const dmg = dmgStaged
   // ⚠️ 与扩展包同理：更新包也**由本服务端托管**。
   // 最初指向 `github.com/<仓库>/releases/download/v…`，那个 release 同样不存在 ——
   // 用户点「立即更新」会报 404，而服务端一切正常。清单里每一个 URL 都必须
@@ -217,3 +256,15 @@ console.log(
   `\n⚠️  签完的字节就是线上字节。这两个 .json 现在可以直接 deploy，\n` +
     `   但**任何进一步修改都会让验签失败** —— 改了必须重跑本脚本。`,
 )
+
+// 暂存的 .dmg 副本用完即删。它在系统临时目录里、不进版本库，但 6MB × 多次重跑
+// 累积起来也不是「反正会清」——挂在 exit 上，异常退出也一起收掉。
+if (dmgStaged) {
+  process.on('exit', () => {
+    try {
+      rmSync(dmgStaged, { force: true })
+    } catch {
+      /* 临时目录残留不影响正确性，不值得让脚本以非零码退出 */
+    }
+  })
+}

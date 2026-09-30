@@ -453,7 +453,25 @@ fn default_note_editor_mode() -> String {
 /// 账号登录 / AI 额度 / 扩展市场 / 应用升级这几项直接不可用）。要真正独立分发，
 /// 换地址时**只改这一个常量**并重新发版即可（设置页没有地址入口，约定 52）——
 /// 但别只改一半：清单、升级、登录、AI 全部打这一个地址，改完要一起验证。
-pub const DEFAULT_SERVER_URL: &str = "https://m-hub-server.pocketbay.app";
+///
+/// ## v0.7.3：静态资源迁到 Cloudflare Pages
+///
+/// 改为 `https://m-hub-server.pages.dev`。三条背景，都是实测得来的：
+///
+/// ① **`*.workers.dev` 在国内被 DNS 污染**（多个解析器给出不同的假 IP，
+///    而 `www.cloudflare.com` 解析正常 → 污染针对域名而非 Cloudflare 的 IP 段）。
+///    而 `*.pages.dev` **不被污染**（本机/公共 DNS 三个解析器结果一致），
+///    这是选它而不是 Workers 的唯一理由 —— 代码侧 Workers 入口一直现成。
+/// ② **免费且 scale-to-zero**，而平台托管服务空闲后会休眠：实测休眠 5.5 分钟后
+///    首个请求 502、第二个 204。休眠与「清单 + 签名是两次独立请求」天然冲突
+///    —— 一次成功一次失败拼在一起必然验签失败。静态资源无进程、无此问题。
+/// ③ 市场与更新是**公开 GET**，不需要服务端进程；账号/发布类接口仍走平台服务端。
+///
+/// ⚠️ Pages 只托管 `public/` 下的静态文件。**改了地址必须重跑 `seed-manifests`
+/// 并重新部署**：清单里的 `downloadUrl` 是**签名前写死的字节**，忘了重签会出现
+/// 「清单验签通过（它确实被正确签过）但包指向另一个部署」的跨部署混用。
+/// 守卫 `server/scripts/check-manifest-urls.mjs` 的主机名断言会拦下这种不一致。
+pub const DEFAULT_SERVER_URL: &str = "https://m-hub-server.pages.dev";
 
 /// 市场清单接口路径（服务端代理，客户端不再知道 COS 在哪里）。
 pub const MARKET_REGISTRY_PATH: &str = "/api/v1/market/registry";
