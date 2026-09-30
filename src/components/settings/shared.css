@@ -721,6 +721,14 @@
   font-size: 0.75rem;
   color: var(--text-2);
 }
+/* 「平台登录」那组的标题：两组登录功能同名，必须有视觉分隔 */
+.settings-view .account-subtitle{
+  margin: 18px 0 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
 /* GitHub 头像：已登录时的人味锚点 */
 .settings-view .account-avatar{
   width: 32px;

@@ -331,8 +331,14 @@ async function startGhLocalLogin() {
     startGhLocalPolling(dev)
   } catch (e) {
     const text = String(e)
-    ghLocalNotice.value = { kind: 'error', text }
-    void reportClientError('GitHub 本地登录发起失败', { error: text })
+    if (ghLocal.value.needsClientId) {
+      // 缺 Client ID 属于「还没配好」而不是「登录失败」：静态黄块已写清做法，
+      // 这里再报一次红字只会让人以为程序坏了（实测界面上黄字红字重复出现）
+      ghLocalNotice.value = null
+    } else {
+      ghLocalNotice.value = { kind: 'error', text }
+      void reportClientError('GitHub 本地登录发起失败', { error: text })
+    }
   } finally {
     ghLocalStarting.value = false
   }
@@ -580,7 +586,8 @@ onBeforeUnmount(() => {
               v-if="!ghLocal.loggedIn"
               class="ghost-btn data-btn"
               type="button"
-              :disabled="ghLocalStarting || !!ghLocalDevice"
+              :disabled="ghLocalStarting || !!ghLocalDevice || ghLocal.needsClientId"
+              :title="ghLocal.needsClientId ? '还没配置 GitHub Client ID，见下方说明' : ''"
               @click="startGhLocalLogin"
             >
               {{ ghLocalStarting ? '正在发起…' : ghLocalDevice ? '等待授权…' : '开始登录' }}
@@ -665,6 +672,10 @@ onBeforeUnmount(() => {
           </p>
 
           <template v-if="account && !account.loggedIn">
+            <!-- 下面这组是**平台**登录（经 m-hub 服务器），与上面那组必须分清：
+                 上面拿到的是 GitHub 身份，这里拿的是平台会话（额度/开发者/发布）。
+                 两者都叫「用 GitHub 登录」很容易被当成同一个功能。 -->
+            <h4 class="account-subtitle">平台登录（需要 m-hub 服务器）</h4>
             <div class="setting-row">
               <div class="setting-info">
                 <span class="setting-name">用 GitHub 登录</span>
