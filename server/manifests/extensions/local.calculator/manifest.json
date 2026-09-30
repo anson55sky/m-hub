@@ -1,0 +1,14 @@
+{
+  "id": "local.calculator",
+  "name": "计算器",
+  "version": "0.1.0",
+  "runtime": "web",
+  "kind": "view",
+  "surfaces": ["view", "module"],
+  "openIn": ["view"],
+  "entry": {
+    "view": "./index.html",
+    "module": "./index.html"
+  },
+  "permissions": []
+}

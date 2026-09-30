@@ -58,8 +58,10 @@ mod tests {
     // 测试向量：由发布侧生成的同一 Ed25519 密钥对（对应 MARKET_PUBLIC_KEY_B64）
     // 对固定文本的签名。仅用于验证「公钥 → 验签」链路正确，私钥不落地代码。
     const TEST_DATA: &str = "m-hub market registry test vector v1";
+    // ⚠️ 公钥已轮换（`bash scripts/market-keygen.sh`，2026-09-30）——本常量由
+    // **新私钥**签出。公钥换了它必须一起换，否则 valid_signature_passes 直接红。
     const TEST_SIGNATURE: &str =
-        "BiTxegT3R71b3qjOPdJMaQbkcJgKg3FZWVht9n5zseIAOx0ExLlFEgsa47TbzZdrp5Z7t/nLx00vkIIpvUV8AA==";
+        "DubQJ2Ht9zkGoQbpE5r9dIU6c+kXH3OoY3w/hkGDmbvI9spZo1zZFifyd7K8lOYa7p1xnOhxboVfbjtn7X5cAQ==";
 
     #[test]
     fn valid_signature_passes() {

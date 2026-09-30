@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 2,
+  "updatedAt": "2026-09-30T07:01:39.238Z",
+  "revoked": [],
+  "extensions": [
+    {
+      "id": "local.calculator",
+      "name": "计算器",
+      "version": "0.1.0",
+      "description": "",
+      "runtime": "web",
+      "author": "",
+      "downloadUrl": "https://github.com/anson55sky/m-hub-extensions/releases/download/local.calculator-v0.1.0/local.calculator-0.1.0.xhpack",
+      "sha256": "21f6793e0dd4be4b819fd750547fc61c3306ef545880c135459f1e27cee088f0",
+      "size": 7852,
+      "icon": ""
+    }
+  ]
+}

@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>计算器</title>
+    <style>
+      /*
+       * 同一份入口页同时服务两种形态：
+       *   · view   —— 主区整页打开，键盘大按钮，直接敲键盘算
+       *   · module —— 工作台上的小格子，紧凑排布
+       * 所以按**可用空间**切换，而不是按形态名判断：宿主给的容器多大就显示成什么样。
+       * 用 ResizeObserver + 断点，而不是两套 HTML —— 两套迟早会各自漂移。
+       *
+       * 不引用任何外部资源：扩展入口 URL 是 /<id>/index.html，
+       * 相对路径在这套协议下会被规范化掉一段而 404（详见 tests/extensions 的注释）。
+       */
+      /*
+       * ⚠️ 宿主注入的主题变量是 **`--mhub-*`** 前缀
+       * （--mhub-text-1 / --mhub-surface / --mhub-border / --mhub-brand …），
+       * 不是应用界面里那些 `--text-1` / `--bg-card-solid` —— 后者在扩展 iframe 里
+       * **不存在**，于是 var() 全部落到兜底值。我第一版正是踩了这个：
+       * 兜底写的是浅色主题的深色字（#1f2430），于是深色界面下数字几乎看不见。
+       *
+       * 双保险：① 优先用 --mhub-*；② 万一注入失败，退到按 data-mhub-theme
+       * 选的一组本地默认值（这个属性宿主一定会设）。这样无论注入成功与否，
+       * 深色下都不会出现「深字压深底」。
+       */
+      :root {
+        --c-text: #1f2430;
+        --c-text-2: #4b5563;
+        --c-text-3: #6b7280;
+        --c-text-4: #9ca3af;
+        --c-surface: rgba(0, 0, 0, 0.05);
+        --c-btn: rgba(0, 0, 0, 0.04);
+        --c-border: rgba(0, 0, 0, 0.12);
+        --c-brand: #5b5bf5;
+        --c-red: #e5484d;
+      }
+      :root[data-mhub-theme='dark'] {
+        --c-text: #e9e7f2;
+        --c-text-2: #c3bfd4;
+        --c-text-3: #9b96b0;
+        --c-text-4: #6f6a85;
+        --c-surface: rgba(255, 255, 255, 0.07);
+        --c-btn: rgba(255, 255, 255, 0.06);
+        --c-border: rgba(255, 255, 255, 0.14);
+        --c-brand: #8b8bf8;
+        --c-red: #ff6369;
+      }
+
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        font: 13px/1.5 system-ui, -apple-system, "PingFang SC", sans-serif;
+        color: var(--mhub-text-1, var(--c-text));
+        background: var(--mhub-bg-card, transparent);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      .calc {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        height: 100%;
+        padding: 8px;
+      }
+
+      /* ---- 显示区 ---- */
+      .screen {
+        flex: 0 0 auto;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        justify-content: flex-end;
+        gap: 2px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: var(--mhub-surface, var(--c-surface));
+        overflow: hidden;
+      }
+      .expr {
+        font-size: 11px;
+        line-height: 1.3;
+        color: var(--mhub-text-3, var(--c-text-3));
+        min-height: 1.3em;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .out {
+        font-size: 26px;
+        font-weight: 600;
+        line-height: 1.15;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: -0.01em;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .out.err { color: var(--mhub-red, var(--c-red)); }
+
+      /* ---- 键盘 ----
+         grid-template 由 JS 按可用空间选：紧凑 4×5、常规 4×6。 */
+      .keys {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        grid-auto-rows: 1fr;
+        gap: 5px;
+      }
+      button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--mhub-border, var(--c-border));
+        border-radius: 10px;
+        background: var(--mhub-bg-card, var(--c-btn));
+        color: inherit;
+        font: inherit;
+        font-weight: 600;
+        font-size: 15px;
+        font-variant-numeric: tabular-nums;
+        cursor: pointer;
+        /* 按下的物理回推：给一点触感，否则连点很快会觉得没生效 */
+        transition: transform 0.06s ease-out, filter 0.12s ease-out;
+        min-height: 0;
+        overflow: hidden;
+      }
+      button:hover { filter: brightness(1.06); }
+      button:active { transform: scale(0.96); }
+      button:focus-visible { outline: 2px solid var(--mhub-brand, var(--c-brand)); outline-offset: -2px; }
+      button.fn { color: var(--mhub-text-2, var(--c-text-2)); font-weight: 500; }
+      button.op { color: var(--mhub-brand, var(--c-brand)); }
+      button.eq {
+        background: var(--mhub-brand, var(--c-brand));
+        border-color: transparent;
+        color: var(--mhub-bg-page, #fff);
+      }
+      button.zero { grid-column: span 2; }
+
+      /* ---- 紧凑（工作台格子）---- */
+      .calc.compact { padding: 5px; gap: 4px; }
+      .calc.compact .screen { padding: 4px 7px; border-radius: 8px; }
+      .calc.compact .out { font-size: 17px; }
+      .calc.compact .expr { font-size: 9px; }
+      .calc.compact .keys { gap: 3px; }
+      .calc.compact button { font-size: 11px; border-radius: 7px; }
+
+      /* 极窄（例如工作台被压到 2 列）时进一步收缩，而不是把按钮挤扁 */
+      .calc.tiny .keys { gap: 2px; }
+      .calc.tiny button { font-size: 10px; border-radius: 5px; }
+      .calc.tiny .out { font-size: 14px; }
+
+      /* 键盘提示只在整页形态露出来 —— 小格子里没有位置也不需要 */
+      .tip { display: none; }
+      .calc:not(.compact) .tip {
+        display: block;
+        flex: 0 0 auto;
+        font-size: 10px;
+        color: var(--mhub-text-3, var(--c-text-4));
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="calc" id="root">
+      <div class="screen">
+        <div class="expr" id="expr"></div>
+        <div class="out" id="out">0</div>
+      </div>
+      <div class="keys" id="keys">
+        <button class="fn" data-k="clear">AC</button>
+        <button class="fn" data-k="neg">±</button>
+        <button class="fn" data-k="pct">%</button>
+        <button class="op" data-k="op:/">÷</button>
+
+        <button data-k="d:7">7</button>
+        <button data-k="d:8">8</button>
+        <button data-k="d:9">9</button>
+        <button class="op" data-k="op:*">×</button>
+
+        <button data-k="d:4">4</button>
+        <button data-k="d:5">5</button>
+        <button data-k="d:6">6</button>
+        <button class="op" data-k="op:-">−</button>
+
+        <button data-k="d:1">1</button>
+        <button data-k="d:2">2</button>
+        <button data-k="d:3">3</button>
+        <button class="op" data-k="op:+">+</button>
+
+        <button class="zero" data-k="d:0">0</button>
+        <button data-k="dot">.</button>
+        <button class="eq" data-k="eq">=</button>
+      </div>
+      <p class="tip">键盘可直接输入：数字 · + − * / · Enter 等号 · Esc 清空 · Backspace 退格</p>
+    </div>
+
+    <script>
+      /**
+       * 计算器状态机。
+       *
+       * 用四个状态而不是「一个表达式字符串」：这是能同时支持
+       * 「1 + 2 + 3 =」「1 + 2 × 3 =」「连按等号重复运算」「算完接着输入」
+       * 的最小状态量。多写一个状态能少一堆特判。
+       *
+       *   typed    —— 屏幕上正在输入的那串数字（用户没按等号前它只是「草稿」）
+       *   acc      —— 已累计的结果
+       *   op       —— 待执行的运算符号
+       *   fresh    —— 下一次按数字是否**开始新数**（而不是接着 typed 追加）
+       *
+       * 除法与百分比的具体规则见各自函数注释 —— 这两处最容易做出「看起来对、
+       * 算起来不对」的选择。
+       */
+      const out = document.getElementById('out')
+      const expr = document.getElementById('expr')
+      const root = document.getElementById('root')
+      const keys = document.getElementById('keys')
+
+      let typed = '0'
+      let acc = null
+      let op = null
+      let fresh = true
+      /**
+       * 上一次 `=` 真正消费的**右操作数**，供连按等号复用。
+       *
+       * 10 − 3 = = = 应该得到 7 → 4 → 1，也就是每次都拿**当初那个 3** 继续减。
+       * 原先没有这个状态，第二次 `=` 读到的是屏幕上已经被结果覆盖的 typed（7），
+       * 于是算出 7 − 7 = 0。屏幕上就变成「按一次等号 7，再按一下变 0」。
+       */
+      let lastB = null
+
+      const OP_TEXT = { '+': '+', '-': '−', '*': '×', '/': '÷' }
+
+      function render() {
+        out.textContent = displayTyped(typed)
+        expr.textContent = op ? `${fmt(acc)} ${OP_TEXT[op]}` : ''
+      }
+
+      /**
+       * 把**正在输入的原始串**分组显示。
+       *
+       * 为什么不能直接用 fmt()：`fmt` 走 Number → String，而输入过程中
+       * `typed` 可能是 "1234."（末尾小数点）或 "0.0000001"，经一趟 Number 往返
+       * 这些形状就没了 —— 屏幕会跳成 "1234"、小数点一闪而过。所以这里只对
+       * **整数部分**做正则分组，小数部分原样保留，不碰数值本身。
+       *
+       * 分组必须在这里做而不能只在 fmt() 里：`typed` 存的是无分隔符的原始串
+       * （否则 parseFloat('1,234') 直接变 NaN），显示与存储因此是分开的。
+       */
+      function displayTyped(t) {
+        if (!t) return '0'
+        const neg = t.startsWith('-')
+        const body = neg ? t.slice(1) : t
+        const dot = body.indexOf('.')
+        const head = dot < 0 ? body : body.slice(0, dot)
+        const tail = dot < 0 ? '' : body.slice(dot)
+        const grouped = head.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+        return (neg ? '-' : '') + grouped + tail
+      }
+
+      /**
+       * 数字格式化：千分位 + 收拾浮点误差 + 躲开科学计数。
+       *
+       * 三件都是实测出来的，不是预防性代码：
+       *  ① 浮点误差：0.1 + 0.2 在 JS 里是 0.30000000000000004，直接显示会吓人一跳。
+       *     按 12 位小数收拾 —— 只在 |n| 够小时做，否则 `n * 1e12` 本身就越过了
+       *     double 的 2^53 精度界，收拾出来的数反而是错的。
+       *  ② 科学计数：String(1e21) 是 "1e+21"，而计算器上没人读这种写法。
+       *  ③ 千分位：1234567 读作 1,234,567 比 1234567 更容易扫。
+       */
+      function fmt(n) {
+        if (n === null || n === undefined || !Number.isFinite(n)) return '0'
+        let v = n
+        if (Math.abs(v) < 1e12) v = Math.round(v * 1e12) / 1e12
+        if (Math.abs(v) >= 1e21) return v.toLocaleString('en-US')
+        const neg = v < 0
+        const abs = Math.abs(v)
+        // toFixed(12) 再去掉尾随 0：避免 String() 把 3.0 显示成 "3" 之外的怪形式，
+        // 也让「3.10」这种输入显示成干净的 3.1
+        let t = abs.toFixed(12).replace(/0+$/, '').replace(/\.$/, '')
+        const dot = t.split('.')
+        const head = dot[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+        return (neg ? '-' : '') + (dot[1] ? head + '.' + dot[1] : head)
+      }
+
+      function setError(msg) {
+        out.textContent = msg
+        out.classList.add('err')
+        expr.textContent = ''
+        // 按任意键都从干净状态重来 —— 停在错误态时继续算只会更让人困惑
+        out.dataset.err = '1'
+      }
+      function clearError() {
+        out.classList.remove('err')
+        delete out.dataset.err
+      }
+
+      function current() {
+        return parseFloat(typed) || 0
+      }
+
+      function inputDigit(d) {
+        if (out.dataset.err) reset()
+        if (fresh) {
+          typed = d
+          fresh = false
+        } else if (typed === '0') {
+          typed = d
+        } else if (typed.replace(/[-.]/g, '').length < 12) {
+          // 限 12 位有效数字：再长就超出 double 的可靠精度，
+          // 显示出来的位数是假的，不如收住
+          typed += d
+        }
+        // ⚠️ 这里必须 render()：原先 inputDigit / inputDot 只改 typed 不重绘，
+        // 于是「按数字屏幕不动，要按一下运算符才更新」——
+        // 表现为连点数字全是 0。测试里先炸出来的是这条。
+        render()
+      }
+
+      function inputDot() {
+        if (out.dataset.err) reset()
+        if (fresh) {
+          typed = '0.'
+          fresh = false
+        } else if (!typed.includes('.')) {
+          typed += '.'
+        }
+        render()
+      }
+
+      function setOperator(next) {
+        if (out.dataset.err) reset()
+        if (op !== null && !fresh) {
+          // 「1 + 2 +」：连按运算符就把已完成的一步先算掉，而不是等两次 =
+          const r = apply(op, acc, current())
+          if (r === null) return setError('除数不能为 0')
+          acc = r
+          typed = fmt(r)
+        } else if (acc === null) {
+          acc = current()
+        }
+        op = next
+        fresh = true
+        // 换了运算符，上一次「连按等号」的依据就作废了：
+        // 否则 1 + 2 = + 3 = 会把旧的 lastB 带进来
+        lastB = null
+        render()
+      }
+
+      /**
+       * 除法：除数为 0 时**报错并停下**，而不是回 Infinity / NaN。
+       *
+       * 显示 Infinity 会被当成一个数继续参与运算，用户越算越离谱；
+       * 直接停下并说明原因，才是他能据此改的。
+       */
+      function apply(o, a, b) {
+        if (o === '+') return a + b
+        if (o === '-') return a - b
+        if (o === '*') return a * b
+        if (o === '/') {
+          if (b === 0) return null
+          return a / b
+        }
+        return b
+      }
+
+      function equals() {
+        if (out.dataset.err) return reset()
+        if (op === null) {
+          // 没有待执行的运算时再按 =：当格式化用（去掉前导零、加上千分位）
+          typed = fmt(current())
+          return render()
+        }
+        const a = acc === null ? current() : acc
+        // fresh 表示「上次算完还没输新数」→ 那是连按等号，右操作数沿用上次的
+        const b = acc === null ? 0 : fresh && lastB !== null ? lastB : current()
+        const r = apply(op, a, b)
+        if (r === null) {
+          acc = null
+          op = null
+          return setError('除数不能为 0')
+        }
+        // 「连按等号」= 重复上一步运算：10 − 3 = = = → 7 4 1
+        // 所以保留 op 与 acc，只把结果推进；按数字时 fresh 变 true 会自然打断
+        expr.textContent = `${fmt(a)} ${OP_TEXT[op]} ${fmt(b)} =`
+        acc = r
+        typed = fmt(r)
+        fresh = true
+        lastB = b
+        render()
+      }
+
+      /** ± ：对「草稿」取负；没有草稿时对已累计结果取负 */
+      function negate() {
+        if (out.dataset.err) return reset()
+        typed = typed.startsWith('-') ? typed.slice(1) : '-' + typed
+        render()
+      }
+
+      /**
+       * % ：按「相对当前累计值」的百分比算，符合直觉。
+       *
+       * 例：200 + 10 % = → 220（而不是 200.1）。
+       * 实现是 acc × typed/100。分母为 0 时不出 Infinity，只做归零。
+       */
+      function percent() {
+        if (out.dataset.err) return reset()
+        // 有累计值 → 「相对它」的百分比（200 + 10 % = 220）
+        // 没有累计值 → 就是除以 100（单独按 50 % 应得 0.5，而不是恒等于 0）
+        const r = acc === null ? current() / 100 : (acc * current()) / 100
+        typed = fmt(r)
+        fresh = false
+        render()
+      }
+
+      // 曾经有个「一次 AC 清草稿、两次 AC 全清」的两段式，问题是：
+      // 用户不知道要按几次，而且第二次按下去屏幕纹丝不动（acc 根本没被清）。
+      // 按钮上写的是 AC —— 那就一次全清。少一个状态，行为也符合标签。
+
+      function reset() {
+        typed = '0'
+        acc = null
+        op = null
+        fresh = true
+        lastB = null
+        clearError()
+        render()
+      }
+
+      function backspace() {
+        if (out.dataset.err) return reset()
+        if (fresh) return
+        typed = typed.length > 1 ? typed.slice(0, -1) : '0'
+        if (typed === '-' || typed === '') typed = '0'
+        render()
+      }
+
+      // ---- 按键 ----
+      // 用 pointerdown 而不是 click：计算器连按很快，click 要等抬起，
+      // 手速稍快就会「按了没反应」。mousedown 立即响应。
+      keys.addEventListener('mousedown', (e) => {
+        const btn = e.target.closest('button[data-k]')
+        if (!btn) return
+        e.preventDefault()
+        act(btn.dataset.k)
+      })
+      // 键盘可达性：按钮本身仍可聚焦，Enter/Space 走 click
+      keys.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-k]')
+        if (!btn || e.detail > 0) return // detail>0 = 鼠标来的，已由 mousedown 处理
+        act(btn.dataset.k)
+      })
+
+      function act(k) {
+        clearError()
+        if (k === 'clear') return reset()
+        if (k === 'neg') return negate()
+        if (k === 'pct') return percent()
+        if (k === 'dot') return inputDot()
+        if (k === 'eq') return equals()
+        if (k === 'back') return backspace()
+        if (k === 'reset') return reset()
+        if (k.startsWith('d:')) return inputDigit(k.slice(2))
+        if (k.startsWith('op:')) return setOperator(k.slice(3))
+      }
+
+      // ---- 键盘 ----
+      window.addEventListener('keydown', (e) => {
+        if (e.metaKey || e.ctrlKey || e.altKey) return
+        const k = e.key
+        if (/^[0-9]$/.test(k)) { act('d:' + k); e.preventDefault(); return }
+        const map = { '+': 'op:+', '-': 'op:-', '*': 'op:*', 'x': 'op:*', 'X': 'op:*', '/': 'op:/', '.': 'dot', ',': 'dot', '=': 'eq', 'Enter': 'eq', 'Escape': 'reset', 'c': 'clear', 'C': 'clear', '%': 'pct', 'Backspace': 'back' }
+        if (map[k]) { act(map[k]); e.preventDefault(); return }
+        if (k === 'n' || k === 'N') { act('neg'); e.preventDefault() }
+      })
+
+      // ---- 按可用空间自适应形态 ----
+      // 用容器尺寸而不是 window.innerWidth：工作台形态下 window 很宽，
+      // 但卡片格子可能只有 200px 宽 —— 按 window 判断会以为空间充足而用大排版。
+      function fit() {
+        const w = root.clientWidth
+        const h = root.clientHeight
+        root.classList.toggle('compact', h < 260 || w < 260)
+        root.classList.toggle('tiny', h < 150 || w < 190)
+      }
+      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(fit).observe(root)
+      window.addEventListener('resize', fit)
+      fit()
+      render()
+    </script>
+  </body>
+</html>
