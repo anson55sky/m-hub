@@ -39,8 +39,12 @@ step(
 )
 
 // ---------------------------------------------------------------- 3. 已登录
-// wrangler 的凭据落在 ~/.wrangler/config/default.toml（macOS/Linux）
+// wrangler 的凭据位置**分平台**：macOS 走 ~/Library/Preferences/，
+// Linux/Windows 走 ~/.wrangler/。第一版只写了后者，于是 macOS 上明明
+// 登录成功了、脚本却报「未登录」—— 误报比不报更坏，它会让人去重登一遍。
+// 优先用 `wrangler whoami` 判定（那是权威），文件路径只作快速路径。
 const credPaths = [
+  join(process.env.HOME, 'Library/Preferences/.wrangler/config/default.toml'),
   join(process.env.HOME, '.wrangler/config/default.toml'),
   join(process.env.HOME, '.config/.wrangler/config/default.toml'),
 ]
@@ -103,6 +107,21 @@ step(
   missing.length === 0,
   missing.length ? `缺：${missing.join(', ')}` : '4 个文件都在',
   'cd server && npm run seed:manifests',
+)
+
+// ---------------------------------------------------------------- 6.5 workers.dev 子域已注册
+//
+// 这一步**独立于** `wrangler.jsonc`：那里的 `workers_dev: true` 只是声明
+// 「发布到 workers.dev」，不负责**创建**那个子域。子域是账号级一次性设置。
+// 不注册的症状很有迷惑性：Worker 明明 `Uploaded m-hub-server` 成功了，
+// 整条 deploy 却仍失败 —— 所以不能拿「上传成功」当成功判据。
+const deployedUrlFile = join(SERVER, '.deployed-url')
+const deployedUrl = existsSync(deployedUrlFile) ? read(deployedUrlFile).trim() : ''
+step(
+  'workers.dev 子域已注册（否则 deploy 整体失败）',
+  !!deployedUrl,
+  deployedUrl || '未知 —— 查不到已部署地址',
+  '网页注册：dash.cloudflare.com/<账号ID>/workers/onboarding → Workers & Pages → 你的 Worker → Your subdomain → Change',
 )
 
 // ---------------------------------------------------------------- 7. 签名验得过

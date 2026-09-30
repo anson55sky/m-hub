@@ -54,7 +54,7 @@
     {
       "binding": "DB",
       "database_name": "m-hub",
-      "database_id": "REPLACE_ME_run_wrangler_d1_create",
+      "database_id": "2376ee54-e290-4614-ad48-b73ba0463e28",
       "migrations_dir": "migrations"
     }
   ],
@@ -71,15 +71,15 @@
   //   GitHub 登录回 500 `server_misconfigured`；未配 INVITE_CODE 时兑换回 500。
   //   理由同客户端：假成功比报错难查得多（约定 53）。
   "vars": {
-    // GitHub OAuth App 的 Client ID（设备码流程**不需要** client_secret）
-    "GITHUB_CLIENT_ID": "",
-    // 兑换码。留空 = 兑换功能明确报「未配置」
-    "INVITE_CODE": "",
-    // 平台 AI 的上游 Key。留空 = 平台对话回 401
-    "OPENAI_API_KEY": "",
-    // 邮件（可选）。不配 = 邮箱登录回 501「未启用，请用 GitHub 登录」
+    // 邮件的发件人（可选）。不配 = 邮箱登录回 501「未启用，请用 GitHub 登录」
     "EMAIL_FROM": "m-hub <noreply@example.com>"
   },
+  // ⚠️ 下面三个**刻意不写进 vars**，只走 `wrangler secret put`：
+  //   GITHUB_CLIENT_ID / INVITE_CODE / OPENAI_API_KEY
+  // 早先这里写着空串占位，部署日志会同时列出「Vars: GITHUB_CLIENT_ID: ""」与
+  // 已上传的 secret —— 运行时 secret 确实优先，但要看文档才知道哪个生效。
+  // **不声明**比**声明空串**更不含糊：代码读不到就直接报「未配置」。
+  // 代价是忘了配时报的是 500 server_misconfigured 而不是空值，两种都够清楚。
 
   // ---------------------------------------------------------------- 日志
   "observability": {

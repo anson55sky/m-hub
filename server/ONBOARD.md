@@ -190,6 +190,49 @@ npx wrangler secret put OPENAI_API_KEY
 
 ---
 
+## 第 6.5 步 · ⚠️ 注册 workers.dev 子域（**必须先做，否则第 7 步必失败**）
+
+**这一步很容易被漏掉**，而且它的失败长得像别的问题。
+
+`wrangler.jsonc` 里的 `workers_dev: true` 只是**声明「我要发布到 workers.dev」**，
+它**不会替你创建那个子域**。子域是账号级的一次性设置，必须单独注册。
+
+**不注册的症状**（我第一次就踩了）：
+
+```
+▲ [WARNING] You need to register a workers.dev subdomain before publishing to workers.dev
+? Would you like to register a workers.dev subdomain now?
+🤖 Using fallback value in non-interactive context: no      ← 自动答了「不」
+✘ [ERROR] You can either deploy your worker to ... or register a workers.dev
+           subdomain here: https://dash.cloudflare.com/<你的账号ID>/workers/onboarding
+```
+
+注意「Worker 已上传成功」但整条 deploy 仍失败 —— 所以别看到
+`Uploaded m-hub-server` 就以为好了，**要看有没有那行 `Your worker has been deployed to …`**。
+
+**怎么做**（`wrangler subdomain` 命令在 wrangler v3 已废弃，官方要求走网页）：
+
+**网址**：https://dash.cloudflare.com/c4b2b5b67ecb5f4cee8cbb586a8f71c3/workers/onboarding
+
+（上面那串是本账号的 ID，你的可能不同 —— 从上面报错信息里复制即可。
+也可以从 https://dash.cloudflare.com 进去 → 左侧 **Workers & Pages**。）
+
+点路径：
+
+```
+Workers & Pages
+  → 点你的 Worker（m-hub-server，第 6 步 secret put 时已自动建好）
+    → 找到 "Your subdomain" 这一栏
+      → Change
+        → 填一个名字（例如 sky-mhub）→ 确认
+```
+
+> 那个名字会成为**全局账号级**的子域，之后所有 Worker 都挂在它下面：
+> `m-hub-server.sky-mhub.workers.dev`。取完就不能改（要改得重新验证所有权），
+> 所以别取太随便的名字。
+
+---
+
 ## 第 7 步 · 部署
 
 ```bash
@@ -306,7 +349,10 @@ npm run deploy
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
 | `wrangler login` 打不开浏览器 | 环境问题 | 跑 `npx wrangler login --browser=false`，会给一个网址手动打开 |
-| 部署报 `database_id` 无效 | 第 4 步没填 | 看 `npm run status` 第 4 项 |
+| 部署报 `You need to register a workers.dev subdomain` | **第 6.5 步没做** | 走 https://dash.cloudflare.com/<账号ID>/workers/onboarding 网页注册（`wrangler subdomain` 命令已废弃） |
+| 看到 `Uploaded m-hub-server` 但没有 `Your worker has been deployed to …` | 同上，子域未注册 | 别被「上传成功」骗了，deploy 整体是失败的 |
+| `wrangler subdomain <名字>` 报 Deprecation | v3 已废弃该命令 | 改走网页（见第 6.5 步） |
+| 部署报 `database_id` 无效 / `Invalid uuid` | 第 4 步没填 | 看 `npm run status` 第 4 项 |
 | `curl` 清单 404 | 部署没成功，或路径拼错 | `npx wrangler tail` 看有没有请求到 |
 | `curl /me` 返回 404 而非 401 | 路径前缀错了 | 确认地址里没有多一层路径 |
 | 客户端显示市场空白 | 验签失败（客户端静默回退缓存） | 跑 `npm run status` 第 7 项；再对比客户端内嵌公钥与 `market_public.key` |
