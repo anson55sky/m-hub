@@ -15,6 +15,7 @@ mod db;
 mod dnd;
 mod ext_scaffold;
 mod extension;
+mod github_auth;
 mod ext_protocol;
 mod floating_ball;
 mod float_window;
@@ -1044,6 +1045,10 @@ pub fn run() {
             commands::clipboard_delete,
             commands::clipboard_merge,
             commands::clipboard_copy_text,
+            commands::github_status,
+            commands::github_device_start,
+            commands::github_device_poll,
+            commands::github_logout,
             commands::clipboard_drag_begin,
             commands::clipboard_drag_end,
             commands::clipboard_clear,

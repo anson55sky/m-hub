@@ -9,7 +9,13 @@
 import { inject, onBeforeUnmount, onMounted, ref } from 'vue';
 import { Copy } from 'lucide-vue-next';
 import { isTauri, tauriApi } from '../../api/tauri';
-import type { AccountDevice, AccountStatus, GithubDeviceStart } from '../../api/tauri';
+import type {
+  AccountDevice,
+  AccountStatus,
+  GithubDeviceStart,
+  GithubLocalDeviceStart,
+  GithubLocalStatus,
+} from '../../api/tauri';
 import { reportClientError } from '../../utils/error-report';
 
 const showToast = inject<(msg: string) => void>('showToast', () => {})
@@ -229,6 +235,116 @@ function stopGithubPolling() {
   }
 }
 
+// ---------------- 客户端直连 GitHub（不经平台服务端）----------------
+//
+// 平台服务端（m-hub.xfactor.top）现在是 NXDOMAIN，所以走服务端的登录第一步就断了。
+// 但 GitHub 的 Device Flow **不需要 client_secret**（它就是为「设备无法安全保存密钥」
+// 而设计的），所以客户端可以自己走完全程 —— 零服务器、长期免费。
+//
+// 与服务端那条链路的区别必须写在界面上：
+//   · 本地登录 = 真的 GitHub 身份（用户名/头像/邮箱）+ 一个可用的 GitHub 凭据
+//   · 平台能力（AI 额度 / 申请开发者 / 发布扩展 / 市场）**仍然要服务器**，登录后依旧不可用
+// 所以下面那段文案要说清这件事，不能让用户以为登录了就全能。
+const ghLocal = ref<GithubLocalStatus>({ loggedIn: false, needsClientId: false, identity: null })
+const ghLocalStarting = ref(false)
+const ghLocalDevice = ref<GithubLocalDeviceStart | null>(null)
+const ghLocalNotice = ref<{ kind: 'busy' | 'warn' | 'error' | 'ok'; text: string } | null>(null)
+let ghLocalTimer: number | undefined
+
+async function loadGhLocal() {
+  if (!isTauri()) return
+  try {
+    ghLocal.value = await tauriApi.githubStatus()
+  } catch (e) {
+    // 读状态失败不该让整页报错：只当没登录，登录按钮仍然可用
+    ghLocal.value = { loggedIn: false, needsClientId: false, identity: null }
+  }
+}
+
+function stopGhLocalPolling() {
+  if (ghLocalTimer !== undefined) {
+    clearTimeout(ghLocalTimer)
+    ghLocalTimer = undefined
+  }
+}
+
+function cancelGhLocalLogin() {
+  stopGhLocalPolling()
+  ghLocalDevice.value = null
+  ghLocalStarting.value = false
+  ghLocalNotice.value = null
+}
+
+/**
+ * 轮询本地授权结果。
+ *
+ * ⚠️ `slow_down` 由 Rust 侧并进了 pending（我们把间隔取 ≥ 5s 已经够保守），
+ * 但仍要按服务端给的 interval 走，不能更快 —— GitHub 收到过快轮询会一直回
+ * slow_down，现象是「浏览器已授权、客户端永远等待」，而日志一切正常。
+ */
+function startGhLocalPolling(dev: GithubLocalDeviceStart) {
+  stopGhLocalPolling()
+  const intervalMs = Math.max(5, dev.interval) * 1000
+  const tick = async () => {
+    try {
+      const r = await tauriApi.githubDevicePoll(dev.deviceCode)
+      if (r.status === 'pending') {
+        ghLocalTimer = window.setTimeout(() => void tick(), intervalMs)
+        return
+      }
+      stopGhLocalPolling()
+      ghLocalDevice.value = null
+      if (r.status === 'done') {
+        ghLocalNotice.value = { kind: 'ok', text: '登录成功' }
+        showToast('登录成功')
+        await loadGhLocal()
+        // 平台状态也重拉一次：登录态变了，界面别停在旧值
+        void loadAccount()
+      } else {
+        ghLocalNotice.value = { kind: 'error', text: `登录失败：${r.message}` }
+        showToast('登录失败')
+      }
+    } catch (e) {
+      stopGhLocalPolling()
+      ghLocalDevice.value = null
+      ghLocalNotice.value = { kind: 'error', text: `登录失败：${String(e)}` }
+      void reportClientError('GitHub 本地登录轮询失败', { error: String(e) })
+    }
+  }
+  ghLocalTimer = window.setTimeout(() => void tick(), intervalMs)
+}
+
+async function startGhLocalLogin() {
+  if (ghLocalStarting.value || ghLocalDevice.value) return
+  ghLocalStarting.value = true
+  ghLocalNotice.value = { kind: 'busy', text: '正在向 GitHub 申请验证码…' }
+  try {
+    const dev = await tauriApi.githubDeviceStart()
+    ghLocalDevice.value = dev
+    ghLocalNotice.value = null
+    // 顺手开浏览器；打不开就明说（码在界面上、按钮也在，静默失败会被当成「点了没反应」）
+    void tauriApi.openExternal(dev.verificationUri).catch(() => {
+      if (ghLocalDevice.value === dev) {
+        ghLocalNotice.value = { kind: 'warn', text: '没能自动打开浏览器，请点下面的「打开浏览器」' }
+      }
+    })
+    startGhLocalPolling(dev)
+  } catch (e) {
+    const text = String(e)
+    ghLocalNotice.value = { kind: 'error', text }
+    void reportClientError('GitHub 本地登录发起失败', { error: text })
+  } finally {
+    ghLocalStarting.value = false
+  }
+}
+
+async function ghLocalLogout() {
+  stopGhLocalPolling()
+  ghLocal.value = await tauriApi.githubLogout()
+  ghLocalNotice.value = null
+  showToast('已退出 GitHub 登录')
+}
+
 /**
  * 轮询 GitHub 授权结果（按服务端给的 interval，最少 3 秒一次）。
  *
@@ -439,9 +555,12 @@ function accountSummary(a: AccountStatus): string {
 
 onMounted(() => {
   void loadAccount()
+  void loadGhLocal()
 })
 onBeforeUnmount(() => {
   stopGithubPolling()
+  // 本地 GitHub 轮询也要停：面板切走时定时器若还活着，会在别的视图里继续发请求
+  stopGhLocalPolling()
   if (emailTimer !== null) clearInterval(emailTimer)
 })
 </script>
@@ -449,8 +568,100 @@ onBeforeUnmount(() => {
 <template>
         <section id="sv-sec-account" class="sv-sec" aria-label="账号">
           <h3 class="sv-sec-title">账号</h3>
-          <p class="account-intro">
-            登录仅用于「申请成为扩展开发者」和「发布扩展」。安装扩展、用自己的 API Key 对话都不需要账号。
+          <!-- ============ 客户端直连 GitHub（不需要平台服务端） ============ -->
+          <div v-if="isTauri()" class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">用 GitHub 登录</span>
+              <span class="setting-desc">
+                在浏览器里输入验证码即可，不用记密码。这一步由本机直接和 GitHub 通信，不经过 m-hub 服务器
+              </span>
+            </div>
+            <button
+              v-if="!ghLocal.loggedIn"
+              class="ghost-btn data-btn"
+              type="button"
+              :disabled="ghLocalStarting || !!ghLocalDevice"
+              @click="startGhLocalLogin"
+            >
+              {{ ghLocalStarting ? '正在发起…' : ghLocalDevice ? '等待授权…' : '开始登录' }}
+            </button>
+            <button
+              v-else
+              class="ghost-btn data-btn"
+              type="button"
+              @click="ghLocalLogout"
+            >
+              退出登录
+            </button>
+          </div>
+
+          <!-- 没配 Client ID 时说清是「缺配置」而不是「登录失败」 -->
+          <p v-if="isTauri() && ghLocal.needsClientId" class="account-notice warn">
+            还没配置 GitHub Client ID，所以暂时登不了。到 GitHub →
+            Settings → Developer settings → OAuth Apps → New OAuth App 建一个
+            （Authorization callback URL 填
+            <code>https://github.com/login/oauth/callback</code>），
+            把 Client ID 填进 <code>src-tauri/src/github_auth.rs</code> 的
+            <code>GITHUB_CLIENT_ID</code> 后重新构建。设备码登录不需要 client_secret。
+          </p>
+
+          <!-- 已登录：显示身份，并说清哪些能力仍然不可用 -->
+          <div v-if="isTauri() && ghLocal.loggedIn && ghLocal.identity" class="account-device">
+            <img
+              v-if="ghLocal.identity.avatarUrl"
+              :src="ghLocal.identity.avatarUrl"
+              class="account-avatar"
+              alt=""
+              referrerpolicy="no-referrer"
+            />
+            <div class="setting-info">
+              <span class="setting-name">{{ ghLocal.identity.name }}</span>
+              <span class="setting-desc">
+                @{{ ghLocal.identity.login }}<template v-if="ghLocal.identity.email">
+                  · {{ ghLocal.identity.email }}</template
+                >
+              </span>
+            </div>
+            <button class="ghost-btn" type="button" @click="tauriApi.openExternal(ghLocal.identity!.htmlUrl)">
+              GitHub 主页
+            </button>
+          </div>
+
+          <!-- 授权中：码 + 复制 + 打开浏览器 + 取消 -->
+          <div v-if="ghLocalDevice" class="account-device">
+            <span>浏览器里输入验证码</span>
+            <b class="account-code">{{ ghLocalDevice.userCode }}</b>
+            <button
+              class="account-copy"
+              type="button"
+              title="复制验证码"
+              aria-label="复制验证码"
+              @click="copyText(ghLocalDevice.userCode, '验证码已复制')"
+            >
+              <Copy :size="13" :stroke-width="2" />
+            </button>
+            <button class="ghost-btn" type="button" @click="tauriApi.openExternal(ghLocalDevice.verificationUri)">
+              打开浏览器
+            </button>
+            <button class="ghost-btn" type="button" @click="cancelGhLocalLogin">取消</button>
+            <span class="dev-dir-warn">等待授权…</span>
+          </div>
+
+          <p
+            v-if="ghLocalNotice"
+            class="account-notice"
+            :class="ghLocalNotice.kind"
+            role="status"
+          >
+            {{ ghLocalNotice.text }}
+          </p>
+
+          <!-- 说清边界：GitHub 登录能给什么、不能给什么。宁可现在讲清，
+               也不要让用户登录成功后去逐个试出「原来这些还是用不了」。 -->
+          <p v-if="isTauri()" class="account-platform-note">
+            <b>GitHub 登录能得到</b>：你的 GitHub 身份，以及一个可用的 GitHub 凭据。<br />
+            <b>仍然需要 m-hub 服务器</b>：平台 AI 额度、申请扩展开发者、发布扩展、扩展市场。
+            这些要由服务器签发会话，服务器不在线时无法使用。
           </p>
 
           <template v-if="account && !account.loggedIn">

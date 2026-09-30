@@ -618,6 +618,36 @@ export interface GithubPollResult {
   message: string | null
 }
 
+/** 客户端直连 GitHub 的设备码登录：第一步结果（不经 m-hub 服务端） */
+export interface GithubLocalDeviceStart {
+  /** 仅用于后续轮询，不要展示给用户 */
+  deviceCode: string
+  userCode: string
+  verificationUri: string
+  /** 建议轮询间隔（秒），实现保证 ≥ 5 */
+  interval: number
+  expiresIn: number
+}
+
+/** 客户端直连 GitHub 的轮询结果 */
+export type GithubLocalPoll = { status: 'pending' } | { status: 'done' } | { status: 'failed'; message: string }
+
+export interface GithubLocalIdentity {
+  login: string
+  name: string
+  avatarUrl: string
+  email: string
+  htmlUrl: string
+}
+
+/** 本地 GitHub 登录态。只表示「这台机器上存着某个 GitHub 身份的凭据」。 */
+export interface GithubLocalStatus {
+  loggedIn: boolean
+  /** 没配 Client ID：界面据此显示「先去 GitHub 建一个 OAuth App」而不是「登录失败」 */
+  needsClientId: boolean
+  identity: GithubLocalIdentity | null
+}
+
 /** 邮箱验证码发送结果（服务端未配置发信时 ok=false + 说明） */
 export interface EmailSendResult {
   ok: boolean
@@ -1326,6 +1356,13 @@ export const tauriApi = {
   removeSkillRoot: (path: string) => invoke<SkillOverview>('remove_skill_root', { path }),
   // ---- 平台账号（登录 / 额度 / 开发者申请；服务端地址是内置常量，不可配置） ----
   accountStatus: () => invoke<AccountStatus>('account_status'),
+  // ---- 客户端直连 GitHub（不经过平台服务端；服务端不可用时这条路仍然通）----
+  githubStatus: () => invoke<GithubLocalStatus>('github_status'),
+  githubDeviceStart: () => invoke<GithubLocalDeviceStart>('github_device_start'),
+  githubDevicePoll: (deviceCode: string) =>
+    invoke<GithubLocalPoll>('github_device_poll', { deviceCode }),
+  githubLogout: () => invoke<GithubLocalStatus>('github_logout'),
+
   accountLoginGithubStart: () => invoke<GithubDeviceStart>('account_login_github_start'),
   accountLoginGithubPoll: (pollId: string) =>
     invoke<GithubPollResult>('account_login_github_poll', { pollId }),

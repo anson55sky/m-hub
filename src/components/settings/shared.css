@@ -721,6 +721,30 @@
   font-size: 0.75rem;
   color: var(--text-2);
 }
+/* GitHub 头像：已登录时的人味锚点 */
+.settings-view .account-avatar{
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 50%;
+  object-fit: cover;
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+}
+/* 能力边界说明：必须显眼但不能像错误 —— 它陈述的是事实，不是出错了 */
+.settings-view .account-platform-note{
+  margin: 2px 0 14px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm, 8px);
+  background: var(--bg-card-soft);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.settings-view .account-platform-note b{
+  color: var(--text-1);
+  font-weight: 600;
+}
 .settings-view .account-code{
   font-family: ui-monospace, Consolas, monospace;
   font-size: 0.95rem;

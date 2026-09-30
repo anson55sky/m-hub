@@ -9,6 +9,7 @@ use crate::models::{
     Todo, TodoOccurrence, TodoTag, TodoTagLink,
 };
 use crate::process;
+use crate::github_auth::GithubStatus;
 use crate::repo::{
     chat, clipboard, countdown, detached_sticky, note, resource, snippet, sticky, subcategory,
     tag, todo, todo_tag,
@@ -3472,6 +3473,29 @@ pub fn clipboard_delete(state: State<'_, DbState>, id: i64) -> Result<(), String
         }
     }
     clipboard::delete(&conn, id).map_err(err_str)
+}
+
+// ---------------- GitHub 登录（客户端直连，不经服务端）----------------
+
+#[tauri::command]
+pub fn github_status() -> GithubStatus {
+    // 状态要读钥匙串 + 访问一次 GitHub 确认凭据有效，给足时间
+    tauri::async_runtime::block_on(crate::github_auth::status())
+}
+
+#[tauri::command]
+pub async fn github_device_start() -> Result<crate::github_auth::GithubDeviceStart, String> {
+    crate::github_auth::device_start().await
+}
+
+#[tauri::command]
+pub async fn github_device_poll(device_code: String) -> Result<crate::github_auth::GithubPoll, String> {
+    crate::github_auth::device_poll(&device_code).await
+}
+
+#[tauri::command]
+pub fn github_logout() -> GithubStatus {
+    crate::github_auth::logout()
 }
 
 /// 浮层拖动：`begin` 记下按下位置并起轮询线程，`end` 收尾。
