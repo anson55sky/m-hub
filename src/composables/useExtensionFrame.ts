@@ -22,6 +22,15 @@ const ERROR_CODES = [
 const EXT_LOAD_TIMEOUT_MS = 8000
 
 /**
+ * 看门狗超时后自动重新导航的次数。
+ *
+ * 1 而不是 0：实测存在**会自愈**的协议层挂起（请求既不返回也不报错），直接判死
+ * 会留下一个没有任何自救入口的死格子 —— 详见 armWatchdog 的注释。
+ * 也不给更多：两次还不行基本就是扩展自身的问题，继续重试只是延长用户的等待。
+ */
+const EXT_LOAD_RETRIES = 1
+
+/**
  * 恢复可见时距上次隐藏超过该时长才重载 iframe（毫秒）。
  * 窗口长时间不可见（隐藏到托盘/最小化/完全遮挡）后，WebView2 会挂起或丢弃跨源
  * iframe（asset.localhost，独立渲染进程）的渲染状态，恢复前台后扩展区表现为空白；
@@ -113,6 +122,10 @@ export function useExtensionFrame(
   // 看门狗状态：扩展 iframe 是否已回传任意桥消息（桥脚本运行即算“已就绪”）
   let frameAlive = false
   let watchdogTimer: number | undefined
+  /** 看门狗超时后自动重新导航的次数上限（0 = 不重试，直接判白屏） */
+  let watchdogRetries = 0
+  /** 最近一次真正导航用的入口 URL，看门狗重试要重放它 */
+  let lastEntryUrl = ''
 
   // 后台久置恢复：记录隐藏时刻（初始化即隐藏，如 --autostart-hidden 静默驻留托盘的场景
   // 不会有 hidden 迁移事件，也纳入统计）
@@ -278,9 +291,57 @@ export function useExtensionFrame(
     void tauriApi.logClientError({ message: '扩展 iframe 加载失败', detail })
   }
 
+  /**
+   * 看门狗：入口 HTML 已返回，但 iframe 在超时内没有任何桥消息（= 桥脚本没跑起来）。
+   *
+   * ## 为什么要重试一次，而不是直接判白屏
+   *
+   * 实测到一种**会自己恢复**的挂起：iframe 发起 `mhub-ext://` 协议请求时，扩展反向
+   * 代理 / 协议处理器还没就位，这次请求**既不返回也不报错** —— 连 iframe 的 `error`
+   * 事件都不触发（onFrameError 没被调用就是证据）。于是一个本可自愈的加载被永久
+   * 判成白屏。
+   *
+   * 而界面上没有自救入口：空白态那颗「返回」只 `emit('close')`，**不会重新导航
+   * iframe**。所以用户看到的就是一个彻底死掉的格子，只能重启应用。
+   *
+   * 因此首次超时不判死：重新导航一次再等一个窗口。重试仍失败才认账。
+   * 代价是最坏情况多等 EXT_LOAD_TIMEOUT_MS，且期间显示「加载中」而不是假死。
+   */
+  function armWatchdog(generation: number) {
+    watchdogTimer = window.setTimeout(() => {
+      if (frameAlive || error.value) return
+      if (watchdogRetries < EXT_LOAD_RETRIES) {
+        watchdogRetries += 1
+        loading.value = true
+        const el = frameRef.value
+        if (!el || !lastEntryUrl) return
+        el.src = 'about:blank'
+        // 必须隔一拍再赋真实 URL：同一 tick 内连续赋值，about:blank 会被合并掉，
+        // 导航不会真正发生，等于白重试一次。
+        window.setTimeout(() => {
+          // 期间可能已发生新的 load()（切形态 / 权限变更），那时 lastEntryUrl 属于
+          // 上一代导航，重放它会把 iframe 打到过期的入口上。
+          if (disposed || generation !== loadGeneration || !frameRef.value) return
+          frameRef.value.src = lastEntryUrl
+          armWatchdog(generation)
+        }, 0)
+        return
+      }
+      const detail = `extId=${getExtId()} surface=${getSurface() ?? ''} url=${frameRef.value?.src ?? ''}`
+      error.value = '扩展加载失败（页面空白），请查看日志定位原因'
+      loading.value = false // 超时也要撤掉加载态，别让界面永远停在「加载中」
+      onError?.(error.value)
+      void tauriApi.logClientError({ message: '扩展 iframe 白屏', detail })
+    }, EXT_LOAD_TIMEOUT_MS)
+  }
+
   async function load() {
     const generation = ++loadGeneration
     expectedOrigin = ''
+    // 重试计数按「一次 load 尝试」重置：形态切换、权限变更引发的重载都该从零开始，
+    // 否则早先那次的失败会把后续重载直接判死。
+    watchdogRetries = 0
+    lastEntryUrl = ''
     unregisterExtensionFrame(frameRef.value)
     // 先销毁旧页面，权限撤销后不得让隐藏 iframe 继续按旧 CSP 联网。
     if (frameRef.value) frameRef.value.src = 'about:blank'
@@ -309,17 +370,9 @@ export function useExtensionFrame(
           ? `${entryUrl}?mhub-variant=${encodeURIComponent(variant)}`
           : entryUrl
         frameRef.value.src = url
+        lastEntryUrl = url
         registerExtensionFrame(frameRef.value, getExtId(), expectedOrigin)
-        // 看门狗：入口 HTML 已返回但 iframe 在超时内没有任何桥消息（桥脚本未运行）
-        // → 判定白屏，落日志并给出友好提示，而不是永远停在空白页
-        watchdogTimer = window.setTimeout(() => {
-          if (frameAlive || error.value) return
-          const detail = `extId=${getExtId()} surface=${getSurface() ?? ''} url=${frameRef.value?.src ?? ''}`
-          error.value = '扩展加载失败（页面空白），请查看日志定位原因'
-          loading.value = false // 超时也要撤掉加载态，别让界面永远停在「加载中」
-          onError?.(error.value)
-          void tauriApi.logClientError({ message: '扩展 iframe 白屏', detail })
-        }, EXT_LOAD_TIMEOUT_MS)
+        armWatchdog(generation)
       }
     } catch (e) {
       if (disposed || generation !== loadGeneration) return

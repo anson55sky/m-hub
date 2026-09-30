@@ -189,11 +189,33 @@ body { display: flex; flex-direction: column; gap: 8px; padding: 2px; }"#
       需要拆文件时，把引用写成相对**当前目录**的 `./xxx`，并留意这一点。
     -->
     <style>
+      /*
+       * ⚠️ 宿主注入的主题变量是 `--mhub-*` 前缀，不是应用界面用的 `--text-1`
+       * 之类 —— 后者在扩展 iframe 里**不存在**。
+       * 骨架第一版把 `color: #1f2430` 写死（那是浅色主题的字），于是深色界面下
+       * 整个入口页几乎看不见。这个坑我自己踩过一次，所以写进骨架并用测试守住。
+       *
+       * 双保险：优先用 --mhub-*；万一注入失败，退到按 data-mhub-theme 选的
+       * 本地默认值（这个属性宿主一定会设）。
+       */
+      :root {{
+        --c-text: #1f2430;
+        --c-text-3: #6b7280;
+        --c-surface: rgba(0, 0, 0, 0.05);
+        --c-border: rgba(0, 0, 0, 0.14);
+      }}
+      :root[data-mhub-theme='dark'] {{
+        --c-text: #e9e7f2;
+        --c-text-3: #9b96b0;
+        --c-surface: rgba(255, 255, 255, 0.07);
+        --c-border: rgba(255, 255, 255, 0.15);
+      }}
+
       *, *::before, *::after {{ box-sizing: border-box; }}
       html, body {{ margin: 0; }}
       body {{
         font: 13px/1.6 system-ui, -apple-system, "PingFang SC", sans-serif;
-        color: #1f2430;
+        color: var(--mhub-text-1, var(--c-text));
         background: transparent;
         {layout}
       }}
@@ -204,18 +226,19 @@ body { display: flex; flex-direction: column; gap: 8px; padding: 2px; }"#
         {container_style}
       }}
       h1 {{ font-size: {title_size}; margin: 0; font-weight: 600; }}
-      .id {{ font-size: 11px; opacity: .55; font-family: ui-monospace, Menlo, monospace; }}
+      .id {{ font-size: 11px; color: var(--mhub-text-3, var(--c-text-3)); font-family: ui-monospace, Menlo, monospace; }}
       button {{
         align-self: flex-start;
         padding: 4px 10px;
-        border: 1px solid rgba(0, 0, 0, .15);
+        border: 1px solid var(--mhub-border, var(--c-border));
         border-radius: 6px;
-        background: transparent;
+        background: var(--mhub-surface, var(--c-surface));
         color: inherit;
         font: inherit;
         cursor: pointer;
       }}
       button:active {{ transform: translateY(1px); }}
+      button:focus-visible {{ outline: 2px solid var(--mhub-accent, currentColor); outline-offset: 1px; }}
       code {{ font-family: ui-monospace, Menlo, monospace; font-size: 11px; }}
     </style>
   </head>
@@ -314,6 +337,34 @@ pub fn readme(id: &str, name: &str, kind: &str, dir: &str) -> String {
 | `openIn` | 允许的打开方式：`view`（在主区打开）/ `window`（独立窗口） |
 | `entry` | 形态 → 入口文件的相对路径。键要与 `surfaces` 里的形态对应 |
 | `permissions` | 要申请的能力，**按需申请**，不给就不给。本骨架是空的 |
+
+## 主题变量（最容易踩的坑）
+
+宿主往入口页注入的 CSS 变量是 **`--mhub-` 前缀**，随应用主题一起变：
+
+| 变量 | 用途 |
+| --- | --- |
+| `--mhub-text-1` / `--mhub-text-2` / `--mhub-text-3` | 正文 / 次要 / 弱化文字 |
+| `--mhub-bg-page` / `--mhub-bg-card` / `--mhub-surface` | 页面底 / 卡片底 / 输入框一类的小面 |
+| `--mhub-border` | 描边 |
+| `--mhub-brand` / `--mhub-accent` / `--mhub-brand-soft` | 主色 / 强调色 / 浅主色 |
+| `--mhub-red` / `--mhub-green` / `--mhub-yellow` / `--mhub-blue` / `--mhub-orange` | 语义色 |
+| `--mhub-radius-lg` | 大圆角 |
+
+⚠️ **应用界面里那些名字在这里不存在** —— `--text-1`、`--bg-card-solid`、
+`--border-soft` 之类的在扩展页里查不到，写上去 `var()` 会**静默**落到你写的兜底值，
+不报错。深色主题下如果兜底值是浅色主题的深色字，结果就是一片看不清的字。
+
+所以写法是 `var(--mhub-text-1, #e9e7f2)`，并让兜底值跟着主题走：
+
+```css
+:root            {{ --fallback-text: #1f2430; }}
+:root[data-mhub-theme='dark'] {{ --fallback-text: #e9e7f2; }}
+body             {{ color: var(--mhub-text-1, var(--fallback-text)); }}
+```
+
+`data-mhub-theme`（`light` / `dark`）、`data-mhub-wallpaper` 这几个属性宿主一定会设，
+可以用它们做条件样式。
 
 ## 桥 API
 
@@ -604,6 +655,47 @@ mod tests {
     /// `document.createElement('script')` + `.src = '../assets/app.js'`
     /// **动态**挂脚本 —— 文本里根本没有 `<script src=` 这几个字，纯标签扫描
     /// 完全看不见（这是变异测试实测出来的，不是想出来的）。
+    /// 入口页引用的 CSS 变量必须是宿主**真的会注入**的那些。
+    ///
+    /// 宿主注入的是 `--mhub-*` 前缀（见 `extension.rs` 里那段 map：
+    /// `--mhub-text-1` / `--mhub-surface` / `--mhub-border` / `--mhub-brand` …）。
+    /// 应用界面自己用的那些 `--text-1` / `--bg-card-solid` / `--border-soft`
+    /// 在扩展 iframe 里**根本不存在**，写上去只会静默落到 var() 的兜底值。
+    ///
+    /// 代价实测过一次：骨架把 `color: #1f2430` 写死（浅色主题的字），
+    /// 深色界面下整个入口页几乎看不见。所以骨架自己也必须只用 `--mhub-*`，
+    /// 兜底则走 `[data-mhub-theme]` 选的一组本地默认值（属性宿主一定会设）。
+    #[test]
+    fn entry_page_only_references_tokens_the_host_injects() {
+        for kind in KINDS {
+            let html = index_html("local.x", "示例", kind);
+            // 收集所有 var(--xxx 的引用。
+            // 用 split 取每段开头那串合法标识符，不做下标运算 ——
+            // 手写偏移量算错过一次（"var(--" 是 6 字符，按 4 跳会取到 `--mhub-`），
+            // 而一个错的下标只会让守卫**默默放过**真正的问题。
+            let mut refs: Vec<String> = Vec::new();
+            for chunk in html.split("var(--").skip(1) {
+                let name: String = chunk
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+                    .collect();
+                if !name.is_empty() {
+                    refs.push(name);
+                }
+            }
+            for r in &refs {
+                assert!(
+                    r.starts_with("mhub-") || r.starts_with("c-"),
+                    "入口页引用了宿主不会注入的变量 `--{r}`。\
+                     扩展 iframe 里只有 `--mhub-*`（宿主注入）与本文件自己定义的 `--c-*`；\
+                     应用界面那些 `--text-1` / `--bg-card-solid` 在这里不存在，\
+                     var() 会静默落到兜底值 —— 深色主题下就成了一片看不清的字。"
+                );
+            }
+            assert!(!refs.is_empty(), "入口页一个变量都没用，解析可能失效");
+        }
+    }
+
     #[test]
     fn entry_page_loads_no_external_resources() {
         // (说明, 关键片段) —— 覆盖标签与动态两种写法
