@@ -148,10 +148,23 @@ static MAIN_MINIMIZED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 #[cfg(target_os = "macos")]
 static CLIPBOARD_OVERLAY_WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 「已见过一次松手」标记。浮层每次唤起都要复位 —— 否则上一轮留下的 true 会让
+/// **唤起用的那一次按压**直接被当成「点了浮层之外」，浮层点开即消失。
+#[cfg(target_os = "macos")]
+static CLIPBOARD_PRESS_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 浮层唤起时复位「已 armed」（见上）。
+#[cfg(target_os = "macos")]
+pub fn arm_clipboard_overlay() {
+    use std::sync::atomic::Ordering;
+    CLIPBOARD_PRESS_ARMED.store(false, Ordering::Relaxed);
+    CLIPBOARD_OVERLAY_WATCH.store(true, Ordering::Relaxed);
+}
+
 /// 剪贴板浮层显示时登记监视（macOS；其余平台 no-op）。
 pub fn track_clipboard_overlay() {
     #[cfg(target_os = "macos")]
-    CLIPBOARD_OVERLAY_WATCH.store(true, std::sync::atomic::Ordering::Relaxed);
+    arm_clipboard_overlay();
 }
 
 /// 剪贴板浮层隐藏时注销监视（macOS；其余平台 no-op）。
@@ -171,6 +184,7 @@ fn tick_clipboard_overlay(app: &AppHandle) {
     if !CLIPBOARD_OVERLAY_WATCH.load(Ordering::Relaxed) {
         return;
     }
+    let press_armed = &CLIPBOARD_PRESS_ARMED;
     let Some(win) = app.get_webview_window(crate::clipboard::CLIPBOARD_WINDOW_LABEL) else {
         return;
     };
@@ -178,6 +192,8 @@ fn tick_clipboard_overlay(app: &AppHandle) {
         return;
     }
     if !lmb_down() {
+        // 看到一次「松开」才 armed：这样「唤起浮层的那一下」本身不算点击外部
+        press_armed.store(true, Ordering::Relaxed);
         return;
     }
     let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else {
@@ -191,10 +207,52 @@ fn tick_clipboard_overlay(app: &AppHandle) {
         && px <= pos.x + size.width as i32 + MARGIN
         && py >= pos.y - MARGIN
         && py <= pos.y + size.height as i32 + MARGIN;
-    if !inside {
-        log::debug!("[剪贴板浮层] 点击落在浮层之外（{} {}）→ 收起", px, py);
+    let dragging = crate::clipboard::drag_in_progress();
+    let armed = press_armed.load(Ordering::Relaxed);
+    let why = dismiss_reason(dragging, armed, inside);
+    if why.is_some() {
+        // INFO 而不是 debug：日志级别就是 Info，debug 这行**从来没被打印过** ——
+        // 而这是「浮层为什么自己关掉了」的唯一线索，恰恰是最需要留痕的一刻。
+        // 而且这是用户主动收起，不是高频事件，不会吵。
+        log::info!(
+            "[剪贴板浮层] 收起：{}（光标 {} {}，浮层 {}x{} @ {} {}，拖动中={} 已 armed={}）",
+            why.unwrap(),
+            px,
+            py,
+            size.width as i32,
+            size.height as i32,
+            pos.x,
+            pos.y,
+            dragging,
+            armed,
+        );
         crate::clipboard::hide_overlay(app);
     }
+}
+
+/// 「点浮层之外即收起」的判定。**纯函数**：这段是本模块唯一会算错的地方，
+/// 而它每 100ms 在后台线程跑一次、出错就是「浮层莫名消失」这种没法复现的现象。
+///
+/// 三个条件缺一不可，缺哪个都会让浮层误关：
+///
+/// - `dragging`：正在拖窗口。此时光标离开浮层矩形是**正常现象**（浮层被夹在工作区
+///   边缘，光标还在原处继续往上/往下走），当成「点了外面」就会在拖到一半时消失 ——
+///   这正是用户报的「不能拖动上来」。
+/// - `armed`：唤起浮层的那一下**不算**点击外部。浮层位置是「夹进工作区」的，
+///   光标在屏幕边缘时浮层会被推离光标，于是**唤起用的那一次按压**本身就在浮层之外，
+///   100ms 后必然判定为「点了外面」而收起。用户看到的就是「一点就没」。
+/// - `inside`：光标在浮层矩形（含 5pt 余量）之内。
+fn dismiss_reason(dragging: bool, armed: bool, inside: bool) -> Option<&'static str> {
+    if dragging {
+        return None;
+    }
+    if !armed {
+        return None;
+    }
+    if !inside {
+        return Some("点击落在浮层之外");
+    }
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1296,6 +1354,7 @@ pub async fn floating_ball_reapply(app: AppHandle, viewport_w: f64) {
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
+
     use super::*;
 
     /// 1080p 工作区（左上角为原点，物理 px 口径下 scale=1）
@@ -1379,4 +1438,44 @@ mod tests {
         assert_eq!(cx - half, -half);
         assert_eq!((cx - half) + half, 0);
     }
+}
+
+// 本文件的 `mod tests` 整体 gate 在 `target_os = "windows"`（那些是 SetWindowsHookEx
+// 的几何测试），所以 macOS 上它整个被编译掉。macOS 的判定必须另起一个模块 ——
+// 塞进那个里面的话测试会「0 passed」而看上去一切正常。
+#[cfg(all(test, target_os = "macos"))]
+mod tests_macos {
+    use super::*;
+
+
+/// 「点浮层之外即收起」的判定表
+///
+/// 这三条各自对应一个**已发生的**误收起：唤起那一下被当成点击外部、
+/// 往上一拖就消失、光标在边缘时浮层被夹走导致判定落空。
+#[cfg(target_os = "macos")]
+mod overlay_dismiss {
+    use super::dismiss_reason;
+
+    #[test]
+    fn never_dismisses_while_dragging() {
+        // 拖到工作区上沿时浮层被夹住、光标继续往上走 → 光标必然在浮层之外
+        assert!(dismiss_reason(true, true, false).is_none());
+    }
+
+    #[test]
+    fn never_dismisses_before_armed() {
+        // 光标在浮层之外、按钮按下、但从未见过一次松手
+        assert!(dismiss_reason(false, false, false).is_none());
+    }
+
+    #[test]
+    fn dismisses_only_when_armed_and_outside() {
+        assert!(dismiss_reason(false, true, false).is_some());
+    }
+
+    #[test]
+    fn keeps_when_armed_but_inside() {
+        assert!(dismiss_reason(false, true, true).is_none());
+    }
+}
 }

@@ -163,6 +163,24 @@ struct DragAnchor {
 #[cfg(target_os = "macos")]
 static DRAG_ANCHOR: Mutex<Option<DragAnchor>> = Mutex::new(None);
 
+/// 「首帧已记日志」标记：拖动过程中每帧都打日志会淹掉日志文件，
+/// 但**第一次**必须留痕 —— 「拖动到底有没有被触发过」正是要查的东西。
+#[cfg(target_os = "macos")]
+static LOGGED_FIRST_APPLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 当前是否正在拖动浮层窗口。
+///
+/// 给 `floating_ball::tick_clipboard_overlay` 用：拖动时光标离开浮层矩形是**正常现象**
+/// （浮层被夹在工作区边缘，光标还在继续往那个方向走），若不告诉它，
+/// 它会在拖到一半时判定「点了浮层之外」把浮层收掉 —— 表现就是「往上一拖就消失」。
+#[cfg(target_os = "macos")]
+pub fn drag_in_progress() -> bool {
+    DRAG_ANCHOR
+        .lock()
+        .map(|s| s.is_some())
+        .unwrap_or(false)
+}
+
 /// 拖动起点：记下窗口当前左上角与该显示器 scale。
 #[cfg(target_os = "macos")]
 pub fn drag_begin(win: &tauri::Webview) -> Result<(), String> {
@@ -191,6 +209,12 @@ pub fn drag_begin(win: &tauri::Webview) -> Result<(), String> {
         .max(0.01);
     let mut slot = DRAG_ANCHOR.lock().map_err(|e| e.to_string())?;
     *slot = Some(DragAnchor { x: pos.x, y: pos.y, scale });
+    log::info!(
+        "[剪贴板浮层] 拖动开始：锚点 ({}, {}) scale {}",
+        pos.x,
+        pos.y,
+        scale
+    );
     Ok(())
 }
 
@@ -207,6 +231,15 @@ pub fn drag_apply(win: &tauri::Webview, dx: f64, dy: f64) -> Result<(), String> 
         }
     };
     let (nx, ny) = drag_target(a, dx, dy, CLIPBOARD_WIDTH * a.scale, CLIPBOARD_HEIGHT * a.scale, work_area_physical(win));
+    if !LOGGED_FIRST_APPLY.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::info!(
+            "[剪贴板浮层] 拖动首帧：位移 ({}, {}) → 目标 ({}, {})",
+            dx,
+            dy,
+            nx,
+            ny
+        );
+    }
     win.window()
         .set_position(tauri::PhysicalPosition::new(nx, ny))
         .map_err(|e| format!("移动浮层失败：{e}"))?;
@@ -215,6 +248,7 @@ pub fn drag_apply(win: &tauri::Webview, dx: f64, dy: f64) -> Result<(), String> 
 
 #[cfg(target_os = "macos")]
 pub fn drag_end() {
+    LOGGED_FIRST_APPLY.store(false, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut slot) = DRAG_ANCHOR.lock() {
         *slot = None;
     }
