@@ -195,7 +195,7 @@ pub async fn refresh_market_registry() -> Result<MarketStatus, String> {
     let sig_url = format!("{endpoint}.sig");
     log::info!("刷新市场清单: {endpoint}");
 
-    // 市场源是平台服务端（国内）：强制直连，别被用户本地代理带沟里（见 crate::net）
+    // 市场源是平台服务端；代理策略见 crate::net（该模块已不无条件直连）
     let client = crate::net::direct()
         .timeout(std::time::Duration::from_secs(20))
         .build()

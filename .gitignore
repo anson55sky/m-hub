@@ -75,3 +75,4 @@ market_private*
 server/node_modules/
 server/.wrangler/          # wrangler 本地状态（含本地 D1 副本）
 server/manifests/*.xhpack # 打包产物：由 seed-manifests.mjs 生成，不入库
+server/.deployed-url

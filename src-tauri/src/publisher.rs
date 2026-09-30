@@ -152,7 +152,7 @@ async fn upload(
         form = form.part("screenshots[]", part);
     }
 
-    // 上传可能较慢（几 MB 包），给足超时；目标是平台服务端（国内）→ 强制直连（见 crate::net）
+    // 上传可能较慢（几 MB 包），给足超时；代理策略见 crate::net
     let client = crate::net::direct()
         .timeout(std::time::Duration::from_secs(180))
         .build()

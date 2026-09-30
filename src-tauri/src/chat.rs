@@ -122,7 +122,7 @@ where
         format!("模型「{}」未配置 API Key（平台模型需先登录账号）", model.name)
     })?;
 
-    // 平台模型走内置服务端（国内）→ 强制直连；用户自配的第三方服务保持跟随系统代理（见 crate::net）
+    // 平台模型走内置服务端；用户自配的第三方服务保持跟随系统代理。两者都见 crate::net
     let client = if is_platform {
         crate::net::direct()
     } else {

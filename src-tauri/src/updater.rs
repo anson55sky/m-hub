@@ -383,7 +383,8 @@ pub async fn check_for_update(
 ) -> Result<UpdateInfo, String> {
     let manual = manual.unwrap_or(false);
     let current = current_version(&app);
-    // 更新清单来自平台服务端（国内）：强制直连，别被用户本地代理带沟里（见 crate::net）
+    // 更新清单来自平台服务端。⚠️ 它的地址与「是否直连」是两件事：
+    // net.rs 已改为读系统代理并按需装配（平台服务端已迁出国内，见该模块头）
     let client = crate::net::direct()
         .timeout(Duration::from_secs(20))
         .build()
@@ -533,7 +534,7 @@ pub async fn download_update(
     let current = current_version(&app);
     // 不设总超时：慢链路（~30KB/s）下载 8.7MB 需数分钟，总超时必然误杀慢而活跃的下载；
     // 改为连接超时 + 空闲读超时（30s 收不到新数据才断），下面的流式读取同样吃 read_timeout
-    // 安装包由我们自己的分发（COS 国内）提供：同样强制直连（见 crate::net）
+    // 安装包同源，代理策略与清单一致（见 crate::net）
     let client = crate::net::direct()
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(30))
