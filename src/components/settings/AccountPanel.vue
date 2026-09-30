@@ -51,6 +51,30 @@ const ghStarting = ref(false)
 const loginNotice = ref<{ kind: 'busy' | 'warn' | 'error'; text: string; raw: string } | null>(null)
 
 /**
+ * 平台服务（m-hub 服务器）确认不通。
+ *
+ * 只在**真的试过一次并失败**之后才置位 —— 不靠猜、也不靠启动时探测：
+ * 未登录时 `accountStatus` 根本不联网（直接返回 signed_out），拿它探测不出通不通。
+ *
+ * 置位后的行为：平台那组按钮置灰 + 一条**中性**说明。
+ * 之前是让用户反复点、每次吃一条红字，而红字说的是「发起登录失败」——
+ * 于是「GitHub 已经登录成功了」和「登录失败」同屏出现，用户无从判断哪个是哪个
+ * （2026-09-30 用户实际困惑过：截图里两条登录都叫「用 GitHub 登录」，
+ * 成功的那条报错的那条各占一行）。
+ */
+const platformDown = ref(false)
+/** 传输层错误码 = 「服务不可用」，而不是「你密码填错了」这类可重试失败 */
+function isPlatformDown(e: unknown): boolean {
+  const raw = String(e)
+  return (
+    raw.startsWith('SERVER_ADDRESS_INVALID') ||
+    raw.startsWith('SERVER_TIMEOUT') ||
+    raw.startsWith('NETWORK_ERROR') ||
+    raw.startsWith('GITHUB_UNAVAILABLE')
+  )
+}
+
+/**
  * 后端错误是 `CODE: 说明` 形态（account.rs::api_error）：界面只展示说明部分，编码留在 title 里备查。
  * 少数几个码额外补一句「该找谁处理」——尤其 GITHUB_UNAVAILABLE 是**服务端出网问题**，
  * 不加说明用户只会以为是自己网络的问题，反复重试。
@@ -421,8 +445,17 @@ async function startGithubLogin() {
   } catch (e) {
     // 服务端代调 GitHub 失败时给的是可读文案（如「GITHUB_UNAVAILABLE: GitHub 暂时不可用，请稍后再试」）
     const { text, raw } = authErrorText(e)
-    loginNotice.value = { kind: 'error', text: `发起登录失败：${text}`, raw }
-    showToast(`发起登录失败：${text}`)
+    if (isPlatformDown(e)) {
+      // 平台服务不通：不要再摆一条红字「发起登录失败」——
+      // 同一个页面上方「GitHub 登录已成功」是绿的，下面一条红的「登录失败」
+      // 只会让人以为刚才白登了。改成置位 + 中性说明 + 按钮置灰。
+      platformDown.value = true
+      loginNotice.value = null
+      showToast('平台服务当前不可用')
+    } else {
+      loginNotice.value = { kind: 'error', text: `发起登录失败：${text}`, raw }
+      showToast(`发起登录失败：${text}`)
+    }
     // 落本地日志（含耗时）：账号链路横跨客户端 / 服务端 / GitHub 三方，
     // 没有这条记录时「服务端返回 500」在客户端侧不留任何痕迹，只能靠服务端日志——
     // 那台机器不一定够得着。耗时还能区分「超时」与「立刻报错」两种完全不同的故障。
@@ -466,7 +499,14 @@ async function sendEmailCode() {
     startEmailCooldown(60)
   } catch (e) {
     const { text, raw } = emailErrorText(e)
-    emailNotice.value = { kind: 'error', text, raw }
+    // 与平台 GitHub 那条同口径：传输层失败 = 服务不通，置位并撤掉红字，
+    // 别让邮箱区也摆一条「发送失败」，与上方绿色的「GitHub 登录已成功」打架
+    if (isPlatformDown(e)) {
+      platformDown.value = true
+      emailNotice.value = null
+    } else {
+      emailNotice.value = { kind: 'error', text, raw }
+    }
     showToast(`发送失败：${text}`)
     // 与 GitHub 链路同款留痕：发信失败横跨客户端 / 服务端 / 邮件服务商三方，客户端不留痕就无从排查
     void reportClientError('邮箱验证码发送失败', { error: raw, elapsedMs: Date.now() - startedAt })
@@ -493,7 +533,14 @@ async function verifyEmailCode() {
     showToast('登录成功')
   } catch (e) {
     const { text, raw } = emailErrorText(e)
-    emailNotice.value = { kind: 'error', text, raw }
+    // 与平台 GitHub 那条同口径：传输层失败 = 服务不通，置位并撤掉红字，
+    // 别让邮箱区也摆一条「发送失败」，与上方绿色的「GitHub 登录已成功」打架
+    if (isPlatformDown(e)) {
+      platformDown.value = true
+      emailNotice.value = null
+    } else {
+      emailNotice.value = { kind: 'error', text, raw }
+    }
     showToast(`登录失败：${text}`)
   } finally {
     accountBusy.value = false
@@ -676,6 +723,12 @@ onBeforeUnmount(() => {
                  上面拿到的是 GitHub 身份，这里拿的是平台会话（额度/开发者/发布）。
                  两者都叫「用 GitHub 登录」很容易被当成同一个功能。 -->
             <h4 class="account-subtitle">平台登录（需要 m-hub 服务器）</h4>
+            <!-- 试过一次确认不通就置灰并说清原因：让用户反复点、每次吃一条红字，
+                 而同屏上方「GitHub 登录已成功」是绿的，两条并存只会让人以为白登了。 -->
+            <p v-if="platformDown" class="account-notice warn">
+              平台服务当前不可用，平台登录已停用（不影响上面的 GitHub 登录）。平台能力包括
+              AI 额度、申请扩展开发者、发布扩展、扩展市场 —— 这些都要服务器签发会话。
+            </p>
             <div class="setting-row">
               <div class="setting-info">
                 <span class="setting-name">用 GitHub 登录</span>
@@ -684,7 +737,8 @@ onBeforeUnmount(() => {
               <button
                 class="ghost-btn data-btn"
                 type="button"
-                :disabled="accountBusy || !!ghDevice"
+                :disabled="accountBusy || !!ghDevice || platformDown"
+                :title="platformDown ? '平台服务当前不可用' : ''"
                 @click="startGithubLogin"
               >
                 {{ ghStarting ? '正在发起…' : ghDevice ? '等待授权…' : '开始登录' }}
@@ -743,7 +797,8 @@ onBeforeUnmount(() => {
                 <button
                   class="ghost-btn data-btn"
                   type="button"
-                  :disabled="accountBusy || emailCooldown > 0"
+                  :disabled="accountBusy || emailCooldown > 0 || platformDown"
+                  :title="platformDown ? '平台服务当前不可用' : ''"
                   @click="sendEmailCode"
                 >
                   {{ emailCooldown > 0 ? `${emailCooldown}s 后可重发` : emailSending ? '正在发送…' : '发验证码' }}
