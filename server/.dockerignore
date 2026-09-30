@@ -1,0 +1,8 @@
+node_modules
+data
+*.log
+.git
+.wrangler
+# ⚠️ 私钥绝不入镜像（即使 .gitignore 已挡，双保险）
+*.pem
+market_private*

@@ -17,8 +17,8 @@
 // `AccountPanel.vue` 里把该分区摘掉（约定 53 提醒过 skip 标记的字面文本
 // 不能出现在附近注释里，否则 `gen-settings-index.mjs` 会报「标记不成对」挡住构建）。
 
-import { fail, json, readJson, type Ctx } from '../lib/http'
-import { randomId } from '../lib/ids'
+import { fail, json, readJson, type Ctx } from '../lib/http.ts'
+import { randomId } from '../lib/ids.ts'
 
 /** 验证码。6 位数字，与客户端输入框的 maxlength 对齐。 */
 const CODE_TTL_MS = 10 * 60_000

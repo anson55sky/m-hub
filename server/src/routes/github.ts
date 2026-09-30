@@ -20,8 +20,8 @@
 // 这是骨架的已知取舍，不是 bug —— 单次登录窗口只有几分钟，回收概率低到可接受；
 // 但真要提高成功率，得把 `poll_id → device_code` 落到 D1 或 KV。见 README「已知取舍」。
 
-import { fail, json, readJson, type Ctx, type Env } from '../lib/http'
-import { randomId } from '../lib/ids'
+import { fail, json, readJson, type Ctx, type Env } from '../lib/http.ts'
+import { randomId } from '../lib/ids.ts'
 
 const GH_OAUTH = 'https://github.com'
 const GH_API = 'https://api.github.com'

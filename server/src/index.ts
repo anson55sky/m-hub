@@ -16,13 +16,13 @@
 // 而是构建期由 `public/` 目录决定的。`check-api-spec-conformance.mjs`
 // 会断言 `public/` 下确实存在这四个文件，防止「以为部署了其实没有」。
 
-import { Router, fail, type Ctx, type Env } from './lib/http'
-import { OPENAI_COMPAT } from './lib/paths'
-import { devicePoll, deviceStart } from './routes/github'
-import { deviceRevoke, deviceTokens, me, redeem } from './routes/me'
-import { chatCompletions, models } from './routes/ai'
-import { send, verify } from './routes/email'
-import { apply, applyStatus, mySubmissions, submissionDetail, submit, withdraw } from './routes/submissions'
+import { Router, fail, type Ctx, type Env } from './lib/http.ts'
+import { OPENAI_COMPAT } from './lib/paths.ts'
+import { devicePoll, deviceStart } from './routes/github.ts'
+import { deviceRevoke, deviceTokens, me, redeem } from './routes/me.ts'
+import { chatCompletions, models } from './routes/ai.ts'
+import { send, verify } from './routes/email.ts'
+import { apply, applyStatus, mySubmissions, submissionDetail, submit, withdraw } from './routes/submissions.ts'
 
 export type { Env }
 

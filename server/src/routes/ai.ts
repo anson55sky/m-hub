@@ -19,8 +19,8 @@ import {
   json,
   unauthorized,
   type Ctx,
-} from '../lib/http'
-import { OPENAI_COMPAT } from '../lib/paths'
+} from '../lib/http.ts'
+import { OPENAI_COMPAT } from '../lib/paths.ts'
 
 /** 平台侧真模型的上游地址。做成 secret，客户端永远看不到。 */
 const UPSTREAM_BASE = 'https://api.openai.com'

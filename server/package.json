@@ -16,12 +16,20 @@
     "db:init:local": "wrangler d1 execute m-hub --file=./schema.sql --local",
     "db:studio": "wrangler d1 studio m-hub",
     "seed:manifests": "node scripts/seed-manifests.mjs",
-    "status": "node scripts/onboard-status.mjs"
+    "status": "node scripts/onboard-status.mjs",
+    "start": "node --experimental-strip-types --no-warnings=ExperimentalWarning src/node.ts",
+    "dev:node": "node --experimental-strip-types --no-warnings=ExperimentalWarning --watch src/node.ts",
+    "check:strip": "node scripts/check-strip-only-safe.mjs",
+    "check": "npm run check:spec && npm run check:strip && npm run typecheck && npm test"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250109.0",
     "@types/node": "^26.6.3",
     "typescript": "^5.7.2",
     "wrangler": "^3.90.0"
+  },
+  "main": "src/node.ts",
+  "engines": {
+    "node": ">=22.5"
   }
 }

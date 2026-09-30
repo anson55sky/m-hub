@@ -17,7 +17,7 @@ import {
   unauthorized,
   type Ctx,
   type User,
-} from '../lib/http'
+} from '../lib/http.ts'
 
 /** 未走完流程的提交状态。必须与客户端可撤回白名单一致。 */
 const OPEN_STATUSES = ['uploaded', 'pending_review', 'gate_failed'] as const

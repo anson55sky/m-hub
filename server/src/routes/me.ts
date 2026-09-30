@@ -12,7 +12,7 @@ import {
   readJson,
   unauthorized,
   type Ctx,
-} from '../lib/http'
+} from '../lib/http.ts'
 
 /** GET /me —— 注意是**根路径**，不是 /api/v1/me（约定 52 记了这个坑）。 */
 export async function me(ctx: Ctx) {
