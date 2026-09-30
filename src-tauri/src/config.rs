@@ -471,22 +471,50 @@ fn default_note_editor_mode() -> String {
 /// 并重新部署**：清单里的 `downloadUrl` 是**签名前写死的字节**，忘了重签会出现
 /// 「清单验签通过（它确实被正确签过）但包指向另一个部署」的跨部署混用。
 /// 守卫 `server/scripts/check-manifest-urls.mjs` 的主机名断言会拦下这种不一致。
-pub const DEFAULT_SERVER_URL: &str = "https://m-hub-server.pages.dev";
+///
+/// ## ⚠️⚠️ 这里曾经被我改成 Pages，直接导致平台登录全挂（2026-09-30 修）
+///
+/// 症状：账号页「发起登录失败：服务端返回 **405**」。
+/// 根因：**本常量同时管两类用途**，而我把需要后端进程的那一半也指到了静态托管上：
+/// · 需要服务端进程：平台登录 / 平台 AI 额度 / 申请开发者 / 发布扩展（要 POST + 会话 token）
+/// · 只需静态文件：市场清单 / 升级清单（公开 GET）
+/// `POST /api/v1/auth/github/device/start` 打到 Pages → **405**（它把请求当成
+/// 「对某个静态资源的非 GET 方法」）。
+///
+/// 教训正是本函数上方那句「**别只改一半**」—— 而那半正是我改的。
+/// 地址**必须拆成两个常量**（`DEFAULT_SERVER_URL` 走 API，
+/// `DEFAULT_ASSET_BASE_URL` 走静态），详见下面 `DEFAULT_ASSET_BASE_URL`。
+///
+/// 判据（下次换地址时先问这个）：**这个请求需要服务端进程吗？**
+/// 需要 → API 端点；不需要 → 静态端点。清单地址是 GET 且带签名，可以静态托管；
+/// 登录要 POST、还要服务端签发会话 token，静态托管做不到。
+pub const DEFAULT_SERVER_URL: &str = "https://m-hub-server.pocketbay.app";
 
-/// 市场清单接口路径（服务端代理，客户端不再知道 COS 在哪里）。
+/// **静态资源托管处**（市场清单 / 升级清单 / 扩展包 / 安装包），v0.7.3 起为 Cloudflare Pages。
+///
+/// 与 `DEFAULT_SERVER_URL` **必须分开**，理由见上面那个 ⚠️⚠️ 段：把 API 地址
+/// 换成静态托管会让平台登录全挂（405），反过来把清单留在有休眠的服务端上
+/// 则会偶发「两次独立请求一次成功一次失败 → 假验签失败」。
+///
+/// 两者路径**恰好同形**（`/api/v1/...`），所以静态托管方必须原样保留目录层级 ——
+/// Pages 把目录内容映射到站点根，`server/public/api/v1/market/registry`
+/// 正好对上客户端请求的路径。这也是为什么 `public/` 里不能有 `index.html`。
+pub const DEFAULT_ASSET_BASE_URL: &str = "https://m-hub-server.pages.dev";
+
+/// 市场清单接口路径（静态托管，`server/public/` 下同名目录；`.sig` 为同级 `{url}.sig`）。
 pub const MARKET_REGISTRY_PATH: &str = "/api/v1/market/registry";
 
 /// 应用升级清单接口路径（同上）。
 pub const UPDATE_MANIFEST_PATH: &str = "/api/v1/app/update";
 
-/// 市场清单地址（平台服务端接口，`.sig` 为同级 `{url}.sig`）。
+/// 市场清单地址（静态托管，`.sig` 为同级 `{url}.sig`）。
 pub fn market_registry_url() -> String {
-    format!("{DEFAULT_SERVER_URL}{MARKET_REGISTRY_PATH}")
+    format!("{DEFAULT_ASSET_BASE_URL}{MARKET_REGISTRY_PATH}")
 }
 
-/// 应用升级清单地址（平台服务端接口，`.sig` 为同级 `{url}.sig`）。
+/// 应用升级清单地址（静态托管，`.sig` 为同级 `{url}.sig`）。
 pub fn update_manifest_url() -> String {
-    format!("{DEFAULT_SERVER_URL}{UPDATE_MANIFEST_PATH}")
+    format!("{DEFAULT_ASSET_BASE_URL}{UPDATE_MANIFEST_PATH}")
 }
 
 fn default_update_interval_hours() -> u64 {
@@ -958,6 +986,35 @@ mod tests {
     }
 
     #[test]
+    fn api_and_static_bases_must_stay_distinct() {
+        // 2026-09-30 实机事故：把 DEFAULT_SERVER_URL 一起改成 Cloudflare Pages，
+        // 账号页立刻变成「发起登录失败：服务端返回 405」——
+        // 因为 `POST /api/v1/auth/github/device/start` 打到静态托管上了。
+        //
+        // 下面是**当时那条测试抓不到的原因**，值得记下来：
+        // `default_config_gets_canonical_endpoints` 断言的是
+        // `market_registry_url().starts_with(DEFAULT_SERVER_URL)`，
+        // 而我当时把**两个常量改成了同一个值** → 断言必然通过。
+        // 也就是说，那条测试守的其实是「两个地址相等」——而那恰好就是 bug 本身。
+        //
+        // 真正的不变量是**两者不能是同一个托管处**：静态托管能响应公开 GET，
+        // 但无法处理 POST、也无法签发会话 token。
+        assert_ne!(
+            DEFAULT_ASSET_BASE_URL, DEFAULT_SERVER_URL,
+            "静态资源与 API 不能指向同一个托管处：Pages 之类的静态托管无法响应 \
+             POST API 端点，平台登录会得到 405（2026-09-30 实机事故）"
+        );
+
+        // 且必须双向对账：清单走静态、登录走 API。
+        // 只断言「两个常量不等」不够 —— 还得确认**谁在用哪个**，
+        // 否则把 market_registry_url 改回 DEFAULT_SERVER_URL 也能通过。
+        assert!(market_registry_url().starts_with(DEFAULT_ASSET_BASE_URL));
+        assert!(update_manifest_url().starts_with(DEFAULT_ASSET_BASE_URL));
+        assert!(crate::account::server_url().starts_with(DEFAULT_SERVER_URL));
+        assert!(!market_registry_url().starts_with(DEFAULT_SERVER_URL));
+    }
+
+    #[test]
     fn default_config_gets_canonical_endpoints() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.json");
@@ -966,10 +1023,16 @@ mod tests {
         let loaded = load_from(&path);
         assert_eq!(loaded.market_endpoint, market_registry_url());
         assert_eq!(loaded.update_endpoint, update_manifest_url());
-        // 两个地址都必须落在平台服务端域名下，且带 https（http 会 301，POST 语义会丢）
+        // 两个地址都必须落在静态托管域名下，且带 https
+        // （http 会 301，而 reqwest 默认把 301 的 POST 降级成 GET 并丢 body）
+        //
+        // ⚠️ 这里断言的是 `DEFAULT_ASSET_BASE_URL` 而**不是** `DEFAULT_SERVER_URL`。
+        // 原先断言后者，而当时两个常量已被我改成同一个值 —— 于是这条测试在
+        // 「平台登录全挂」的状态下**照样通过**。它守的不是「地址对」，
+        // 只是「两个地址相等」，而那恰好就是 bug 本身。
         for url in [market_registry_url(), update_manifest_url()] {
             assert!(url.starts_with("https://"));
-            assert!(url.starts_with(DEFAULT_SERVER_URL));
+            assert!(url.starts_with(DEFAULT_ASSET_BASE_URL));
         }
     }
 
