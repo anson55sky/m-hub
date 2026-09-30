@@ -1045,7 +1045,6 @@ pub fn run() {
             commands::clipboard_merge,
             commands::clipboard_copy_text,
             commands::clipboard_drag_begin,
-            commands::clipboard_drag_apply,
             commands::clipboard_drag_end,
             commands::clipboard_clear,
             commands::clipboard_set_paused,

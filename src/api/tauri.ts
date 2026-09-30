@@ -1265,8 +1265,6 @@ export const tauriApi = {
    * dx/dy 是**累计**位移、CSS 像素；锚点与工作区夹取都在后端。
    */
   clipboardDragBegin: () => invoke<void>('clipboard_drag_begin'),
-  clipboardDragApply: (dx: number, dy: number) =>
-    invoke<void>('clipboard_drag_apply', { dx, dy }),
   clipboardDragEnd: () => invoke<void>('clipboard_drag_end'),
   clipboardClear: () => invoke<void>('clipboard_clear'),
   clipboardSetPaused: (paused: boolean) => invoke<void>('clipboard_set_paused', { paused }),

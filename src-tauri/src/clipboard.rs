@@ -149,14 +149,20 @@ static ESC_WATCH: Mutex<Option<crate::mac::EscWatch>> = Mutex::new(None);
 //
 // 顺带解决了「拖到 Dock 底下 / 拖出屏幕」：每次移动都夹一次工作区。
 
-/// 一次拖动的锚点（物理像素 + 该显示器 scale）
+/// 一次拖动的锚点（**全物理像素**）
+///
+/// 为什么位移不再由前端算：见 `drag_begin` 上方的说明 —— 拖动循环整体搬到了
+/// Rust 侧自己轮询光标，所以这里只需要记住「按下那一刻」的光标与窗口位置。
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 struct DragAnchor {
-    /// 拖动开始时窗口的左上角（物理 px）
+    /// 按下时窗口的左上角（物理 px）
     x: i32,
     y: i32,
-    /// 光标所在显示器的 scale：前端给的位移是 CSS px，乘它才是物理 px
+    /// 按下时**光标**的位置（物理 px，与窗口左上角同单位）
+    press_x: i32,
+    press_y: i32,
+    /// 光标所在显示器的 scale：窗口尺寸是逻辑值，乘它才得到物理尺寸
     scale: f64,
 }
 
@@ -181,71 +187,116 @@ pub fn drag_in_progress() -> bool {
         .unwrap_or(false)
 }
 
-/// 拖动起点：记下窗口当前左上角与该显示器 scale。
+/// 拖动循环的轮询间隔。16ms ≈ 60fps，与 `window_resize::TICK` 同一取值。
+#[cfg(target_os = "macos")]
+const DRAG_TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// 判定「这是拖动而不是点击」的位移阈值（物理 px）。
+///
+/// 没有它的话，一次纯点击会因手抖让窗口挪一两像素 —— 浮层本来是不抢焦点的，
+/// 用户点它一下却发现它悄悄错位了，比不响应更难理解。
+#[cfg(target_os = "macos")]
+const DRAG_THRESHOLD_PX: f64 = 3.0;
+
+/// 拖动起点：记下「按下那一刻」的窗口左上角与光标位置，然后起一个轮询线程。
+///
+/// ## 为什么拖动循环在 Rust 侧，而不靠前端的 mousemove
+///
+/// 第一版让前端在 `mousemove` 里逐次上报位移（还套了 rAF 节流），结果是
+/// **「移动一点就断了」**。原因不在阈值也不在 IPC：WKWebView 的
+/// `requestAnimationFrame`（连同定时器）在窗口**被遮挡 / 非前台**时会停摆，
+/// 而这个浮层恰恰是 `NonactivatingPanel` —— 它不激活、不抢前台，
+/// 一旦移动过程中被别的窗口压住，帧回调就不再触发，拖动随之中断。
+///
+/// 搬进 Rust 后：① 不再依赖任何 webview 侧事件/帧；② 采样稳定 16ms；
+/// ③ 与本工程其它窗口移动（悬浮球 `edge_tick` / `window_resize::run`）同一套做法。
+///
+/// 线程在「左键松开」或 `drag_end()` 清掉锚点时退出，锚点用 `Mutex` 传递。
 #[cfg(target_os = "macos")]
 pub fn drag_begin(win: &tauri::Webview) -> Result<(), String> {
     let pos = win
         .window()
         .outer_position()
         .map_err(|e| format!("读不到窗口位置：{e}"))?;
-    // scale 取**光标所在**那块显示器：拖动跨越不同 scale 的屏幕时，
-    // 用错 scale 会让位移量差一倍。
-    let scale = win
-        .window()
-        .available_monitors()
-        .ok()
-        .and_then(|ms| {
-            let c = crate::mac::cursor_point()?;
-            ms.into_iter()
-                .find(|m| {
-                    let sc = m.scale_factor().max(0.01);
-                    let (px, py) = (m.position().x as f64 / sc, m.position().y as f64 / sc);
-                    let (pw, ph) = (m.size().width as f64 / sc, m.size().height as f64 / sc);
-                    c.0 >= px && c.0 < px + pw && c.1 >= py && c.1 < py + ph
-                })
-                .map(|m| m.scale_factor())
-        })
+    let (press_x, press_y) = crate::mac::cursor_physical()
+        .ok_or_else(|| "读不到光标位置".to_string())?;
+    let scale = display_scale_for(win, press_x as f64 / 2.0, press_y as f64 / 2.0)
         .unwrap_or_else(|| win.window().scale_factor().unwrap_or(1.0))
         .max(0.01);
-    let mut slot = DRAG_ANCHOR.lock().map_err(|e| e.to_string())?;
-    *slot = Some(DragAnchor { x: pos.x, y: pos.y, scale });
+    {
+        let mut slot = DRAG_ANCHOR.lock().map_err(|e| e.to_string())?;
+        *slot = Some(DragAnchor {
+            x: pos.x,
+            y: pos.y,
+            press_x,
+            press_y,
+            scale,
+        });
+    }
+    LOGGED_FIRST_APPLY.store(false, std::sync::atomic::Ordering::Relaxed);
     log::info!(
-        "[剪贴板浮层] 拖动开始：锚点 ({}, {}) scale {}",
+        "[剪贴板浮层] 拖动开始：窗口 ({}, {}) 光标 ({}, {}) scale {}",
         pos.x,
         pos.y,
+        press_x,
+        press_y,
         scale
     );
+    // 拿到命令所属窗口后复制一份（WebviewWindow 句柄可直接 move 进线程）
+    let handle = win.window().clone();
+    std::thread::spawn(move || drag_loop(handle));
     Ok(())
 }
 
-/// 拖动中：按累计位移算目标位置并夹进工作区。
+/// 轮询光标并搬窗口，直到左键松开或锚点被清掉。
 #[cfg(target_os = "macos")]
-pub fn drag_apply(win: &tauri::Webview, dx: f64, dy: f64) -> Result<(), String> {
-    let a = {
-        let slot = DRAG_ANCHOR.lock().map_err(|e| e.to_string())?;
-        match *slot {
-            Some(a) => a,
-            // 没 begin 过就 apply：多半是前端事件顺序不对。直接忽略而不是
-            // 用 dx/dy 从 0 起算 —— 那会让窗口瞬移到屏幕左上角。
-            None => return Ok(()),
+fn drag_loop(win: tauri::Window<tauri::Wry>) {
+    loop {
+        let Some(anchor) = DRAG_ANCHOR.lock().ok().and_then(|s| *s) else {
+            break;
+        };
+        if !crate::mac::lmb_down() {
+            break;
         }
-    };
-    let (nx, ny) = drag_target(a, dx, dy, CLIPBOARD_WIDTH * a.scale, CLIPBOARD_HEIGHT * a.scale, work_area_physical(win));
-    if !LOGGED_FIRST_APPLY.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        log::info!(
-            "[剪贴板浮层] 拖动首帧：位移 ({}, {}) → 目标 ({}, {})",
-            dx,
-            dy,
-            nx,
-            ny
-        );
+        if let Some((cx, cy)) = crate::mac::cursor_physical() {
+            let dx = (cx - anchor.press_x) as f64;
+            let dy = (cy - anchor.press_y) as f64;
+            if dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX {
+                let wa = work_area_physical(&win);
+                let (nx, ny) = drag_target(
+                    anchor,
+                    dx,
+                    dy,
+                    CLIPBOARD_WIDTH * anchor.scale,
+                    CLIPBOARD_HEIGHT * anchor.scale,
+                    wa,
+                );
+                if LOGGED_FIRST_APPLY
+                    .compare_exchange(
+                        false,
+                        true,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    log::info!(
+                        "[剪贴板浮层] 拖动首帧：位移 ({}, {}) → 目标 ({}, {})",
+                        dx,
+                        dy,
+                        nx,
+                        ny
+                    );
+                }
+                let _ = win.set_position(tauri::PhysicalPosition::new(nx, ny));
+            }
+        }
+        std::thread::sleep(DRAG_TICK);
     }
-    win.window()
-        .set_position(tauri::PhysicalPosition::new(nx, ny))
-        .map_err(|e| format!("移动浮层失败：{e}"))?;
-    Ok(())
+    drag_end();
 }
 
+/// 拖动结束：清锚点（同时让 `drag_loop` 退出）。
 #[cfg(target_os = "macos")]
 pub fn drag_end() {
     LOGGED_FIRST_APPLY.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -254,7 +305,23 @@ pub fn drag_end() {
     }
 }
 
-/// 拖动目标位置 = 锚点 + 位移×scale，再夹进工作区。**纯函数**，便于单测。
+/// 光标所在显示器的 scale（按物理坐标传入）。取不到回退 None。
+#[cfg(target_os = "macos")]
+fn display_scale_for(win: &tauri::Webview, _px: f64, _py: f64) -> Option<f64> {
+    let ms = win.window().available_monitors().ok()?;
+    // available_monitors 的坐标是物理，而 cursor_physical 给的也是物理，
+    // 所以直接按物理矩形命中即可，不需要再除 scale。
+    let c = crate::mac::cursor_physical()?;
+    ms.into_iter()
+        .find(|m| {
+            let (x, y) = (m.position().x as f64, m.position().y as f64);
+            let (w, h) = (m.size().width as f64, m.size().height as f64);
+            c.0 as f64 >= x && (c.0 as f64) < x + w && c.1 as f64 >= y && (c.1 as f64) < y + h
+        })
+        .map(|m| m.scale_factor())
+}
+
+/// 拖动目标位置 = 锚点 + 位移（位移已是物理 px），再夹进工作区。**纯函数**，便于单测。
 ///
 /// `wa` 是工作区（物理 px）。夹取让「拖到 Dock 底下 / 拖出屏幕」不可能发生，
 /// 这也正是用户最初报的「浮层跳到下方挡住的地方」在拖动场景下的同一件事。
@@ -267,8 +334,8 @@ fn drag_target(
     h: f64,
     wa: (i32, i32, u32, u32),
 ) -> (i32, i32) {
-    let want_x = a.x as f64 + dx * a.scale;
-    let want_y = a.y as f64 + dy * a.scale;
+    let want_x = a.x as f64 + dx;
+    let want_y = a.y as f64 + dy;
     let (ax, ay, aw, ah) = wa;
     let max_x = ax as f64 + aw as f64 - w;
     let max_y = ay as f64 + ah as f64 - h;
@@ -280,9 +347,9 @@ fn drag_target(
 
 /// 光标所在显示器的工作区（物理 px），取不到时用一个极大矩形（= 不夹）。
 #[cfg(target_os = "macos")]
-fn work_area_physical(win: &tauri::Webview) -> (i32, i32, u32, u32) {
+fn work_area_physical(win: &tauri::Window<tauri::Wry>) -> (i32, i32, u32, u32) {
     let fallback = || (i32::MIN / 4, i32::MIN / 4, u32::MAX / 2, u32::MAX / 2);
-    let Ok(ms) = win.window().available_monitors() else {
+    let Ok(ms) = win.available_monitors() else {
         return fallback();
     };
     let pick = match crate::mac::cursor_point() {
@@ -294,8 +361,8 @@ fn work_area_physical(win: &tauri::Webview) -> (i32, i32, u32, u32) {
                 let (pw, ph) = (m.size().width as f64 / sc, m.size().height as f64 / sc);
                 c.0 >= px && c.0 < px + pw && c.1 >= py && c.1 < py + ph
             })
-            .or_else(|| win.window().primary_monitor().ok().flatten()),
-        None => win.window().primary_monitor().ok().flatten(),
+            .or_else(|| win.primary_monitor().ok().flatten()),
+        None => win.primary_monitor().ok().flatten(),
     };
     let Some(m) = pick else { return fallback() };
     let r = m.work_area();
@@ -1107,23 +1174,25 @@ mod tests {
         const H: f64 = 880.0; // 440 逻辑 × 2
 
         fn anchor() -> DragAnchor {
-            DragAnchor { x: 100, y: 200, scale: 2.0 }
+            DragAnchor { x: 100, y: 200, press_x: 0, press_y: 0, scale: 2.0 }
         }
 
+        /// 位移现在**已经是物理像素**（Rust 侧直接读 `cursor_physical()`），
+        /// 所以不再乘 scale —— 这一条钉住的是「别又乘回去」。
         #[test]
-        fn delta_is_scaled_to_physical_px() {
-            // CSS 位移 (+50, -30) 在 scale 2 上应变成物理 (+100, -60)
-            let (x, y) = drag_target(anchor(), 50.0, -30.0, W, H, WA);
+        fn delta_is_already_physical_so_no_rescale() {
+            let (x, y) = drag_target(anchor(), 100.0, -60.0, W, H, WA);
             assert_eq!((x, y), (200, 140));
         }
 
+        /// 无论 scale 是多少，位移都是 1:1 —— 否则 Retina 上拖动速度会差一倍
         #[test]
-        fn scale_one_uses_delta_as_is() {
-            // 锚点留出余量，免得位移把结果顶到工作区边界上 ——
-            // 那样断言到的会是**夹取**的结果，而不是 scale 换算的结果
-            let a = DragAnchor { x: 500, y: 500, scale: 1.0 };
-            let (x, y) = drag_target(a, 37.0, -11.0, W, H, WA);
-            assert_eq!((x, y), (537, 489));
+        fn delta_is_scale_independent() {
+            let a1 = DragAnchor { x: 500, y: 500, press_x: 0, press_y: 0, scale: 1.0 };
+            let a2 = DragAnchor { x: 500, y: 500, press_x: 0, press_y: 0, scale: 2.0 };
+            let p1 = drag_target(a1, 37.0, -11.0, W, H, WA);
+            let p2 = drag_target(a2, 37.0, -11.0, W, H, WA);
+            assert_eq!(p1, p2, "位移已是物理像素，scale 不得再影响它");
         }
 
         /// 用户最初报的现象在拖动场景下的同一件事：拖到下方会被 Dock 吃掉。
