@@ -462,11 +462,27 @@ function onSearchInput() {
 const DRAG_THRESHOLD = 4
 let dragPending: { x: number; y: number } | null = null
 
-function onHeaderMouseDown(e: MouseEvent) {
+// 拖动中：把**累计**位移交给后端算目标位置（后端记着锚点，夹工作区）。
+// 用 rAF 节流：mousemove 在 120Hz 屏上能到 200+ 次/秒，每次一个 IPC 太吵。
+let dragRaf = 0
+let dragLast = { x: 0, y: 0 }
+
+async function beginDrag(e: MouseEvent) {
   if (!appWindow || e.button !== 0) return
   const target = e.target as HTMLElement
   if (target.closest('button')) return
   dragPending = { x: e.screenX, y: e.screenY }
+  try {
+    await tauriApi.clipboardDragBegin()
+  } catch (err) {
+    // 记一条：拖不动是**静默**故障（tao 那条路径无论如何都返回 Ok），
+    // 没有日志的话下次只能靠猜
+    console.warn('[clipboard] 拖动初始化失败', err)
+  }
+}
+
+function onHeaderMouseDown(e: MouseEvent) {
+  void beginDrag(e)
 }
 
 // mousemove / mouseup 挂在 **window** 上，不挂在搜索栏元素上。
@@ -480,17 +496,31 @@ function onHeaderMouseDown(e: MouseEvent) {
 // 进入自己的模态循环，后续事件走系统路径。挂 window 既能跨出细条范围，
 // 又不会和那个模态循环抢事件。
 function onDragMouseMove(e: MouseEvent) {
-  if (!dragPending || !appWindow) return
+  if (!dragPending) return
   const dx = e.screenX - dragPending.x
   const dy = e.screenY - dragPending.y
-  if (dx * dx + dy * dy >= DRAG_THRESHOLD * DRAG_THRESHOLD) {
-    dragPending = null
-    void appWindow.startDragging()
+  if (dx * dx + dy * dy < DRAG_THRESHOLD * DRAG_THRESHOLD) return
+  // 过了阈值就是「确定在拖」，此后即使指针回到原点也不取消 ——
+  // 原生拖动一旦开始就不会自己回到原位，行为得对齐
+  dragPending = null
+  dragLast = { x: dx, y: dy }
+  if (dragRaf) return
+  const step = () => {
+    dragRaf = 0
+    if (dragPending) return
+    void tauriApi.clipboardDragApply(dragLast.x, dragLast.y).catch(() => {})
+    dragRaf = requestAnimationFrame(step)
   }
+  dragRaf = requestAnimationFrame(step)
 }
 
 function onDragMouseUp() {
   dragPending = null
+  if (dragRaf) {
+    cancelAnimationFrame(dragRaf)
+    dragRaf = 0
+  }
+  void tauriApi.clipboardDragEnd().catch(() => {})
 }
 
 function scrollSelectedIntoView() {

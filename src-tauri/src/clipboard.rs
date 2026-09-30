@@ -128,6 +128,146 @@ static OVERLAY_HWND: Mutex<Option<isize>> = Mutex::new(None);
 #[cfg(target_os = "macos")]
 static ESC_WATCH: Mutex<Option<crate::mac::EscWatch>> = Mutex::new(None);
 
+// ---- 拖动（绕开 AppKit 的 performWindowDragWithEvent:）----
+//
+// ## 为什么不用 startDragging
+//
+// tao 的 `drag_window()` 是 `performWindowDragWithEvent: [NSApp currentEvent]`，
+// 而 `currentEvent` 只在**事件派发过程中**有值。我们是从事件循环里处理一条
+// post 过来的 `WindowMessage::DragWindow`，不在派发上下文里 —— 拿到的 event
+// 无效，AppKit 静默什么都不做，而 tao 无论如何都返回 `Ok(())`：
+// **调用方看不到任何报错，窗口就是不动**（用户实测：完全拖不动）。
+//
+// 本浮层还叠加了一个 AppKit 层面的不确定因素：它是被设了
+// `NSWindowStyleMaskNonactivatingPanel` 的**普通 NSWindow**（`mac.rs::set_nonactivating_panel`
+// 只加了这个 style 位，而该位只对真正的 NSPanel 有意义），窗口拖动这类
+// AppKit 内部行为在这种半吊子状态下没有可靠保证。
+//
+// 所以改成**自己算位置**：`begin` 记锚点 → `apply` 按光标位移算目标并夹进
+// 工作区 → `end` 清锚点。全程物理像素，只在把 CSS px 的位移换算成物理时乘
+// scale（与 `window_resize.rs` 同一套口径）。
+//
+// 顺带解决了「拖到 Dock 底下 / 拖出屏幕」：每次移动都夹一次工作区。
+
+/// 一次拖动的锚点（物理像素 + 该显示器 scale）
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct DragAnchor {
+    /// 拖动开始时窗口的左上角（物理 px）
+    x: i32,
+    y: i32,
+    /// 光标所在显示器的 scale：前端给的位移是 CSS px，乘它才是物理 px
+    scale: f64,
+}
+
+#[cfg(target_os = "macos")]
+static DRAG_ANCHOR: Mutex<Option<DragAnchor>> = Mutex::new(None);
+
+/// 拖动起点：记下窗口当前左上角与该显示器 scale。
+#[cfg(target_os = "macos")]
+pub fn drag_begin(win: &tauri::Webview) -> Result<(), String> {
+    let pos = win
+        .window()
+        .outer_position()
+        .map_err(|e| format!("读不到窗口位置：{e}"))?;
+    // scale 取**光标所在**那块显示器：拖动跨越不同 scale 的屏幕时，
+    // 用错 scale 会让位移量差一倍。
+    let scale = win
+        .window()
+        .available_monitors()
+        .ok()
+        .and_then(|ms| {
+            let c = crate::mac::cursor_point()?;
+            ms.into_iter()
+                .find(|m| {
+                    let sc = m.scale_factor().max(0.01);
+                    let (px, py) = (m.position().x as f64 / sc, m.position().y as f64 / sc);
+                    let (pw, ph) = (m.size().width as f64 / sc, m.size().height as f64 / sc);
+                    c.0 >= px && c.0 < px + pw && c.1 >= py && c.1 < py + ph
+                })
+                .map(|m| m.scale_factor())
+        })
+        .unwrap_or_else(|| win.window().scale_factor().unwrap_or(1.0))
+        .max(0.01);
+    let mut slot = DRAG_ANCHOR.lock().map_err(|e| e.to_string())?;
+    *slot = Some(DragAnchor { x: pos.x, y: pos.y, scale });
+    Ok(())
+}
+
+/// 拖动中：按累计位移算目标位置并夹进工作区。
+#[cfg(target_os = "macos")]
+pub fn drag_apply(win: &tauri::Webview, dx: f64, dy: f64) -> Result<(), String> {
+    let a = {
+        let slot = DRAG_ANCHOR.lock().map_err(|e| e.to_string())?;
+        match *slot {
+            Some(a) => a,
+            // 没 begin 过就 apply：多半是前端事件顺序不对。直接忽略而不是
+            // 用 dx/dy 从 0 起算 —— 那会让窗口瞬移到屏幕左上角。
+            None => return Ok(()),
+        }
+    };
+    let (nx, ny) = drag_target(a, dx, dy, CLIPBOARD_WIDTH * a.scale, CLIPBOARD_HEIGHT * a.scale, work_area_physical(win));
+    win.window()
+        .set_position(tauri::PhysicalPosition::new(nx, ny))
+        .map_err(|e| format!("移动浮层失败：{e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn drag_end() {
+    if let Ok(mut slot) = DRAG_ANCHOR.lock() {
+        *slot = None;
+    }
+}
+
+/// 拖动目标位置 = 锚点 + 位移×scale，再夹进工作区。**纯函数**，便于单测。
+///
+/// `wa` 是工作区（物理 px）。夹取让「拖到 Dock 底下 / 拖出屏幕」不可能发生，
+/// 这也正是用户最初报的「浮层跳到下方挡住的地方」在拖动场景下的同一件事。
+#[cfg(target_os = "macos")]
+fn drag_target(
+    a: DragAnchor,
+    dx: f64,
+    dy: f64,
+    w: f64,
+    h: f64,
+    wa: (i32, i32, u32, u32),
+) -> (i32, i32) {
+    let want_x = a.x as f64 + dx * a.scale;
+    let want_y = a.y as f64 + dy * a.scale;
+    let (ax, ay, aw, ah) = wa;
+    let max_x = ax as f64 + aw as f64 - w;
+    let max_y = ay as f64 + ah as f64 - h;
+    // 上界 .max()：工作区比浮层窄时宁可略微超屏，也不要 clamp panic
+    let x = want_x.clamp(ax as f64, max_x.max(ax as f64));
+    let y = want_y.clamp(ay as f64, max_y.max(ay as f64));
+    (x.round() as i32, y.round() as i32)
+}
+
+/// 光标所在显示器的工作区（物理 px），取不到时用一个极大矩形（= 不夹）。
+#[cfg(target_os = "macos")]
+fn work_area_physical(win: &tauri::Webview) -> (i32, i32, u32, u32) {
+    let fallback = || (i32::MIN / 4, i32::MIN / 4, u32::MAX / 2, u32::MAX / 2);
+    let Ok(ms) = win.window().available_monitors() else {
+        return fallback();
+    };
+    let pick = match crate::mac::cursor_point() {
+        Some(c) => ms
+            .into_iter()
+            .find(|m| {
+                let sc = m.scale_factor().max(0.01);
+                let (px, py) = (m.position().x as f64 / sc, m.position().y as f64 / sc);
+                let (pw, ph) = (m.size().width as f64 / sc, m.size().height as f64 / sc);
+                c.0 >= px && c.0 < px + pw && c.1 >= py && c.1 < py + ph
+            })
+            .or_else(|| win.window().primary_monitor().ok().flatten()),
+        None => win.window().primary_monitor().ok().flatten(),
+    };
+    let Some(m) = pick else { return fallback() };
+    let r = m.work_area();
+    (r.position.x, r.position.y, r.size.width, r.size.height)
+}
+
 /// 停掉 Esc 监视（drop 即拆除事件 tap，之后不再吞 Esc）。
 ///
 /// **凡是收起浮层的路径都必须调它**，漏一条就会留下一个还在吞 Esc 的 tap：
@@ -919,6 +1059,71 @@ mod tests {
                 .unwrap();
             assert!(x >= 1600, "不得跑到第二块屏左边之外");
             assert!(x + W as i32 <= 1600 + 1512, "不得超出第二块屏右缘");
+        }
+    }
+
+    /// 拖动目标位置：位移换算 + 工作区夹取
+    #[cfg(target_os = "macos")]
+    mod drag {
+        use super::super::{drag_target, DragAnchor};
+
+        /// 1512×982 屏、scale 2（Retina）、工作区 0,0,3024,1804（物理）
+        const WA: (i32, i32, u32, u32) = (0, 0, 3024, 1804);
+        const W: f64 = 1040.0; // 520 逻辑 × 2
+        const H: f64 = 880.0; // 440 逻辑 × 2
+
+        fn anchor() -> DragAnchor {
+            DragAnchor { x: 100, y: 200, scale: 2.0 }
+        }
+
+        #[test]
+        fn delta_is_scaled_to_physical_px() {
+            // CSS 位移 (+50, -30) 在 scale 2 上应变成物理 (+100, -60)
+            let (x, y) = drag_target(anchor(), 50.0, -30.0, W, H, WA);
+            assert_eq!((x, y), (200, 140));
+        }
+
+        #[test]
+        fn scale_one_uses_delta_as_is() {
+            // 锚点留出余量，免得位移把结果顶到工作区边界上 ——
+            // 那样断言到的会是**夹取**的结果，而不是 scale 换算的结果
+            let a = DragAnchor { x: 500, y: 500, scale: 1.0 };
+            let (x, y) = drag_target(a, 37.0, -11.0, W, H, WA);
+            assert_eq!((x, y), (537, 489));
+        }
+
+        /// 用户最初报的现象在拖动场景下的同一件事：拖到下方会被 Dock 吃掉。
+        /// 夹取让「拖出去」不可能发生。
+        #[test]
+        fn dragging_down_stops_at_work_area_bottom() {
+            let (_, y) = drag_target(anchor(), 0.0, 100000.0, W, H, WA);
+            assert_eq!(y + H as i32, WA.3 as i32, "底边应贴工作区底边");
+        }
+
+        #[test]
+        fn dragging_right_stays_on_screen() {
+            let (x, _) = drag_target(anchor(), 100000.0, 0.0, W, H, WA);
+            assert_eq!(x + W as i32, WA.2 as i32);
+        }
+
+        #[test]
+        fn dragging_to_origin_clamps_back_inside() {
+            let (x, y) = drag_target(anchor(), -100000.0, -100000.0, W, H, WA);
+            assert_eq!((x, y), (0, 0));
+        }
+
+        /// 工作区比浮层还窄时不能 panic（clamp 的 min > max 会炸）
+        #[test]
+        fn 工作区比浮层窄时不_panic() {
+            let _ = drag_target(anchor(), 500.0, 500.0, W, H, (0, 0, 300, 200));
+        }
+
+        /// 非零原点的第二块屏：夹取必须跟着工作区走，不能当成主屏
+        #[test]
+        fn second_monitor_origin_is_respected() {
+            let wa = (3200, 0, 3024, 1804);
+            let (x, _) = drag_target(anchor(), -100000.0, 0.0, W, H, wa);
+            assert_eq!(x, 3200, "不得跑到第二块屏左缘之外");
         }
     }
 

@@ -1260,6 +1260,14 @@ export const tauriApi = {
   clipboardMerge: (ids: number[]) => invoke<ClipboardItem>('clipboard_merge', { ids }),
   /** 把一段任意文本写入系统剪贴板（多选合并复制用；不注入粘贴、不动历史条目） */
   clipboardCopyText: (text: string) => invoke<void>('clipboard_copy_text', { text }),
+  /**
+   * 浮层拖动三段式（**不用** startDragging：tao 那条在 macOS 上会静默失败）。
+   * dx/dy 是**累计**位移、CSS 像素；锚点与工作区夹取都在后端。
+   */
+  clipboardDragBegin: () => invoke<void>('clipboard_drag_begin'),
+  clipboardDragApply: (dx: number, dy: number) =>
+    invoke<void>('clipboard_drag_apply', { dx, dy }),
+  clipboardDragEnd: () => invoke<void>('clipboard_drag_end'),
   clipboardClear: () => invoke<void>('clipboard_clear'),
   clipboardSetPaused: (paused: boolean) => invoke<void>('clipboard_set_paused', { paused }),
   setClipboardMediaEnabled: (image: boolean, file: boolean) =>

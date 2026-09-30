@@ -3474,6 +3474,28 @@ pub fn clipboard_delete(state: State<'_, DbState>, id: i64) -> Result<(), String
     clipboard::delete(&conn, id).map_err(err_str)
 }
 
+/// 浮层拖动三段式：`begin` 记锚点 → `apply(位移)` 移动 → `end` 清锚点。
+///
+/// 位移 `dx`/`dy` 是**光标的 CSS 像素**（前端 `e.screenX` 的差值），后端按
+/// 拖动开始时那块显示器的 scale 换算成物理像素，并每次都夹进工作区。
+///
+/// 不用 `startDragging()` 的原因见 `clipboard.rs` 里 DRAG_ANCHOR 上方的注释：
+/// 它在 macOS 上会静默失败（拿不到有效的 `currentEvent`，而 tao 仍返回 Ok）。
+#[tauri::command]
+pub fn clipboard_drag_begin(win: tauri::Webview) -> Result<(), String> {
+    crate::clipboard::drag_begin(&win)
+}
+
+#[tauri::command]
+pub fn clipboard_drag_apply(win: tauri::Webview, dx: f64, dy: f64) -> Result<(), String> {
+    crate::clipboard::drag_apply(&win, dx, dy)
+}
+
+#[tauri::command]
+pub fn clipboard_drag_end() {
+    crate::clipboard::drag_end();
+}
+
 /// 合并多条**文本**剪贴板记录为一条新的，并删掉原来那几条。
 ///
 /// 顺序与「是否置顶/来源/截断」的口径全在 `repo::clipboard::merge_texts` 里，
