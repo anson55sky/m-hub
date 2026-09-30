@@ -281,6 +281,31 @@ pub fn platform_key() -> &'static str {
     "unknown-unknown"
 }
 
+/// 「清单里没有本平台的条目」的唯一口径文案。
+///
+/// 两个调用点（检查更新、下载前复查）曾经各写一份且含义不同：
+/// 检查那处返回 `none`（→ 前端显示「已是最新版本」，**谎报成功**），
+/// 下载那处返回 `Err`。口径必须只有一份，否则将来只会漂移。
+///
+/// 措辞要点：说清「是服务端没发本平台的包」而不是「没有新版本」——
+/// 两者对用户的行动建议完全相反。
+fn no_platform_entry_reason(manifest: &UpdateManifest) -> String {
+    let mut keys: Vec<&str> = manifest.platforms.keys().map(|k| k.as_str()).collect();
+    keys.sort_unstable(); // HashMap 迭代序不定，报错文案要稳定可复现
+    if keys.is_empty() {
+        return format!(
+            "更新源的 platforms 为空，没有任何平台的包（本构建需要 {} 条目）",
+            platform_key()
+        );
+    }
+    format!(
+        "更新源无当前平台条目：清单只发布了 [{}]，本构建是 {}。服务端需在 platforms 下补 {} 条目",
+        keys.join(", "),
+        platform_key(),
+        platform_key()
+    )
+}
+
 /// 解析平台条目：取本构建对应的平台键；便携版优先 portableUrl。
 fn platform_entry(manifest: &UpdateManifest) -> Option<(PlatformEntry, bool)> {
     let entry = manifest.platforms.get(platform_key())?;
@@ -296,26 +321,54 @@ fn platform_entry(manifest: &UpdateManifest) -> Option<(PlatformEntry, bool)> {
     Some((entry.clone(), portable))
 }
 
-/// 判断候选版本是否可比当前版本更新（semver；含 minimumUpgradable 跳级保护）。
-fn is_newer(manifest: &UpdateManifest, current: &str) -> bool {
+/// 一份更新清单对当前构建意味着什么。
+///
+/// ## 为什么要三分而不是 `is_newer() -> bool`
+///
+/// 原来是一个 bool，把**三件不同的事**压成同一个 `false`：
+/// ① 清单版本不比当前新（真的已是最新）② 被 `minimumUpgradable` 跳级保护拦下
+/// ③ 清单里没有本平台的包。三者都走 `UpdateInfo::none` → 前端一律显示
+/// 「已是最新版本」。
+///
+/// ②③ 是**谎报成功**：确实有新版，只是这台机器升不了。它和 ① 给用户的
+/// 行动建议完全相反（① 什么都不用做，②③ 得去换台机器 / 找作者发包）。
+/// 站着「有新版但你拿不到」时唯一该做的就是把它说出来。
+///
+/// 纯函数、不碰网络与配置，故可完整单测——这正是原来那条 bool 掩盖掉的地方。
+#[derive(Debug)]
+enum ManifestVerdict {
+    /// 没有比当前更新的版本
+    UpToDate,
+    /// 有更新，但当前构建拿不到；附可直接展示给用户的原因
+    Unreachable(String),
+    /// 有更新且当前构建可升
+    Upgradeable {
+        entry: PlatformEntry,
+        portable: bool,
+    },
+}
+
+fn judge(manifest: &UpdateManifest, current: &str) -> ManifestVerdict {
+    use std::cmp::Ordering;
     if manifest.version.is_empty() {
-        return false;
+        return ManifestVerdict::UpToDate;
     }
-    if version_cmp(&manifest.version, current) != std::cmp::Ordering::Greater {
-        return false;
+    if version_cmp(&manifest.version, current) != Ordering::Greater {
+        return ManifestVerdict::UpToDate;
     }
+    // 到这里已经确定「有新版」。以下两种是「有新版但拿不到」。
     if !manifest.minimum_upgradable.is_empty()
-        && version_cmp(current, &manifest.minimum_upgradable) == std::cmp::Ordering::Less
+        && version_cmp(current, &manifest.minimum_upgradable) == Ordering::Less
     {
-        log::info!(
-            "更新源版本 v{} 要求最低可升级 v{}，当前 v{}，跳级保护拦截",
-            manifest.version,
-            manifest.minimum_upgradable,
-            current
-        );
-        return false;
+        return ManifestVerdict::Unreachable(format!(
+            "更新源 v{} 要求最低可升级 v{}，当前 v{} 低于下限，被跳级保护拦下（不是「已是最新」：确有新版，但需先手动升级到 v{} 以上的版本）",
+            manifest.version, manifest.minimum_upgradable, current, manifest.minimum_upgradable
+        ));
     }
-    true
+    match platform_entry(manifest) {
+        Some((entry, portable)) => ManifestVerdict::Upgradeable { entry, portable },
+        None => ManifestVerdict::Unreachable(no_platform_entry_reason(manifest)),
+    }
 }
 
 /// 检查是否有可用更新。验签失败 / 通信失败时**静默**返回"无更新"
@@ -349,7 +402,12 @@ pub async fn check_for_update(
         }
     };
 
-    if !is_newer(&manifest, &current) {
+    // 先问「有没有新版」，再问「这台机器能不能升」——两者必须分开，见 ManifestVerdict。
+    // 顺序保持原样：跳级/缺条目都在「跳过此版本」与「稍后再提示」之后判定，
+    // 免得暂停窗口把一条真实故障也吞掉（那正是原来查不出来的原因之一）。
+    if version_cmp(&manifest.version, &current) != std::cmp::Ordering::Greater
+        || manifest.version.is_empty()
+    {
         log::info!("已是最新版本（当前 v{current}，源 v{}）", manifest.version);
         return Ok(UpdateInfo::none(&current));
     }
@@ -368,11 +426,22 @@ pub async fn check_for_update(
             return Ok(UpdateInfo::none(&current));
         }
     }
-    let (entry, portable) = match platform_entry(&manifest) {
-        Some(p) => p,
-        None => {
-            log::warn!("更新源无当前平台条目（{}）", platform_key());
-            return Ok(UpdateInfo::none(&current));
+    let (entry, portable) = match judge(&manifest, &current) {
+        ManifestVerdict::Upgradeable { entry, portable } => (entry, portable),
+        // 「拿不到」不是「没有」：报出来，别谎报已是最新。手动检查由 AboutSection
+        // 的 catch 展示原因；自动检查的调用方本就 `let _ =` 吞掉（与拉取失败同口径），
+        // 差异只体现在日志。
+        ManifestVerdict::Unreachable(e) => {
+            log::warn!("{e}");
+            return Err(e);
+        }
+        // 上面已用 version_cmp 判过「无新版」，走到这里只可能是判据漂移。
+        // 宁可报错也不要悄悄说「已是最新」——那条路正是本函数要消灭的谎报。
+        ManifestVerdict::UpToDate => {
+            return Err(format!(
+                "更新判定内部不一致：源 v{} 不比当前 v{} 新，却走到了可升级分支",
+                manifest.version, current
+            ));
         }
     };
 
@@ -425,11 +494,16 @@ pub fn snooze_update(app: tauri::AppHandle) -> Result<(), String> {
             log::info!("「稍后再提示」期间有更新的点击，本次补检跳过（已由最新那次顺延）");
             return;
         }
-        if let Ok(info) = check_for_update(handle, None).await {
-            log::info!(
+        // 两条分支都要落日志：`if let Ok(..)` 会把 Err 整条吞掉，补检既没提示
+        // 也没更新时，日志上会留一段**静默缺口**——而这正是「自动更新看着一切
+        // 正常、其实早就不工作」最隐蔽的一种形态（check_for_update 内部已记
+        // WARN，这里补的是「补检本身没跑成」这一层）。
+        match check_for_update(handle, None).await {
+            Ok(info) => log::info!(
                 "「稍后再提示」到期补检：{}",
                 if info.available { "仍有更新" } else { "无更新" }
-            );
+            ),
+            Err(e) => log::warn!("「稍后再提示」到期补检未能完成：{e}"),
         }
     });
     log::info!("更新提示已推迟 {} 分钟", SNOOZE_MINUTES);
@@ -504,7 +578,7 @@ pub async fn download_update(
         ));
     }
     let (entry, portable) = platform_entry(&manifest).ok_or_else(|| {
-        format!("更新源无当前平台条目（{}，版本 v{version}）", platform_key())
+        format!("{}（本次目标 v{version}）", no_platform_entry_reason(&manifest))
     })?;
     let (url, sha256) = if portable {
         (entry.portable_url.clone(), entry.portable_sha256.clone())
@@ -1338,19 +1412,150 @@ mod tests {
         assert!(parse_manifest(&serde_json::to_vec(&json).unwrap()).is_err());
     }
 
+    /// 造一份「版本比当前新、且带本平台条目」的可升级清单。
+    fn upgradable_manifest(version: &str) -> UpdateManifest {
+        UpdateManifest {
+            schema_version: 1,
+            version: version.to_string(),
+            platforms: {
+                let mut p = std::collections::HashMap::new();
+                p.insert(
+                    platform_key().to_string(),
+                    PlatformEntry {
+                        url: "https://dist/m-hub.dmg".to_string(),
+                        sha256: "abc".to_string(),
+                        size: 1,
+                        ..PlatformEntry::default()
+                    },
+                );
+                p
+            },
+            ..UpdateManifest::default()
+        }
+    }
+
+    /// 真的没有新版 —— 唯一该显示「已是最新版本」的情形。
     #[test]
-    fn is_newer_guards_jump() {
-        let mut m = UpdateManifest::default();
-        m.version = "0.4.0".to_string();
-        // 正常更新
-        assert!(is_newer(&m, "0.3.0"));
-        // 同版本/低版本不更新
-        assert!(!is_newer(&m, "0.4.0"));
-        assert!(!is_newer(&m, "0.5.0"));
-        // 跳级保护：当前低于可升级下限
+    fn judge_reports_up_to_date_only_when_there_is_genuinely_no_newer_version() {
+        let m = upgradable_manifest("0.4.0");
+        assert!(matches!(judge(&m, "0.4.0"), ManifestVerdict::UpToDate));
+        assert!(matches!(judge(&m, "0.5.0"), ManifestVerdict::UpToDate));
+        // 空版本 = 源不可用，不得被判成「有新版但拿不到」
+        let mut empty = upgradable_manifest("");
+        empty.version = String::new();
+        assert!(matches!(judge(&empty, "0.3.0"), ManifestVerdict::UpToDate));
+    }
+
+    #[test]
+    fn judge_reports_upgradeable_with_the_entry() {
+        let m = upgradable_manifest("0.4.0");
+        match judge(&m, "0.3.0") {
+            ManifestVerdict::Upgradeable { entry, portable } => {
+                assert_eq!(entry.url, "https://dist/m-hub.dmg");
+                let _ = portable;
+            }
+            other => panic!("应判为可升级，实际: {other:?}"),
+        }
+    }
+
+    /// 跳级保护拦下时**不是**「已是最新」：确有新版，只是这台机器升不了。
+    /// 这条在原来那个 bool 里和「已是最新」同为 false，界面因此显示「已是最新版本」。
+    #[test]
+    fn judge_separates_jump_protection_from_up_to_date() {
+        let mut m = upgradable_manifest("0.4.0");
         m.minimum_upgradable = "0.3.0".to_string();
-        assert!(!is_newer(&m, "0.2.0"));
-        assert!(is_newer(&m, "0.3.0"));
+        match judge(&m, "0.2.0") {
+            ManifestVerdict::Unreachable(reason) => {
+                assert!(
+                    reason.contains("0.2.0") && reason.contains("0.3.0"),
+                    "原因里应写清当前版本与下限，用户才知道该往哪走: {reason}"
+                );
+                // 判据不是「文案里不能出现『已是最新』」——那句话以否定形式出现
+                // （「不是『已是最新』：确有新版…」）恰恰最能帮用户理解出了什么事。
+                // 真正要钉住的是：**必须明确告诉用户存在新版**，否则与谎报无异。
+                assert!(
+                    reason.contains("确有新版"),
+                    "原因必须点明确有新版（这正是与「已是最新」的分界）: {reason}"
+                );
+            }
+            other => panic!("应判为拿不到而非已是最新，实际: {other:?}"),
+        }
+        // 恰好在下限上则放行
+        assert!(matches!(judge(&m, "0.3.0"), ManifestVerdict::Upgradeable { .. }));
+    }
+
+    /// 清单无本平台条目时**不是**「已是最新」。移植后这条曾对每个 macOS 构建
+    /// 无条件成立（平台键写死 windows-x86_64），界面一律显示「已是最新版本」——
+    /// 自动更新通道看起来完全正常，永远不会有人去查。
+    #[test]
+    fn judge_separates_missing_platform_entry_from_up_to_date() {
+        let mut m = upgradable_manifest("9.9.9");
+        m.platforms = std::collections::HashMap::new();
+        m.platforms.insert(
+            "windows-x86_64".to_string(),
+            PlatformEntry {
+                url: "https://dist/m-hub.exe".to_string(),
+                ..PlatformEntry::default()
+            },
+        );
+        match judge(&m, "0.7.2") {
+            ManifestVerdict::Unreachable(reason) => {
+                assert!(reason.contains(platform_key()), "原因应写明本构建要哪个键: {reason}");
+                assert!(
+                    reason.contains("windows-x86_64"),
+                    "原因应列出服务端实际发布了什么，否则无法自查: {reason}"
+                );
+            }
+            other => panic!("应判为拿不到而非已是最新，实际: {other:?}"),
+        }
+    }
+
+    /// 空 platforms 与「发了别的平台」要说不同的话——前者是源没配好，
+    /// 后者是发错了平台的包，排查方向不同。
+    #[test]
+    fn no_platform_entry_reason_distinguishes_empty_from_wrong_platform() {
+        let mut m = UpdateManifest::default();
+        m.platforms = std::collections::HashMap::new();
+        let empty = no_platform_entry_reason(&m);
+        assert!(empty.contains("platforms 为空"), "空清单应有独立措辞: {empty}");
+
+        m.platforms.insert("windows-x86_64".to_string(), PlatformEntry::default());
+        let wrong = no_platform_entry_reason(&m);
+        assert!(wrong.contains("windows-x86_64"), "应列出实际发布的键: {wrong}");
+    }
+
+    /// 报错文案必须可复现：platforms 是 HashMap，迭代序随机，
+    /// 若不排序，同一份清单两次报错内容会不同（用户截图给作者时对不上）。
+    /// 报错文案必须只取决于清单内容，不取决于 HashMap 的迭代序。
+    ///
+    /// ⚠️ 这条一开始写成「同一份清单反复调用 20 次比对」——那是**假守卫**：
+    /// `HashMap` 的迭代序在**同一个进程内是稳定的**，去掉排序后照样全绿
+    /// （约定 73 的典型形态：写完就绿不代表它是守卫）。
+    /// 真正能造出来的失败是：两个 `HashMap` 走不同的 `RandomState` 种子，
+    /// 迭代序通常不同 —— 内容相同的清单因插入顺序不同而报错不同，才是真的漂了。
+    #[test]
+    fn no_platform_entry_reason_ignores_insertion_order() {
+        let keys = ["windows-x86_64", "macos-x86_64", "linux-aarch64", "linux-x86_64"];
+        let build = |order: &[&str]| {
+            let mut m = UpdateManifest::default();
+            for k in order {
+                m.platforms.insert(k.to_string(), PlatformEntry::default());
+            }
+            m
+        };
+        let forward = no_platform_entry_reason(&build(&keys));
+        let mut reversed = keys;
+        reversed.reverse();
+        let backward = no_platform_entry_reason(&build(&reversed));
+        assert_eq!(
+            forward, backward,
+            "同一份清单（仅插入顺序不同）应给出同一句报错，否则用户截图给作者时对不上"
+        );
+        // 且必须是排好序的（可复现的稳定输出），不是碰巧一致
+        assert!(
+            forward.contains("[linux-aarch64, linux-x86_64, macos-x86_64, windows-x86_64]"),
+            "键名应按字典序输出: {forward}"
+        );
     }
 
     #[cfg(target_os = "windows")]
