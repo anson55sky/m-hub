@@ -191,9 +191,26 @@ pub fn drag_in_progress() -> bool {
         .unwrap_or(false)
 }
 
-/// 拖动循环的轮询间隔。16ms ≈ 60fps，与 `window_resize::TICK` 同一取值。
+/// 拖动循环的轮询间隔。**移动时** 8ms（≈120Hz）。
+///
+/// 原来是固定 16ms（60Hz）。窗口位置是「上一次轮询时的光标位置」，所以轮询
+/// 周期直接就是**光标与窗口之间的固有延迟**上界：16ms 在 60Hz 屏上已经吃掉
+/// 一整帧，手感上就是「慢半拍」。8ms 把它压到半帧以内。
+/// 静止时回到 16ms：光标没动时再快也只是白采样。
 #[cfg(target_os = "macos")]
-const DRAG_TICK: std::time::Duration = std::time::Duration::from_millis(16);
+fn frame_period(moved: bool) -> std::time::Duration {
+    std::time::Duration::from_millis(if moved { 8 } else { 16 })
+}
+
+/// 目标位置与上次下发结果相同时**不重复下发** `set_position`。
+///
+/// 每一次 `set_position` 都是一条要主线程处理的消息，而主线程同时还在合成
+/// WKWebView（`webview_mem` 每 300ms 还会插一批阻塞 getter 进来）。
+/// 光标静止时每 8ms 重复发同一条纯属浪费，把主线程的额度让给真正需要的帧。
+#[cfg(target_os = "macos")]
+fn should_move(last: Option<(i32, i32)>, next: (i32, i32)) -> bool {
+    last != Some(next)
+}
 
 /// 判定「这是拖动而不是点击」的位移阈值（物理 px）。
 ///
@@ -258,6 +275,13 @@ pub fn drag_begin(win: &tauri::Webview) -> Result<(), String> {
 /// 轮询光标并搬窗口，直到左键松开或锚点被清掉。
 #[cfg(target_os = "macos")]
 fn drag_loop(win: tauri::Window<tauri::Wry>) {
+    // 统计：光标与窗口之间的延迟，取决于两次轮询的间隔（8ms 移动 / 16ms 静止），
+    // 加上主线程处理 set_position 的排队。分母是**采样次数**不是墙钟时间，
+    // 这样 sleep 本身的偏差不混进来。
+    let mut samples: u32 = 0;
+    let mut gap_sum_ms: f64 = 0.0;
+    let mut last_cursor: Option<(i32, i32)> = None;
+    let mut last_applied: Option<(i32, i32)> = None;
     loop {
         let Some(anchor) = DRAG_ANCHOR.lock().ok().and_then(|s| *s) else {
             break;
@@ -301,10 +325,31 @@ fn drag_loop(win: tauri::Window<tauri::Wry>) {
                         ny
                     );
                 }
-                let _ = win.set_position(tauri::PhysicalPosition::new(nx, ny));
+                if should_move(last_applied, (nx, ny)) {
+                    last_applied = Some((nx, ny));
+                    let _ = win.set_position(tauri::PhysicalPosition::new(nx, ny));
+                }
+                if let Some(pc) = last_cursor {
+                    if pc != (cx, cy) {
+                        gap_sum_ms += ((cx - pc.0).abs() + (cy - pc.1).abs()) as f64;
+                        samples += 1;
+                    }
+                }
+                last_cursor = Some((cx, cy));
             }
         }
-        std::thread::sleep(DRAG_TICK);
+        std::thread::sleep(frame_period(last_cursor.is_some()));
+    }
+    if samples > 0 {
+        // 每采样一次光标走过多少距离，延迟就是「这段距离 ÷ 帧率」。
+        // 除以 16ms 换算成「相当于落后多少毫秒」，直接可读。
+        let avg_gap = gap_sum_ms / samples as f64;
+        log::info!(
+            "[剪贴板浮层] 拖动结束：{} 次采样，光标平均每帧移动 {:.1}px，窗口落后约 {:.1}ms",
+            samples,
+            avg_gap,
+            avg_gap / 16.0
+        );
     }
     drag_end();
 }
@@ -1199,7 +1244,7 @@ mod tests {
     /// 拖动目标位置：位移换算 + 工作区夹取
     #[cfg(target_os = "macos")]
     mod drag {
-        use super::super::{drag_target, inside_wa, DragAnchor};
+        use super::super::{drag_target, frame_period, inside_wa, should_move, DragAnchor};
 
         /// 1512×982 屏、scale 2（Retina）、工作区 0,0,3024,1804（物理）
         const WA: (i32, i32, u32, u32) = (0, 0, 3024, 1804);
@@ -1252,6 +1297,27 @@ mod tests {
         #[test]
         fn 工作区比浮层窄时不_panic() {
             let _ = drag_target(anchor(), 500.0, 500.0, W, H, (0, 0, 300, 200));
+        }
+
+        /// 轮询间隔：移动时 8ms（把「光标与窗口的固有延迟」压到半帧内），
+        /// 静止时 16ms（光标没动，再快也只是白采样）
+        #[test]
+        fn frame_period_is_faster_while_moving() {
+            let moving = frame_period(true);
+            let still = frame_period(false);
+            assert!(moving < still, "移动时必须更密：{moving:?} vs {still:?}");
+            assert_eq!(moving.as_millis(), 8);
+            assert_eq!(still.as_millis(), 16);
+        }
+
+        /// 目标没变就不重复下发：每条 set_position 都是主线程要处理的一条消息，
+        /// 而主线程同时还在合成 webview
+        #[test]
+        fn redundant_set_position_is_skipped() {
+            assert!(should_move(None, (10, 20)), "首次必须下发");
+            assert!(!should_move(Some((10, 20)), (10, 20)), "位置没变不该重复发");
+            assert!(should_move(Some((10, 20)), (11, 20)), "变了就该发");
+            assert!(should_move(Some((10, 20)), (10, 19)));
         }
 
         /// 换屏检测：光标离开缓存的工作区矩形就说明拖到别的显示器上了，
