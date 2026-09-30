@@ -358,3 +358,50 @@ npm run deploy
 | 客户端显示市场空白 | 验签失败（客户端静默回退缓存） | 跑 `npm run status` 第 7 项；再对比客户端内嵌公钥与 `market_public.key` |
 | 部署时守卫报错 | 契约漂移 | **别绕过**，看报错文字改对应的那一边 |
 | `d1 execute` 报表已存在 | 第 5 步跑过两次 | 无害，schema 全是 `IF NOT EXISTS` |
+
+## 部署静态资源到 Cloudflare Pages（v0.7.3 起的市场与更新清单托管处）
+
+`workers.dev` 在国内被 DNS 污染，`pages.dev` 不被 —— 这是选它的唯一理由。
+账号/发布类接口仍走平台服务端；市场清单、扩展包、安装包走 Pages。
+
+```bash
+# 建项目（--production-branch 必填；--force 只在**建项目这一次**需要）
+npx wrangler pages project create m-hub-server --production-branch main --force
+
+# 上传：先复制到干净暂存目录，确保隐藏文件 _headers 一并带上（拖拽上传最容易漏它）
+STAGE=/tmp/mhub-pages-stage && rm -rf "$STAGE" && mkdir -p "$STAGE" && cp -R public/. "$STAGE"/
+npx wrangler pages deploy "$STAGE" --project-name m-hub-server --branch main
+```
+
+三个坑：
+
+1. **不带 `--force` 会失败**。wrangler 4.x 会把 Pages 委派给 Cloudflare Workers，
+   去打 `/workers/services/<name>` 返回 `code: 10013`。
+2. **不带 `--production-branch` 也会失败**：`Missing production branch`。
+   我们是纯静态上传、没有 Git 仓库，这个分支名只是个标识，用 `main` 即可。
+3. **`_headers` 是隐藏文件**，它承载 `Content-Encoding: identity` ——
+   清单与签名必须逐字节一致，任何重新压缩都会让 Ed25519 验签失败。
+   控制台拖拽上传容易漏掉它，故走命令行 + 干净暂存目录。
+
+⚠️ **改了托管地址必须重跑 `seed-manifests` 并重新部署**：
+清单里的 `downloadUrl` 是**签名前写死的字节**，忘了重签会出现
+「清单验签通过（它确实被正确签过）但包指向另一个部署」的跨部署混用。
+守卫 `check-manifest-urls.mjs` 的主机名断言会拦下这种不一致。
+
+部署后必查（不能只看状态码，要**逐字节对比 + 真验签**）：
+
+```bash
+B=https://m-hub-server.pages.dev
+for f in api/v1/market/registry api/v1/market/registry.sig api/v1/app/update api/v1/app/update.sig; do
+  cmp <(curl -s $B/$f) public/$f && echo "✓ $f 逐字节一致"
+done
+```
+
+⚠️ 刚部署完的头几分钟偶发 `522`（边缘传播中），连测 10 次即可区分
+「偶发抖动」与「稳定故障」—— 单次 522 不要据此下结论。
+客户端侧对此有 4 次退避重试兜底（清单与签名是两次独立请求，
+一次成功一次失败拼在一起必然验签失败）。
+
+⚠️ `fetch_bytes` 在**读 body 之前**就检查状态码（`updater.rs` / `market.rs` 各一份）：
+这样 5xx 会被当成 `HTTP 5xx` 并触发重试，而**不会**被误当成签名内容
+去报「签名非法」—— 后者会把一个网络故障说成一次安全事件。
