@@ -1412,6 +1412,123 @@ mod tests {
         assert!(parse_manifest(&serde_json::to_vec(&json).unwrap()).is_err());
     }
 
+    /// ⚠️ 本组测试走的是**发布侧的真实产物形态**：
+    /// 用临时密钥对现场签一份 update.json（与 `scripts/market-sign.sh` 做的事
+    /// 同构），再依次过 `parse_manifest` → `signing::verify_detached_with` →
+    /// `platform_entry` → `judge`。
+    ///
+    /// 为什么要这么写：以往那条手抄的 `TEST_SIGNATURE` 常量只能证明
+    /// 「常量与自己自洽」——把整条链上任何一环改坏（平台键取错、schema 判错、
+    /// 验签接错字节），它照样绿。**整条链从未被真实签名跑通过一次。**
+    fn signed_manifest(version: &str, keys: &[&str]) -> (String, Vec<u8>, String) {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer as _, SigningKey};
+
+        let mut platforms = serde_json::Map::new();
+        for k in keys {
+            platforms.insert(
+                k.to_string(),
+                serde_json::json!({
+                    "url": format!("https://dist/m-hub-{k}.dmg"),
+                    "sha256": "abc",
+                    "size": 1
+                }),
+            );
+        }
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "version": version,
+            "minimumUpgradable": "0.1.0",
+            "notes": "端到端联调",
+            "platforms": platforms
+        });
+        // to_vec 而非 to_string：客户端验的是**原始字节**，签的也必须是同一份字节
+        let content = serde_json::to_vec(&json).unwrap();
+
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let sig = sk.sign(&content).to_bytes();
+        let pub_b64 = B64.encode(sk.verifying_key().as_bytes());
+        (pub_b64, content, B64.encode(sig))
+    }
+
+    /// 端到端：真实签名 → 解析 → 验签 → 平台匹配 → 判为可升级。
+    /// 每一环都走生产代码，不是把中间结果抄进断言。
+    #[test]
+    fn end_to_end_signed_update_manifest_reaches_upgradeable() {
+        let (pub_b64, content, sig) =
+            signed_manifest("9.9.9", &[platform_key()]);
+        crate::signing::verify_detached_with(&pub_b64, &content, &sig)
+            .expect("真实签名应通过生产验签逻辑");
+        let m = parse_manifest(&content).expect("真实清单应能解析");
+        match judge(&m, "0.7.2") {
+            ManifestVerdict::Upgradeable { entry, .. } => {
+                assert_eq!(entry.url, format!("https://dist/m-hub-{}.dmg", platform_key()));
+            }
+            other => panic!("应判为可升级，实际: {other:?}"),
+        }
+    }
+
+    /// 公钥参数真的被用上了：同一份签名，正确公钥过、别的公钥不过。
+    ///
+    /// ⚠️ 这条一开始只断言「换公钥后验不过」——那是**弱守卫**：若实现忽略传入
+    /// 公钥、始终用内嵌常量那把，验签照样失败、`is_err()` 照样成立、测试照样绿，
+    /// 而「公钥参数被忽略」这个安全缺陷完全测不出（实测：把实现改成忽略参数后，
+    /// 本条不红，是另外两条 happy-path 测试红的）。
+    /// 判据：**要证明「用上了这个参数」，必须同时证明「用它时成功」**。
+    #[test]
+    fn end_to_end_uses_the_passed_public_key() {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine as _;
+        use ed25519_dalek::SigningKey;
+        let (pub_b64, content, sig) = signed_manifest("9.9.9", &[platform_key()]);
+        let other_pub = B64.encode(
+            SigningKey::from_bytes(&[8u8; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        assert_ne!(other_pub, pub_b64, "两把公钥必须真的不同");
+        assert!(
+            crate::signing::verify_detached_with(&pub_b64, &content, &sig).is_ok(),
+            "用签名者对应的公钥必须通过——否则说明传入的公钥被忽略了"
+        );
+        assert!(
+            crate::signing::verify_detached_with(&other_pub, &content, &sig).is_err(),
+            "换一把公钥后必须验不过"
+        );
+    }
+
+    /// 清单内容改一个字节（模拟传输中被改）→ 验不过。
+    /// 钉住「验的是原始字节」：若实现改成验解析后的结构，这���会绿。
+    #[test]
+    fn end_to_end_rejects_a_single_flipped_byte_in_the_manifest() {
+        let (pub_b64, content, sig) = signed_manifest("9.9.9", &[platform_key()]);
+        let mut tampered = content.clone();
+        let n = tampered.len();
+        tampered[n - 2] ^= 0x01;
+        assert!(
+            crate::signing::verify_detached_with(&pub_b64, &tampered, &sig).is_err(),
+            "改一个字节即须验不过"
+        );
+    }
+
+    /// 清单里没有本平台条目时，整条链的终点是 Unreachable（可展示的原因），
+    /// 而不是 UpToDate。这是发布事故最常见的一种，必须端到端成立。
+    #[test]
+    fn end_to_end_windows_only_manifest_ends_unreachable_not_up_to_date() {
+        let (pub_b64, content, sig) = signed_manifest("9.9.9", &["windows-x86_64"]);
+        crate::signing::verify_detached_with(&pub_b64, &content, &sig).unwrap();
+        let m = parse_manifest(&content).unwrap();
+        match judge(&m, "0.7.2") {
+            ManifestVerdict::Unreachable(reason) => {
+                assert!(reason.contains(platform_key()));
+            }
+            other => panic!(
+                "Windows-only 清单在 macOS 上必须判为拿不到，实际: {other:?}"
+            ),
+        }
+    }
+
     /// 造一份「版本比当前新、且带本平台条目」的可升级清单。
     fn upgradable_manifest(version: &str) -> UpdateManifest {
         UpdateManifest {

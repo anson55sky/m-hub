@@ -15,10 +15,25 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use ed25519_dalek::Verifier as _;
 
-/// 校验 `content` 的分离签名（`signature_b64` 为 base64 编码的 64 字节 Ed25519 签名）。
+/// 校验 `content` 的分离签名（`signature_b64` 为 base64 编码的 64 字节 Ed25519 签名），
+/// 公钥取内嵌的生产公钥。
 pub fn verify_detached(content: &[u8], signature_b64: &str) -> Result<(), String> {
+    verify_detached_with(MARKET_PUBLIC_KEY_B64, content, signature_b64)
+}
+
+/// 同 [`verify_detached`]，但公钥由调用方给。
+///
+/// 抽出来是为了让**整条发布链路**能在单测里跑通：以往测试向量是手抄的一串
+/// 常量，它只能证明「这串常量与自己自洽」，证明不了「解析 → 验签 → 平台匹配
+/// → 版本判定」这条链在真实签名下是通的。测试可用临时密钥对现场签一份清单，
+/// 再走生产验签函数——这正是发布侧 `scripts/market-sign.sh` 做的事。
+pub fn verify_detached_with(
+    public_key_b64: &str,
+    content: &[u8],
+    signature_b64: &str,
+) -> Result<(), String> {
     let pub_bytes = B64
-        .decode(MARKET_PUBLIC_KEY_B64.trim())
+        .decode(public_key_b64.trim())
         .map_err(|e| format!("公钥解码失败: {e}"))?;
     let pub_bytes: [u8; 32] = pub_bytes
         .try_into()
