@@ -248,8 +248,31 @@ async function pollStamp() {
 // 于本窗口操作时变化，失焦期间不可能变；从停止恢复时立即补扫一次（useAdaptivePolling）。
 useAdaptivePolling(pollStamp, { activeMs: 5000 })
 
-function onInstall() {
+/**
+ * 头部「安装扩展」按钮。
+ *
+ * ⚠️ 原来只有 `switchTab('market')`，症状是**「点了没反应」**：
+ * 用户已经在市场页时，切到当前标签是空操作 —— 按钮看着像能装东西，
+ * 却什么也不做。实机反馈「点击安装扩展没反应」查出来的就是这个。
+ *
+ * 现在的口径：切到市场页后**顺手打开第一个可安装扩展的详情**，
+ * 让这一步真的开始安装流程（弹窗里有权限告知与确认按钮）。
+ * 没有可安装项时给一句交代，而不是静默。
+ */
+async function onInstall() {
   switchTab('market')
+  // 清单是异步拉的：已在市场页时这里可能还没数据，先确保拉完
+  if (!marketRequested) await loadMarket()
+  const installable = market.value.find((m) => !installedUpToDate(m) && !hostTooOld(m))
+  if (installable) {
+    openDetail(installable)
+  } else if (market.value.length === 0) {
+    // 拉取失败时 `loadMarket` 自己已经 toast 过了（那里才有真实原因）；
+    // 这里只兜「成功但清单是空的」，不重复报错也不静默。
+    if (marketStatus.value) showToast('市场里还没有扩展')
+  } else {
+    showToast('市场里的扩展都已安装到最新版本')
+  }
 }
 
 const tab = ref<'installed' | 'market' | 'dev'>('installed')

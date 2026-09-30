@@ -63,7 +63,20 @@ const loginNotice = ref<{ kind: 'busy' | 'warn' | 'error'; text: string; raw: st
  * 成功的那条报错的那条各占一行）。
  */
 const platformDown = ref(false)
-/** 传输层错误码 = 「服务不可用」，而不是「你密码填错了」这类可重试失败 */
+/** 服务端**主动拒绝**（不是连不上），且属于「配置/未部署」而非「临时故障」 */
+const platformUnconfigured = ref<string>('')
+
+/**
+ * 传输层错误码 = 「服务不可用」，而不是「你密码填错了」这类可重试失败。
+ *
+ * ⚠️ `SERVER_MISCONFIGURED` 是**第三类**，原先两类都没覆盖它，实机表现：
+ * 服务端活着、但没配 `GITHUB_CLIENT_ID` → 点「开始登录」弹红色 toast
+ * 「服务端未配置 GITHUB_CLIENT_ID」，而同屏上方本地 GitHub 登录是**绿的**
+ * （GlassPad 已登录）。两条并存，用户只会以为自己白登了。
+ *
+ * 它与 `platformDown` 的区别很重要：传输故障是**临时**的、该重试；
+ * 未配置是**配置状态**、重试多少次都一样，故单独一个 state 且文案不同。
+ */
 function isPlatformDown(e: unknown): boolean {
   const raw = String(e)
   return (
@@ -72,6 +85,22 @@ function isPlatformDown(e: unknown): boolean {
     raw.startsWith('NETWORK_ERROR') ||
     raw.startsWith('GITHUB_UNAVAILABLE')
   )
+}
+
+/** 从错误里认出「服务端未配置某项」，返回人话说明；不是这一类则返回空串 */
+function unconfiguredReason(e: unknown): string {
+  const raw = String(e)
+  const m = /SERVER_MISCONFIGURED:\s*([^"'\\]+)/.exec(raw)
+  if (!m) return ''
+  const what = (m[1] || '').trim()
+  if (what.includes('GITHUB_CLIENT_ID')) {
+    return '服务端尚未配置 GitHub 登录凭证，平台登录暂不可用。' +
+      '这不影响上面的本地 GitHub 登录，也不影响扩展市场与自动更新。'
+  }
+  if (what.includes('INVITE_CODE')) {
+    return '服务端尚未配置兑换码，兑换与开发者申请暂不可用。'
+  }
+  return `服务端尚未配置${what || '所需配置'}，该功能暂不可用。`
 }
 
 /**
@@ -448,6 +477,9 @@ async function startGithubLogin() {
   } catch (e) {
     // 服务端代调 GitHub 失败时给的是可读文案（如「GITHUB_UNAVAILABLE: GitHub 暂时不可用，请稍后再试」）
     const { text, raw } = authErrorText(e)
+    if (unconfiguredReason(e)) {
+      platformUnconfigured.value = unconfiguredReason(e)
+    }
     if (isPlatformDown(e)) {
       // 平台服务不通：不要再摆一条红字「发起登录失败」——
       // 同一个页面上方「GitHub 登录已成功」是绿的，下面一条红的「登录失败」
@@ -455,6 +487,13 @@ async function startGithubLogin() {
       platformDown.value = true
       loginNotice.value = null
       showToast('平台服务当前不可用')
+    } else if (unconfiguredReason(e)) {
+      // 同理：「服务端未配置 X」也**不是**一次登录失败。
+      // 摆红字 + 弹 toast 的后果实测很糟：上方本地 GitHub 登录是绿的
+      // （已登录），下方一条红的「登录失败」让人以为白登了。
+      // 改成按钮置灰 + 常驻中性说明（已由 platformUnconfigured 渲染）。
+      loginNotice.value = null
+      showToast('该功能需服务端配置后才可用')
     } else {
       loginNotice.value = { kind: 'error', text: `发起登录失败：${text}`, raw }
       showToast(`发起登录失败：${text}`)
@@ -504,6 +543,9 @@ async function sendEmailCode() {
     const { text, raw } = emailErrorText(e)
     // 与平台 GitHub 那条同口径：传输层失败 = 服务不通，置位并撤掉红字，
     // 别让邮箱区也摆一条「发送失败」，与上方绿色的「GitHub 登录已成功」打架
+    if (unconfiguredReason(e)) {
+      platformUnconfigured.value = unconfiguredReason(e)
+    }
     if (isPlatformDown(e)) {
       platformDown.value = true
       emailNotice.value = null
@@ -538,6 +580,9 @@ async function verifyEmailCode() {
     const { text, raw } = emailErrorText(e)
     // 与平台 GitHub 那条同口径：传输层失败 = 服务不通，置位并撤掉红字，
     // 别让邮箱区也摆一条「发送失败」，与上方绿色的「GitHub 登录已成功」打架
+    if (unconfiguredReason(e)) {
+      platformUnconfigured.value = unconfiguredReason(e)
+    }
     if (isPlatformDown(e)) {
       platformDown.value = true
       emailNotice.value = null
@@ -728,7 +773,12 @@ onBeforeUnmount(() => {
             <h4 class="account-subtitle">平台登录（需要 m-hub 服务器）</h4>
             <!-- 试过一次确认不通就置灰并说清原因：让用户反复点、每次吃一条红字，
                  而同屏上方「GitHub 登录已成功」是绿的，两条并存只会让人以为白登了。 -->
-            <p v-if="platformDown" class="account-notice warn">
+            <!-- ⚠️ 「未配置」与「服务不可用」分开说：前者重试无用（是配置状态），
+                 后者该重试。混成一条会让用户以为反复点就能成。 -->
+            <p v-if="platformUnconfigured" class="account-notice warn">
+              {{ platformUnconfigured }}
+            </p>
+            <p v-else-if="platformDown" class="account-notice warn">
               平台服务当前不可用，平台登录已停用（不影响上面的 GitHub 登录）。平台能力包括
               AI 额度、申请扩展开发者、发布扩展、扩展市场 —— 这些都要服务器签发会话。
             </p>
@@ -740,8 +790,14 @@ onBeforeUnmount(() => {
               <button
                 class="ghost-btn data-btn"
                 type="button"
-                :disabled="accountBusy || !!ghDevice || platformDown"
-                :title="platformDown ? '平台服务当前不可用' : ''"
+                :disabled="accountBusy || !!ghDevice || platformDown || !!platformUnconfigured"
+                :title="
+                  platformUnconfigured
+                    ? '服务端未配置该功能所需凭证'
+                    : platformDown
+                      ? '平台服务当前不可用'
+                      : ''
+                "
                 @click="startGithubLogin"
               >
                 {{ ghStarting ? '正在发起…' : ghDevice ? '等待授权…' : '开始登录' }}

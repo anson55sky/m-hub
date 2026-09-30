@@ -21,7 +21,7 @@
 //   # 连应用更新一起发（需要已构建好的 .dmg）
 //   node scripts/seed-manifests.mjs --dmg "src-tauri/target/release/bundle/dmg/m-hub_0.7.2_aarch64.dmg"
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, copyFileSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -43,6 +43,13 @@ const PRIV = join(KEY_DIR, 'market_private.pem')
 // 必须与 Rust 侧 `updater::platform_key()` 逐字一致 —— 那是客户端与服务端之间
 // 唯一的契约（约定 47 的精神）。这里手写而不是从 Rust import，因为脚本是
 // 独立的 Node 进程；`check-api-spec-conformance.mjs` 负责在构建期对账。
+/**
+ * 服务端公开地址。**必须与客户端 `config.rs::DEFAULT_SERVER_URL` 逐字一致** ——
+ * 写错的症状是「清单取得到、里面的 downloadUrl 取不到」，且失败现场在安装阶段、
+ * 离改动点很远（约定 47 的精神）。
+ */
+const PUBLIC_BASE_URL = (process.env.MHUB_SERVER_URL || 'https://m-hub-server.pocketbay.app').replace(/\/+$/, '')
+
 const PLATFORM_KEY =
   process.platform === 'darwin' && process.arch === 'arm64' ? 'macos-aarch64'
   : process.platform === 'darwin' ? 'macos-x86_64'
@@ -91,6 +98,14 @@ if (!existsSync(PRIV)) {
 mkdirSync(join(PUBLIC, 'api/v1/market'), { recursive: true })
 mkdirSync(join(PUBLIC, 'api/v1/app'), { recursive: true })
 
+// ⚠️ 必须在**打包循环之前**清空。放到之后会把刚复制的包一并删掉 ——
+// 症状是清单里 downloadUrl 指向的包不存在、而清单与签名都正常，
+// 一直要到用户点「安装」报 404 才暴露（这个顺序错就是这样被守卫抓到的）。
+// 残留包同样要清：它会被一起部署，用户可能下到与清单不符的旧文件。
+rmSync(join(PUBLIC, 'packages'), { recursive: true, force: true })
+// 同理：旧版本的安装包留着会被一起部署，占空间且容易下错版本
+rmSync(join(PUBLIC, 'downloads'), { recursive: true, force: true })
+
 const extensions = []
 if (existsSync(EXT_SRC)) {
   for (const id of readdirSync(EXT_SRC)) {
@@ -110,17 +125,26 @@ if (existsSync(EXT_SRC)) {
       '-x', 'node_modules/*', '*/node_modules/*', '.*', '*/.*',
     ], { cwd: dir })
 
+    // ⚠️ 包必须落到 public/packages/ 下才会被部署出去，而 downloadUrl 指向的
+    // 就是那个位置。两者错开的后果是「清单里写得下、实际取不到」——
+    // 用户点安装报 HTTP 404，而服务端一切正常（踩过一次）。
+    const extId = manifest.id || id
+    const relPath = `${extId}/${manifest.version}/${extId}-${manifest.version}.xhpack`
+    const deployed = join(PUBLIC, 'packages', relPath)
+    mkdirSync(dirname(deployed), { recursive: true })
+    copyFileSync(xhpack, deployed)
+
     extensions.push({
-      id: manifest.id || id,
+      id: extId,
       name: manifest.name || id,
       version: manifest.version,
       description: manifest.description || '',
       runtime: manifest.type || manifest.runtime || 'module',
       author: manifest.author || '',
-      // ⚠️ downloadUrl 指向 GitHub Releases，不指向本服务器 —— 省掉整块文件托管
-      // （约定：包本体不必自建，客户端只管按 URL 下载）
-      downloadUrl: `https://github.com/${process.env.MHUB_RELEASE_REPO || 'anson55sky/m-hub-extensions'}` +
-        `/releases/download/${manifest.id || id}-v${manifest.version}/${manifest.id || id}-${manifest.version}.xhpack`,
+      // 由本服务端托管：与清单同源，发一次版全部就位。
+      // ⚠️ 别再改成指向某个 GitHub release —— 那种 URL 不会被自动创建，
+      // 而清单里的每一个 URL 都必须**真的取得到**（发版前逐条 HEAD 验）。
+      downloadUrl: `${PUBLIC_BASE_URL}/packages/${relPath}`,
       sha256: sha256File(xhpack),
       size: statSync(xhpack).size,
       icon: '',
@@ -150,9 +174,18 @@ const platforms = {}
 if (dmgIdx > -1) {
   const dmg = process.argv[dmgIdx + 1]
   if (!dmg || !existsSync(dmg)) die(`--dmg 指定的文件不存在：${dmg}`)
+  // ⚠️ 与扩展包同理：更新包也**由本服务端托管**。
+  // 最初指向 `github.com/<仓库>/releases/download/v…`，那个 release 同样不存在 ——
+  // 用户点「立即更新」会报 404，而服务端一切正常。清单里每一个 URL 都必须
+  // 真的取得到（守卫 check:manifests 会逐条验）。
+  const dmgName = `m-hub_${version}_aarch64.dmg`
+  const dmgRel = `downloads/${version}/${dmgName}`
+  const dmgDest = join(PUBLIC, dmgRel)
+  mkdirSync(dirname(dmgDest), { recursive: true })
+  copyFileSync(dmg, dmgDest)
+
   platforms[PLATFORM_KEY] = {
-    url: `https://github.com/${process.env.MHUB_RELEASE_REPO || 'anson55sky/m-hub'}` +
-         `/releases/download/v${version}/m-hub_${version}_aarch64.dmg`,
+    url: `${PUBLIC_BASE_URL}/${dmgRel}`,
     sha256: sha256File(dmg),
     size: statSync(dmg).size,
   }

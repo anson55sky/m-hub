@@ -163,30 +163,56 @@ async function boot(): Promise<Env> {
 
 // ---------------------------------------------------------------- 静态清单
 
+/** 扩展包在静态资源里的落点：`/packages/<id>/<version>/<file>` */
+const PACKAGE_PREFIX = '/packages/'
+
+/** 应用安装包在静态资源里的落点：`/downloads/<版本>/<文件>` */
+const DOWNLOAD_PREFIX = '/downloads/'
+
 /**
- * 静态清单直接读文件应答，**不做任何加工**。
+ * 静态资源直接读文件应答，**不做任何加工**。
  *
- * ⚠️ 这是签名机制的全部意义所在：客户端 `signing.rs` 验的是**下载到的原始字节**。
- * 任何重新序列化（gzip 重压缩 / JSON 美化 / 多一个尾随换行）都会让验签失败，
- * 症状是客户端静默回退缓存 —— 市场空白、更新永远没有，而接口全部 200。
+ * ⚠️ 清单走这里时，这是签名机制的全部意义所在：客户端 `signing.rs` 验的是
+ * **下载到的原始字节**。任何重新序列化（gzip 重压缩 / JSON 美化 / 多一个
+ * 尾随换行）都会让验签失败，症状是客户端静默回退缓存 —— 市场空白、
+ * 更新永远没有，而接口全部 200。故用 `Buffer` 原样写出。
  *
- * 故这里用 `Buffer` 原样写出，且**不设 `content-encoding`**（由 Node 自行决定，
- * 我们不主动压缩）。
+ * ## 扩展包也走这里（`/packages/…`）
+ *
+ * 踩过一次真实的坑：最初为了「省掉文件托管」，把清单里的 `downloadUrl`
+ * 指向 `github.com/<某仓库>/releases/download/…` —— **那个 release 并不存在**，
+ * 症状是用户点「安装」报 `下载失败: HTTP 404`，而服务端一切正常。
+ * 写进清单的 URL **必须真的取得到**（发版前逐条 HEAD 验一遍）。
+ *
+ * 包由本服务端托管，比指去 GitHub 更好：
+ * · 不依赖第二个仓库、不依赖第三方发版流程
+ * · 与清单同源，`seed:manifests` 一次就产出全部可下载文件
+ * · 上游 `x-hub` 本来也是服务端托管（`/api/v1/market/asset/packages/…`）
  */
 async function serveStatic(pathname: string, res: ServerResponse): Promise<boolean> {
-  const wanted = new Set<string>([...Object.values(STATIC), ...Object.values(STATIC).map((p) => p + '.sig')])
-  if (!wanted.has(pathname)) return false
+  const manifests = new Set<string>([
+    ...Object.values(STATIC),
+    ...Object.values(STATIC).map((p) => p + '.sig'),
+  ])
+  // 包（扩展 .xhpack）与安装包（.dmg）都放行 —— 二者都是清单里指向的 URL
+  const isPackage =
+    pathname.startsWith(PACKAGE_PREFIX) || pathname.startsWith(DOWNLOAD_PREFIX)
+  if (!manifests.has(pathname) && !isPackage) return false
 
-  const file = join(PUBLIC, pathname.replace(/^\//, ''))
+  const file = isPackage ? join(PUBLIC, pathname.replace(/^\//, '')) : join(PUBLIC, pathname.replace(/^\//, ''))
   if (!file.startsWith(PUBLIC)) {
-    // 目录穿越（`pathname` 已被白名单挡掉，这里是第二道）
+    // 目录穿越（包路径来自用户输入，这里是唯一的防线，必须严）
     res.writeHead(400).end()
     return true
   }
   try {
     const buf = await readFile(file)
     res.writeHead(200, {
-      'content-type': pathname.endsWith('.sig') ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
+      'content-type': isPackage
+        ? 'application/octet-stream'
+        : pathname.endsWith('.sig')
+          ? 'text/plain; charset=utf-8'
+          : 'application/json; charset=utf-8',
       'content-length': String(buf.byteLength),
       // 短缓存：发布后要能较快生效，但别每次都回源
       'cache-control': 'public, max-age=60',
@@ -199,7 +225,9 @@ async function serveStatic(pathname: string, res: ServerResponse): Promise<boole
     res.end(
       JSON.stringify({
         error: 'not_found',
-        message: `静态清单 ${pathname} 未部署。请在 server/ 下跑 npm run seed:manifests 重新生成并连同 .sig 一起上传。`,
+        message: isPackage
+          ? `扩展包 ${pathname} 不在部署产物里。请确认 server/public/packages/ 下有该文件（seed:manifests 会生成）。`
+          : `静态清单 ${pathname} 未部署。请在 server/ 下跑 npm run seed:manifests 重新生成并连同 .sig 一起上传。`,
       }),
     )
   }

@@ -20,7 +20,8 @@
     "start": "node --experimental-strip-types --no-warnings=ExperimentalWarning src/node.ts",
     "dev:node": "node --experimental-strip-types --no-warnings=ExperimentalWarning --watch src/node.ts",
     "check:strip": "node scripts/check-strip-only-safe.mjs",
-    "check": "npm run check:spec && npm run check:strip && npm run typecheck && npm test"
+    "check": "npm run check:spec && npm run check:strip && npm run check:manifests && npm run typecheck && npm test",
+    "check:manifests": "node scripts/check-manifest-urls.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250109.0",

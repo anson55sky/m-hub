@@ -1,7 +1,13 @@
 {
   "schemaVersion": 1,
-  "version": "0.7.2",
-  "minimumUpgradable": "",
-  "notes": "",
-  "platforms": {}
+  "version": "0.7.3",
+  "minimumUpgradable": "0.7.2",
+  "notes": "平台服务端迁到 PocketBay；自动更新与扩展市场打通；市场扩展改为服务端托管（修复安装 404）。",
+  "platforms": {
+    "macos-aarch64": {
+      "url": "https://m-hub-server.pocketbay.app/downloads/0.7.3/m-hub_0.7.3_aarch64.dmg",
+      "sha256": "c9ae0b171678ac0d9018037f28d818b39a46345baf6f5c0ac28553948dccaa2b",
+      "size": 6043069
+    }
+  }
 }
