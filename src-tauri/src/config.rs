@@ -485,20 +485,37 @@ fn default_note_editor_mode() -> String {
 /// 地址**必须拆成两个常量**（`DEFAULT_SERVER_URL` 走 API，
 /// `DEFAULT_ASSET_BASE_URL` 走静态），详见下面 `DEFAULT_ASSET_BASE_URL`。
 ///
+/// ## v0.7.3 最终形态：两者是**同一个** Pages 域名（服务端已迁到 Pages Functions）
+///
+/// 第一版拆分时 API 还留在平台服务端，于是**又踩了一次「改一半」**：
+/// 服务端迁走了、客户端没重新编译，实机一直报 `HTTP_ERROR: 服务端返回 403`
+/// （那是平台服务端的访问保护；而新的 Pages 端点从这台机器测是 200）。
+///
+/// **教训比第一次更值得记**：服务端迁到别处时，「客户端指向哪里」和
+/// 「密钥配在哪」是**两件独立的事**，改一件不会带动另一件。
+/// 判据：**改完服务端地址后，必须重新编译并重装客户端**，
+/// 否则你测的是新服务端、用的是烧死在旧二进制里的旧地址 —— 而症状
+/// （403/405）看起来像服务端问题，会把人引向完全错误的方向。
+///
 /// 判据（下次换地址时先问这个）：**这个请求需要服务端进程吗？**
 /// 需要 → API 端点；不需要 → 静态端点。清单地址是 GET 且带签名，可以静态托管；
-/// 登录要 POST、还要服务端签发会话 token，静态托管做不到。
-pub const DEFAULT_SERVER_URL: &str = "https://m-hub-server.pocketbay.app";
+/// 登录要 POST、还要服务端签发会话 token，纯静态托管做不到（但 Pages Functions 可以）。
+pub const DEFAULT_SERVER_URL: &str = "https://m-hub-server.pages.dev";
 
 /// **静态资源托管处**（市场清单 / 升级清单 / 扩展包 / 安装包），v0.7.3 起为 Cloudflare Pages。
 ///
-/// 与 `DEFAULT_SERVER_URL` **必须分开**，理由见上面那个 ⚠️⚠️ 段：把 API 地址
-/// 换成静态托管会让平台登录全挂（405），反过来把清单留在有休眠的服务端上
-/// 则会偶发「两次独立请求一次成功一次失败 → 假验签失败」。
+/// 与 `DEFAULT_SERVER_URL` **必须分开写**，尽管值相同。理由见上面那两个 ⚠️⚠️ 段：
+/// 二者的**部署形态不同**（静态文件 vs Functions + D1），一旦有人只改一个、
+/// 或者把静态资源挪去别处，症状是「清单验签通过但包取不到」这类难查的问题。
+/// 值相同是当前部署的结果，不是「可以合并成一个常量」的理由。
 ///
 /// 两者路径**恰好同形**（`/api/v1/...`），所以静态托管方必须原样保留目录层级 ——
 /// Pages 把目录内容映射到站点根，`server/public/api/v1/market/registry`
 /// 正好对上客户端请求的路径。这也是为什么 `public/` 里不能有 `index.html`。
+///
+/// ⚠️ Pages 的 **Functions 优先于静态资产**（Workers 相反），故这四个签名清单
+/// 会被 `functions/api/v1/[[path]].ts` 先撞上；服务端靠
+/// `handle.ts::is_static_asset` 显式交还 `env.ASSETS` 才能拿到原始字节。
 pub const DEFAULT_ASSET_BASE_URL: &str = "https://m-hub-server.pages.dev";
 
 /// 市场清单接口路径（静态托管，`server/public/` 下同名目录；`.sig` 为同级 `{url}.sig`）。
@@ -997,21 +1014,46 @@ mod tests {
         // 而我当时把**两个常量改成了同一个值** → 断言必然通过。
         // 也就是说，那条测试守的其实是「两个地址相等」——而那恰好就是 bug 本身。
         //
-        // 真正的不变量是**两者不能是同一个托管处**：静态托管能响应公开 GET，
-        // 但无法处理 POST、也无法签发会话 token。
-        assert_ne!(
-            DEFAULT_ASSET_BASE_URL, DEFAULT_SERVER_URL,
-            "静态资源与 API 不能指向同一个托管处：Pages 之类的静态托管无法响应 \
-             POST API 端点，平台登录会得到 405（2026-09-30 实机事故）"
-        );
+        // ⚠️ 注意：**「不相等」不再是断言**，见下一条 `api_and_asset_bases_are_deployed_together`。
+        // 拆分常量的目的从来不是「让它们不同」，而是「让改动时必须同时想到两个」。
+        // 服务端整体迁到 Pages 后两者**确实相同**了 —— 那时该加的是「同步」的守卫，
+        // 而不是继续断言「不同」。
 
-        // 且必须双向对账：清单走静态、登录走 API。
-        // 只断言「两个常量不等」不够 —— 还得确认**谁在用哪个**，
-        // 否则把 market_registry_url 改回 DEFAULT_SERVER_URL 也能通过。
+        // 无论同不同，谁在用哪个必须写死：清单走静态、登录走 API。
+        //
+        // 这里曾有第四条 `assert!(!market_registry_url().starts_with(DEFAULT_SERVER_URL))`
+        // —— 它只在「两个常量不同」时成立，服务端整体迁到 Pages 后就**恒假**。
+        // 留着的教训：**常量同址后，依赖它们差异的断言会变成永久红灯**，
+        // 而红灯会让人以为新改动有问题，进而把正确的断言改错（我这次就差点那么做）。
         assert!(market_registry_url().starts_with(DEFAULT_ASSET_BASE_URL));
         assert!(update_manifest_url().starts_with(DEFAULT_ASSET_BASE_URL));
         assert!(crate::account::server_url().starts_with(DEFAULT_SERVER_URL));
-        assert!(!market_registry_url().starts_with(DEFAULT_SERVER_URL));
+    }
+
+    #[test]
+    fn api_and_asset_bases_are_deployed_together() {
+        // v0.7.3：服务端整体迁到 Cloudflare Pages（Functions + D1），
+        // 两个常量的值随之**都**变成 pages.dev。
+        //
+        // 这条守的是 2026-10-01 那次事故：服务端迁走了、密钥也配到 Pages 了，
+        // 但**客户端没有重新编译**，于是用的还是烧死在旧二进制里的
+        // `m-hub-server.pocketbay.app` → 实机一直 403。
+        // 而那 403 是平台服务端的访问保护，**看起来完全像服务端问题**，
+        // 我因此往「服务端配置」方向查了好几轮。
+        //
+        // 为什么 Rust 测试能抓到：值是编译期常量，只要改这里就会变。
+        // 抓不到的是「改了但没重新编译」—— 那要靠流程，不是靠断言。
+        // 故本测试的价值是：**下次换地址时它会提醒你两个常量是一对**。
+        assert_eq!(
+            DEFAULT_ASSET_BASE_URL, DEFAULT_SERVER_URL,
+            "服务端已整体迁到 Pages，两个常量必须同址。\
+             只改一个的症状是「清单正常但登录失败」或反过来 —— \
+             排查方向会被带偏（2026-10-01 踩过：客户端没重编，一直打旧地址得 403）。"
+        );
+        assert!(
+            DEFAULT_SERVER_URL.starts_with("https://"),
+            "必须是 https：http 会 301，而 reqwest 默认把 301 的 POST 降级成 GET 并丢 body"
+        );
     }
 
     #[test]

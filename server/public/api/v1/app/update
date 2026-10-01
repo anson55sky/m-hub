@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "version": "0.7.3",
   "minimumUpgradable": "0.7.2",
-  "notes": "清单拉取加入退避重试，修复平台休眠导致的假验签失败；「安装扩展」按钮恢复响应；未配置 GitHub 凭证时改为置灰说明而非误报登录失败；市场与安装包改由 Cloudflare Pages 托管。",
+  "notes": "清单拉取加入退避重试；「安装扩展」按钮恢复响应；未配置凭证时改为置灰说明；市场与安装包改由 Cloudflare Pages 托管，服务端迁到 Pages Functions（同一域名、零闲置开销）。",
   "platforms": {
     "macos-aarch64": {
       "url": "https://m-hub-server.pages.dev/downloads/0.7.3/m-hub_0.7.3_aarch64.dmg",
-      "sha256": "e812973b362f7923ee16d1889f1f9dca39dcf0f256fa709a17344d0c64b0278f",
-      "size": 6043907
+      "sha256": "8c8867da30f90c025f8ac34a1aded834aa9a9244f95eea122de9a5142985ea56",
+      "size": 6043021
     }
   }
 }
