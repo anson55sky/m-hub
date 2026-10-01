@@ -1,0 +1,34 @@
+{
+  // Cloudflare **Workers** 配置（备用路径，当前**未部署**）。
+  //
+  // 保留原因：`workers_dev` 子域被 DNS 污染，客户端取不到；Pages 才是实际在用的。
+  // 但路由表（`src/handle.ts`）、D1 绑定、数据库都是共用的，换回去不用改代码。
+  //
+  // 换回 Workers 的代价：必须先有一个**自有域名**挂 Custom Domain
+  // （`workers.dev` 不可用），或接受客户端在国内取不到清单。
+  //
+  // 与 `wrangler.jsonc`（Pages）的区别就在 `main` / `assets` / `observability`
+  // 这三个 Pages 不接受的键 —— 它们**不能**出现在 Pages 那份里（会直接报错）。
+  //
+  // ⚠️ Workers 与 Pages 的**静态资产优先级相反**：Workers 是资产优先
+  //    （匹配到文件就不执行 Worker），Pages 是 Functions 优先。同一批签名清单
+  //    在两个运行时上的路径不同，见 `src/handle.ts` 文件头。
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "m-hub-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-30",
+
+  "assets": { "directory": "./public", "not_found_handling": "none" },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "m-hub",
+      "database_id": "2376ee54-e290-4614-ad48-b73ba0463e28"
+    }
+  ],
+
+  "vars": { "EMAIL_FROM": "m-hub <noreply@example.com>" },
+
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } }
+}

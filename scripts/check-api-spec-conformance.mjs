@@ -38,8 +38,27 @@ const ACCOUNT_RS = join(ROOT, 'src-tauri/src/account.rs')
 const CHAT_RS = join(ROOT, 'src-tauri/src/chat.rs')
 const CONFIG_RS = join(ROOT, 'src-tauri/src/config.rs')
 const PATHS_TS = join(ROOT, 'server/src/lib/paths.ts')
-const INDEX_TS = join(ROOT, 'server/src/index.ts')
+// 路由表在 `handle.ts`（Workers 入口与 Pages Functions 共用同一份）。
+// 曾指向 `index.ts` —— 那是把路由搬进 handle.ts 之后遗留的，守卫当场报
+// 「16 条全部没有对应注册」，正好证明它在守真东西。
+const INDEX_TS = join(ROOT, 'server/src/handle.ts')
 const PUBLIC = join(ROOT, 'server/public')
+
+/**
+ * Pages Functions 的三个入口文件。
+ *
+ * ⚠️ **必须存在且必须是这三个前缀**：Pages 的路由优先级与 Workers 相反
+ *    （Functions 优先于静态资产），所以 Functions 入口既不能少（少了那条前缀
+ *    的 API 全部 404）也不能多（多一个 `functions/api/[[path]].ts` 之类的
+ *    catch-all 会把签名清单也吃掉，导致验签失败 —— 那是静默的）。
+ *
+ * 少一个的失败现场很远（部署后客户端才报 404/验签失败），故在这里拦。
+ */
+const PAGES_FUNCTIONS = [
+  { file: 'functions/api/v1/[[path]].ts', covers: '/api/v1/', why: '14 条 /api/v1/* 动态路由' },
+  { file: 'functions/me.ts', covers: '/me', why: '根路径账号状态' },
+  { file: 'functions/v1/chat/completions.ts', covers: '/v1/chat/completions', why: 'OpenAI 兼容面（约定 33）' },
+]
 
 const problems = []
 const fail = (m) => problems.push(m)
@@ -143,6 +162,33 @@ const chatSrc = stripTests(readFileSync(CHAT_RS, 'utf8'))
 const configSrc = stripTests(readFileSync(CONFIG_RS, 'utf8'))
 const tables = extractTsTables(readFileSync(PATHS_TS, 'utf8'))
 const indexSrc = readFileSync(INDEX_TS, 'utf8')
+
+// ---------------------------------------------------------------- 0a. Pages Functions 入口
+
+for (const { file, covers, why } of PAGES_FUNCTIONS) {
+  const p = join(ROOT, 'server', file)
+  if (!existsSync(p)) {
+    fail(
+      `Pages Functions 入口缺失：server/${file}（覆盖 ${covers} —— ${why}）。\n` +
+        `    Pages 的 Functions 优先于静态资产，该前缀下没有 Function 就会 404；\n` +
+        `    而清单与包在 public/ 里，签名清单被 Function 抢走则客户端验签失败（静默）。`,
+    )
+    continue
+  }
+  // 入口必须真的转给共用路由，而不是自己实现一套 —— 两套实现必然漂移
+  const src = readFileSync(p, 'utf8')
+  if (!/handleRequest/.test(src)) {
+    fail(
+      `server/${file} 没有调用 handleRequest。\n` +
+        `    Functions 入口必须转给共用的路由表；自己实现一套会让两个运行时行为漂移，` +
+        `而漂移的失败现场在运行期（404 / 验签失败），离改动点很远。`,
+    )
+  }
+  // catch-all 必须用双方括号，否则只匹配一段路径
+  if (file.includes('[[path]]') && !/\[\[path\]\]/.test(p)) {
+    fail(`server/${file} 的 catch-all 语法不对。`)
+  }
+}
 
 // ---------------------------------------------------------------- 0. 解析器自检
 

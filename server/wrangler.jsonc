@@ -1,90 +1,47 @@
 {
-  // m-hub-server · Cloudflare Workers 配置
+  // Cloudflare **Pages** 配置（当前真正在用的部署目标）。
   //
-  // `wrangler.jsonc` 取代旧版 `wrangler.toml`（Wrangler 3.90+ 起的推荐格式）。
-
+  // ## 为什么不用 Workers
+  //
+  // `*.workers.dev` 在国内被 DNS 污染（多解析器给出不同假 IP，而
+  // `www.cloudflare.com` 解析正常 → 污染针对**域名**而非 Cloudflare 的 IP 段）；
+  // `*.pages.dev` 不被污染。且 Pages 免费、scale-to-zero（闲置零开销）。
+  //
+  // ## 三条 Pages 专属约束（都踩过）
+  //
+  // ① **不能有 `main`** —— Pages 与 Workers 是互斥的两种产物，共存会直接报错。
+  //    Workers 那份配置在 `wrangler.worker.jsonc`。
+  // ② **不能有 `observability`** —— Pages 的日志在 dashboard 里看，
+  //    且 Pages 拒绝这个键（不是忽略，是报错）。
+  // ③ **`workers_dev` 也不要写** —— 写了会让 Pages 部署去建 Worker 路由。
+  //    实测不带 `--force` 的 `pages project create` 就是因此去打
+  //    `/workers/services/<name>` 然后失败（code: 10013）。
+  //
+  // ⚠️ **路由优先级与 Workers 相反**：Workers 是静态资产优先，Pages 是 Functions 优先。
+  //    4 个签名清单恰好在 `/api/v1/` 下，会先撞进 `functions/api/v1/[[path]].ts`
+  //    —— 故 `src/handle.ts::is_static_asset` 必须显式把它们交还 `env.ASSETS`。
+  //    这个差异是**静默**的：Workers 上全绿，Pages 上客户端开始报「验签失败」。
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "m-hub-server",
-  // 换成你自己的 Worker 名。它同时决定默认子域名：
-  //   <name>.<你的子域>.workers.dev
-  // 详见 README「子域名怎么拿」。
-  "main": "src/index.ts",
   "compatibility_date": "2026-09-30",
-  // Workers 官方类型 + 本地运行（默认离线安装 wrangler 即可）
 
-  // ---------------------------------------------------------------- 子域名
-  //
-  // 置 true 即启用 `<name>.<account>.workers.dev` 这个**公开可路由的 HTTPS 地址**。
-  // 这是本方案能「不买域名」的关键：客户端里烧的是编译期常量
-  // （`config::DEFAULT_SERVER_URL`），而这个地址**免费**、**带证书**、全球可达。
-  //
-  // ⚠️ 一旦把服务发出去，`workers.dev` 地址是公开可猜的（任何人都能试）。
-  //   真正的防线是**签名**：市场清单与升级清单没有 Ed25519 签名一律不认
-  //   （`signing.rs`），所以别人即使知道地址也伪造不出内容。
-  //   账号类接口另有 Bearer token。**不要**依赖「地址保密」做安全。
-  "workers_dev": true,
+  // 静态资源输出目录。`functions/` 是约定目录名，不写进配置。
+  "pages_build_output_dir": "public",
 
-  // ---------------------------------------------------------------- 静态资产
-  //
-  // `public/` 下的文件由边缘直接应答主域，**不过 Worker**：
-  //   public/api/v1/market/registry       市场清单（已签名）
-  //   public/api/v1/market/registry.sig   分离签名
-  //   public/api/v1/app/update            升级清单（已签名）
-  //   public/api/v1/app/update.sig        分离签名
-  //
-  // ⚠️ 关键：客户端 `signing.rs` 验的是**下载到的原始字节**。静态资产这条路径
-  //   保证「发布时签的字节」与「客户端拿到的字节」逐字节一致 —— 中间任何一次
-  //   重新序列化（gzip 重压缩 / JSON 美化 / 多一个尾随换行）都会让验签失败。
-  //   所以**绝不能**把这两条路径改成经 Worker 转发或加工。
-  //
-  // 故意**不**设 `binding`：不设 binding 时静态资源优先匹配、命中就不进 Worker；
-  // 设了 binding 反而要自己在代码里 `env.ASSETS.fetch()`，多一层出错机会。
-  "assets": {
-    "directory": "./public",
-    // 未命中静态资源时不要回 404 HTML，而是交给 Worker（否则 /me 之类全灭）
-    "not_found_handling": "none"
-  },
-
-  // ---------------------------------------------------------------- D1
-  //
-  // `database_id` 用 `npx wrangler d1 create m-hub` 生成，**替换下面的占位符**。
-  // 占位符是一串明显的假 id，真跑起来会立刻报「数据库不存在」而不是静默建空库
-  // —— 这是刻意的：部署失败要吵，不许悄悄成功。
+  // ⚠️ D1 库是当初建 Workers 时就建好的那个，**不要新建**：Pages 与 Workers
+  //    不共享存储，新建会得到一个空库（症状是「接口都在但一律 401/空数据」）。
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "m-hub",
-      "database_id": "2376ee54-e290-4614-ad48-b73ba0463e28",
-      "migrations_dir": "migrations"
+      "database_id": "2376ee54-e290-4614-ad48-b73ba0463e28"
     }
   ],
 
-  // ---------------------------------------------------------------- 变量
-  //
-  // 这些是**明文**变量，会进部署产物。密钥类的一律走 `wrangler secret put`：
-  //   npx wrangler secret put GITHUB_CLIENT_ID
-  //   npx wrangler secret put INVITE_CODE
-  //   npx wrangler secret put OPENAI_API_KEY
-  //   （可选）npx wrangler secret put RESEND_API_KEY / EMAIL_FROM
-  //
-  // ⚠️ 留空的行为是**明确报错**而不是静默降级：未配 GITHUB_CLIENT_ID 时
-  //   GitHub 登录回 500 `server_misconfigured`；未配 INVITE_CODE 时兑换回 500。
-  //   理由同客户端：假成功比报错难查得多（约定 53）。
+  // ⚠️ 这里的值随函数代码**公开下发**，只放非机密项。
+  //    GITHUB_CLIENT_ID / RESEND_API_KEY / OPENAI_API_KEY / INVITE_CODE
+  //    一律用 `wrangler pages secret put`，绝不写进本文件。
   "vars": {
-    // 邮件的发件人（可选）。不配 = 邮箱登录回 501「未启用，请用 GitHub 登录」
     "EMAIL_FROM": "m-hub <noreply@example.com>"
-  },
-  // ⚠️ 下面三个**刻意不写进 vars**，只走 `wrangler secret put`：
-  //   GITHUB_CLIENT_ID / INVITE_CODE / OPENAI_API_KEY
-  // 早先这里写着空串占位，部署日志会同时列出「Vars: GITHUB_CLIENT_ID: ""」与
-  // 已上传的 secret —— 运行时 secret 确实优先，但要看文档才知道哪个生效。
-  // **不声明**比**声明空串**更不含糊：代码读不到就直接报「未配置」。
-  // 代价是忘了配时报的是 500 server_misconfigured 而不是空值，两种都够清楚。
-
-  // ---------------------------------------------------------------- 日志
-  "observability": {
-    "enabled": true,
-    // 2026 年新出的字段，只在 tail 里保留错误与警告，省配额
-    "logs": { "enabled": true, "invocation_logs": false }
   }
 }

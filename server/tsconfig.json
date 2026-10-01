@@ -17,5 +17,14 @@
     "verbatimModuleSyntax": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts"]
+  // ⚠️ `functions/` **必须在范围内**。
+  //
+  // 加 Pages Functions 时我只写了 `src/**/*.ts`，于是三个入口文件完全不被
+  // 类型检查 —— 后果是「`tsc --noEmit` 全绿」与「部署直接失败」同时发生：
+  // wrangler 报 `Could not resolve "../../src/handle.ts"`。
+  //
+  // 相对路径的层级最容易错（`functions/me.ts` 是 1 层、`functions/api/v1/` 是 3 层），
+  // 而这类错误编译期不报、只在打包时炸，故必须让它进检查范围。
+  // `check-api-spec-conformance.mjs` 另有一道：断言每个入口都调用 `handleRequest`。
+  "include": ["src/**/*.ts", "functions/**/*.ts", "scripts/**/*.mjs"]
 }

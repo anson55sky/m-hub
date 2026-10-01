@@ -157,6 +157,17 @@ export async function readJson(req: Request): Promise<Record<string, unknown>> {
 
 export interface Env {
   DB: D1Database
+  /**
+   * Pages 提供的静态资产绑定（Workers 侧是 Workers Static Assets，同名不同物）。
+   *
+   * 存在的**唯一**理由：Pages 的 Functions 优先于静态资产，
+   * 所以 `/api/v1/market/registry` 这些签名清单会先撞进 Function，
+   * 必须靠它在 `handle.ts::is_static_asset` 里主动交还，
+   * 才能拿到**未经序列化**的原始字节。少了它，Pages 上的验签必失败。
+   *
+   * 故标成可选：Workers 侧没有这个绑定，代码要能同时跑在两个运行时上。
+   */
+  ASSETS?: Fetcher
   /** 邀请码兑换 = 发额度 + 开放开发者申请，故与登录分开存 */
   INVITE_CODE?: string
   /** GitHub OAuth App 的 Client ID。设备码流程不需要 client_secret。 */
