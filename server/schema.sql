@@ -45,6 +45,32 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
+-- 扩展包体（分块存储，内容寻址）。
+--
+-- ## 为什么分块而不直接存一列 BLOB
+--
+-- 我想实测 D1 的单值上限，但**测不出来**：`wrangler d1 execute` 把 SQL 当命令行
+-- 参数传，实测 1KB 能写、64KB 就 `code: 7500` —— 那是**CLI 的参数长度限制**，
+-- 不是 D1 的存储上限。真正的写入走 Function 里的 `env.DB` 绑定，不经命令行，
+-- 所以这个上限无法用 CLI 探测。
+--
+-- 既然不能确认，就不依赖它：128KB 一块，任何可能的上限都够。
+-- 真要用 R2 时，`pkgStore.ts` 内部换实现即可，调用方无感。
+--
+-- ## 为什么按 sha256 内容寻址
+--
+-- 同一份包重复提交（关卡挂了重提、或两个作者提交了同一个包）只存一份；
+-- 且「审核通过的字节」与「发布的字节」靠同一个 sha256 对账，不会错位。
+--
+-- ⚠️ 删除策略：内容寻址意味着**不能按包删**（可能被多个 submission 引用）。
+--    故只在整库清理时按引用计数回收，不做单包删除。
+CREATE TABLE IF NOT EXISTS pkg_blobs (
+  sha256  TEXT    NOT NULL,
+  idx     INTEGER NOT NULL,          -- 块序号，从 0 起
+  data    BLOB    NOT NULL,
+  PRIMARY KEY (sha256, idx)
+);
+
 -- GitHub 设备码流程的中间态：poll_id → GitHub device_code。
 --
 -- ⚠️ **这张表是 Pages Functions 部署的必要条件**，不是可选优化（2026-10-01 实机）。
@@ -120,6 +146,14 @@ CREATE TABLE IF NOT EXISTS submissions (
   status       TEXT NOT NULL DEFAULT 'pending_review',
   -- 审核备注；gate 失败原因也放这里（客户端 `.get("review_note")`）
   review_note  TEXT,
+  -- 包体在 `pkg_blobs` 里的键（内容寻址，见该表注释）与总大小。
+  -- ⚠️ 这两列是**能上架的前提**：没有包体，审核通过了也发布不出去
+  --    （清单里的 downloadUrl 指向一个不存在的字节）。2026-10-01 补。
+  pkg_sha256   TEXT,
+  pkg_size     INTEGER,
+  -- 包内文件清单（JSON: [{path,size}]）。关卡要靠它判断「有没有禁的扩展名 /
+  -- 是否漏了 manifest.json」，审核页要靠它展示「这个包会往用户机器上放什么」。
+  pkg_files    TEXT,
   created_at   INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
   updated_at   INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
 );
