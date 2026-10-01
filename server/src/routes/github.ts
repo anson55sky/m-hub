@@ -26,12 +26,59 @@ import { randomId } from '../lib/ids.ts'
 const GH_OAUTH = 'https://github.com'
 const GH_API = 'https://api.github.com'
 
-/** poll_id → GitHub device_code。设 TTL 是为了不让 Map 无限长。 */
-const pending = new Map<string, { deviceCode: string; expiresAt: number; interval: number }>()
+/**
+ * GitHub 设备码流程两个端点的公共请求头。
+ *
+ * ⚠️ `Accept: application/json` **不是可选的**（GitHub 文档明确要求）：
+ * 缺它时端点返回 HTML / 纯文本（实测：裸串 `Not Found`），而调用方紧跟着
+ * `res.json()` —— 于是抛出的是一个与真实原因无关的异常，故障现场离原因很远。
+ *
+ * 两处各写一遍的话迟早只改一处，故收成常量。
+ */
+const GH_FORM_HEADERS = {
+  'content-type': 'application/x-www-form-urlencoded',
+  Accept: 'application/json',
+} as const
+
+/**
+ * poll_id → GitHub device_code 的存放处。
+ *
+ * ## ⚠️ 这里原来是一个进程内存的 `Map`（2026-10-01 改掉）
+ *
+ * 原注释写「单次登录窗口只有几分钟，回收概率低到可接受」—— 那是按**常驻进程**
+ * 算的。迁到 Cloudflare Pages Functions 后前提不成立：实例短命、多个 isolate
+ * 互不共享内存、scale-to-zero 后必然冷启动。于是「换验证码」与「轮询」两次请求
+ * 大概率落在**不同实例**，轮询必然 410 `poll_gone`。
+ *
+ * 实测证据（改之前）：连发三次 device/start 全部 200，且每次都是**新的**
+ * user_code —— 说明没有任何状态被复用；紧接着 poll 就 410。
+ *
+ * 教训：**「进程内状态」这个前提是随部署目标一起变的**，而它不体现在任何
+ * 类型或签名里。迁到任何无状态运行时前，先 grep 一遍 `new Map(` / 模块级
+ * 可变量 —— 那都是隐形的单实例假设。
+ *
+ * 落 D1 的代价是每次轮询多一次查询；换来的是任意实例都能接手。
+ */
 const POLL_TTL_MS = 15 * 60_000
 
-function sweep(now: number) {
-  for (const [k, v] of pending) if (v.expiresAt < now) pending.delete(k)
+/** 读一条待轮询记录；已过期顺手删掉（一次性消费，不留垃圾）。 */
+async function takePoll(ctx: Ctx, pollId: string) {
+  const row = await ctx.env.DB.prepare(
+    `SELECT device_code, interval, expires_at FROM device_polls WHERE poll_id = ?1`,
+  )
+    .bind(pollId)
+    .first<{ device_code: string; interval: number; expires_at: number }>()
+  if (!row) return null
+  if (row.expires_at < Date.now()) {
+    await ctx.env.DB.prepare(`DELETE FROM device_polls WHERE poll_id = ?1`).bind(pollId).run()
+    return null
+  }
+  return row
+}
+
+/** 删掉一条待轮询记录（授权成功、或这一轮不可能再成功时）。 */
+function dropPoll(ctx: Ctx, pollId: string) {
+  return ctx.env.DB.prepare(`DELETE FROM device_polls WHERE poll_id = ?1`).bind(pollId).run()
 }
 
 /** GitHub 出网失败与「用户还没授权」是两回事，必须分开——前者是服务端问题。 */
@@ -63,13 +110,19 @@ export async function deviceStart(ctx: Ctx) {
     return fail(500, 'server_misconfigured', '服务端未配置 GITHUB_CLIENT_ID')
   }
   const now = Date.now()
-  sweep(now)
+  // 顺手清一次过期记录。原实现是遍历内存 Map（sweep），迁到 D1 后**不再有**
+  // 「遍历全部待处理项」这个能力 —— 故改成按 expires_at 索引定向删，
+  // 避免靠一条无界 DELETE 扫全表。
+  await env.DB.prepare(`DELETE FROM device_polls WHERE expires_at < ?1`).bind(now).run()
 
   let res: Response
   try {
     res = await ghFetch(`${GH_OAUTH}/login/device/code`, {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      // ⚠️ `Accept: application/json` **必须**带。
+      //   缺它时 GitHub 的设备码端点返回的是 HTML / 纯文本（实测「Not Found」裸串），
+      //   而下面 `res.json()` 会直接抛 —— 抛出的又是别的错误，故障现场离原因很远。
+      headers: GH_FORM_HEADERS,
       body: new URLSearchParams({
         client_id: env.GITHUB_CLIENT_ID,
         // 只读身份。**不要**加 repo / workflow 等任何写权限：用户看到的是这个 scope。
@@ -91,13 +144,15 @@ export async function deviceStart(ctx: Ctx) {
   }
 
   const pollId = randomId()
-  pending.set(pollId, {
-    deviceCode: d.device_code,
-    interval: d.interval ?? 5,
-    // GitHub 的 expires_in 是权威值，但用本地常量兜一个上限：
-    // 异常大的值会让过期条目长期占住 Map（sweep 只在有请求进来时才跑）
-    expiresAt: now + Math.min(d.expires_in ?? 900, POLL_TTL_MS / 1000) * 1000,
-  })
+  // GitHub 的 expires_in 是权威值，但用本地常量兜一个上限：
+  // 异常大的值会让过期记录长期留在表里。
+  const expiresAt = now + Math.min(d.expires_in ?? 900, POLL_TTL_MS / 1000) * 1000
+  await env.DB.prepare(
+    `INSERT INTO device_polls (poll_id, device_code, interval, created_at, expires_at)
+     VALUES (?1, ?2, ?3, ?4, ?5)`,
+  )
+    .bind(pollId, d.device_code, d.interval ?? 5, now, expiresAt)
+    .run()
   return json({
     poll_id: pollId,
     user_code: d.user_code,
@@ -114,29 +169,28 @@ export async function devicePoll(ctx: Ctx) {
   const pollId = typeof body.poll_id === 'string' ? body.poll_id : ''
   if (!pollId) return fail(400, 'bad_request', '缺少 poll_id')
 
-  const entry = pending.get(pollId)
+  const entry = await takePoll(ctx, pollId)
   if (!entry) {
-    // 查不到有两种可能：Worker 被回收了，或用户等太久已过期。
-    // 措辞要说清「重新发起」，否则用户会反复点轮询按钮。
+    // 查不到有三种可能，都已无法区分（也不必区分）：过期、已被消费过、
+    // 或记录不存在。措辞要说清「重新发起」，否则用户会反复点轮询按钮。
     return fail(
       410,
       'poll_gone',
       '登录会话已失效（等待过久），请重新发起登录。',
     )
   }
-  if (entry.expiresAt < Date.now()) {
-    pending.delete(pollId)
-    return fail(410, 'poll_expired', '设备码已过期，请重新发起登录。')
-  }
 
   let res: Response
   try {
     res = await ghFetch(`${GH_OAUTH}/login/oauth/access_token`, {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      // ⚠️ `Accept: application/json` **必须**带。
+      //   缺它时 GitHub 的设备码端点返回的是 HTML / 纯文本（实测「Not Found」裸串），
+      //   而下面 `res.json()` 会直接抛 —— 抛出的又是别的错误，故障现场离原因很远。
+      headers: GH_FORM_HEADERS,
       body: new URLSearchParams({
         client_id: env.GITHUB_CLIENT_ID ?? '',
-        device_code: entry.deviceCode,
+        device_code: entry.device_code,
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
       }),
     })
@@ -157,11 +211,16 @@ export async function devicePoll(ctx: Ctx) {
       return json({ status: 'pending', interval: entry.interval })
     }
     if (d.error === 'slow_down') {
-      entry.interval += 5
-      return json({ status: 'pending', interval: entry.interval })
+      // 退避要**落库**：跨实例时内存里的累加会丢，而丢了就等于客户端
+      // 回到固定频率猛点 GitHub（那正是 GitHub 回 slow_down 的原因）。
+      const next = entry.interval + 5
+      await ctx.env.DB.prepare(`UPDATE device_polls SET interval = ?1 WHERE poll_id = ?2`)
+        .bind(next, pollId)
+        .run()
+      return json({ status: 'pending', interval: next })
     }
     // 过期 / 被拒 / 码无效：这一轮 login 不可能再成功，删掉免得占着
-    pending.delete(pollId)
+    await dropPoll(ctx, pollId)
     return fail(400, 'github_denied', githubErrorText(d.error))
   }
   if (!d.access_token) {
@@ -169,7 +228,7 @@ export async function devicePoll(ctx: Ctx) {
   }
 
   // 授权成功 → 删 poll（一次性）
-  pending.delete(pollId)
+  await dropPoll(ctx, pollId)
 
   let ghUser: GitHubUser
   try {

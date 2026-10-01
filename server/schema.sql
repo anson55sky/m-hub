@@ -45,6 +45,40 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
+-- GitHub 设备码流程的中间态：poll_id → GitHub device_code。
+--
+-- ⚠️ **这张表是 Pages Functions 部署的必要条件**，不是可选优化（2026-10-01 实机）。
+-- 原实现用进程内存的 `Map` 存这层状态，注释写「单次登录窗口只有几分钟，
+-- 回收概率低到可接受」—— 那是按**常驻进程**算的。Pages Functions 的实例是
+-- 短命的、多个 isolate 互不共享、scale-to-zero 后必然冷启动，于是
+-- 「换验证码」与「轮询」两次请求大概率落在**不同实例**，轮询必然
+-- `poll_gone`（HTTP 410）。
+--
+-- 实测证据：连发三次 device/start 全部 200 且每次都是新的 user_code，
+-- 说明没有任何状态被复用。
+--
+-- 过期同样是**查询时**判定（`expires_at > now`），不需要定时清理；
+-- 真正的删除发生在 poll 成功时（一次性消费）。
+CREATE TABLE IF NOT EXISTS device_polls (
+  poll_id      TEXT PRIMARY KEY,
+  -- GitHub 返回的 device_code。它是**换 token 的凭据**，等价于一次性密码，
+  -- 故与 sessions.token 同等对待：明文存 D1、绝不进日志、不进错误信息。
+  --
+  -- ⚠️ 这里**没有** user_id：device/start 时用户还没授权，压根没有 user 行
+  --   （users 是在换到 access_token 之后才建的）。加一个 NOT NULL 外键会直接
+  --   让整个登录流程插不进去 —— 我第一版就是这么写的。
+  device_code  TEXT NOT NULL,
+  -- 当前建议的轮询间隔（秒）。GitHub 回 slow_down 时要**累加**它，
+  -- 这个累加是**有状态**的 —— 不落库就等于跨实例丢失退避，
+  -- 客户端会以固定频率猛点 GitHub（也正是 GitHub 回 slow_down 的原因）。
+  interval     INTEGER NOT NULL DEFAULT 5,
+  created_at   INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+  expires_at   INTEGER NOT NULL
+);
+-- 过期判定是查询时的 `expires_at > now`，不需要定时任务；
+-- 真正的删除发生在 poll 成功时（一次性消费）。
+CREATE INDEX IF NOT EXISTS idx_device_polls_expiry ON device_polls(expires_at);
+
 -- ---------------------------------------------------------------- 开发者申请
 
 -- 状态机：pending → approved | rejected
