@@ -18,6 +18,8 @@ import {
   type Ctx,
   type User,
 } from '../lib/http.ts'
+// 「能不能申请开发者」的唯一判定（与 me.ts 共用同一份，见 lib/developerGate.ts 注释）
+import { canApplyDeveloper } from '../lib/developerGate.ts'
 
 /** 未走完流程的提交状态。必须与客户端可撤回白名单一致。 */
 const OPEN_STATUSES = ['uploaded', 'pending_review', 'gate_failed'] as const
@@ -88,7 +90,8 @@ export async function applyStatus(ctx: Ctx) {
   return json({
     status: user.developer_status,
     is_developer: !!user.is_developer,
-    can_apply_developer: user.invite_redeemed && user.developer_status === 'none',
+    // 复用共享判定（见该函数的注释：这里曾与 me.ts 各算一份）
+    can_apply_developer: canApplyDeveloper(user),
     application: row ?? null,
   })
 }

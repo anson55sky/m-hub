@@ -13,6 +13,9 @@ import {
   unauthorized,
   type Ctx,
 } from '../lib/http.ts'
+// 「能不能申请开发者」的唯一判定处（见 submissions.ts 里 canApplyDeveloper 的注释：
+// 这件事曾有两份实现，其中 `me.ts` 那份漏了字段却被客户端读取，界面因此自相矛盾）
+import { canApplyDeveloper } from '../lib/developerGate.ts'
 
 /** GET /me —— 注意是**根路径**，不是 /api/v1/me（约定 52 记了这个坑）。 */
 export async function me(ctx: Ctx) {
@@ -36,11 +39,24 @@ export async function me(ctx: Ctx) {
  *
  * ## 为什么放在 /me 而不是新开一个端点
  *
- * 账号面板本来就会拉 /me，加两个字段零额外请求；
+ * 账号面板本来就会拉 /me，加字段零额外请求；
  * 而「点开关才知道能不能用」是坏交互 —— 用户会反复点。
  *
  * ⚠️ 这**不是**机密：`available` 只说「有没有配上游 Key」，
  * 不泄露 Key 本身，也不影响任何权限判定（发不发额度仍看 `invite_redeemed`）。
+ *
+ * ## ⚠️ `can_apply_developer` 曾**漏在这里**（2026-10-01 修）
+ *
+ * 客户端一直从 `/me` 读 `can_apply_developer` 来决定显示
+ * 「还没有申请」还是「先兑换邀请码才能申请」，而本函数**从来没返回过它** ——
+ * Rust 侧 `unwrap_or(false)` 把它兜成了 `false`。
+ *
+ * 症状极有欺骗性：界面同时显示「已兑换邀请码」与「先兑换邀请码才能申请」，
+ * **自相矛盾**且无从自查。而正确值其实在 `GET /api/v1/dev/apply` 里一直算着，
+ * 只是那个封装在组件里从没被调用过 —— 两份真相、一份坏掉，且**没人发现**。
+ *
+ * 教训：**同一个派生值在两处各算一次，坏的那份会被用**。
+ * 判据：客户端读哪个端点的字段，那个端点就**必须**提供它。
  */
 function publicUser(u: import('../lib/http').User, env?: import('../lib/http').Env) {
   const available = !!env?.OPENAI_API_KEY
@@ -52,6 +68,9 @@ function publicUser(u: import('../lib/http').User, env?: import('../lib/http').E
     is_developer: !!u.is_developer,
     developer_status: u.developer_status,
     invite_redeemed: !!u.invite_redeemed,
+    // 复用**唯一**判定处（submissions.ts::canApplyDeveloper）——
+    // 两处各算一份时，坏掉的那份会被用，且毫无报错（见该函数的注释）。
+    can_apply_developer: canApplyDeveloper(u),
     platform_ai_available: available,
     platform_ai_reason: available
       ? ''
