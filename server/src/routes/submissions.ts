@@ -20,6 +20,19 @@ import {
 } from '../lib/http.ts'
 // 「能不能申请开发者」的唯一判定（与 me.ts 共用同一份，见 lib/developerGate.ts 注释）
 import { canApplyDeveloper } from '../lib/developerGate.ts'
+// 2026-10-01：包体原来**只算 sha256 就丢掉**（注释说推到 GitHub Releases，
+// 那个脚本从来不存在）→ 审核通过了也发布不出去。详见 submit() 里那段注释。
+import { putBlob } from '../lib/pkgStore.ts'
+import { listZipEntries } from '../lib/zipdir.ts'
+
+/**
+ * 单包上限。
+ *
+ * 原来写的是 200MB，而 D1 分块方案的实际约束是**整库 10GB** 与每次提交的
+ * 时长。留 64MB：足够装下任何合理扩展（含几张截图），
+ * 又不会让一次上传跑太久触发 Functions 的 CPU 限制。
+ */
+const MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 
 /** 未走完流程的提交状态。必须与客户端可撤回白名单一致。 */
 const OPEN_STATUSES = ['uploaded', 'pending_review', 'gate_failed'] as const
@@ -162,18 +175,47 @@ export async function submit(ctx: Ctx) {
   }
 
   const bytes = new Uint8Array(await pkg.arrayBuffer())
-  // D1 单值上限 1MB，故包**不进 D1**；这里只记元数据与存放位置。
-  // 真实落地由 `npm run publish:package` 推到 GitHub Releases（见 README）。
-  if (bytes.byteLength > 200 * 1024 * 1024) {
-    return fail(400, 'package_too_large', '扩展包超过 200MB')
+  if (bytes.byteLength === 0) return fail(400, 'bad_request', '扩展包是空的')
+  if (bytes.byteLength > MAX_PACKAGE_BYTES) {
+    return fail(400, 'package_too_large', `扩展包超过 ${MAX_PACKAGE_BYTES / 1048576}MB`)
   }
-  const sha256 = await sha256Hex(bytes)
+
+  // ⚠️ 这里原来只算 sha256 就把字节丢掉，注释说「包不进 D1，真实落地由
+  // `npm run publish:package` 推到 GitHub Releases」——**那个脚本从来不存在**
+  // （package.json 里没有这一条）。于是包在提交那一刻就没了：
+  // **审核通过了也发布不出去**，因为清单里的 downloadUrl 指向不存在的字节。
+  //
+  // 这是比「缺审核接口」更根本的缺口：没有存储就没有上架。
+  // 现在真的存进 D1（分块 + 内容寻址，见 lib/pkgStore.ts）。
+  const sha256 = await putBlob(ctx.env.DB, bytes)
+
+  // 包内文件清单：关卡判断「有没有禁的扩展名 / 是否漏了 manifest.json」、
+  // 审核页展示「这个包会往用户机器上放什么」，都要它。
+  //
+  // 解析失败**不**阻断提交（那是关卡该判的事），只是关卡会拿不到清单。
+  // ⚠️ `listZipEntries` 是**同步**的（只读中央目录，不解压），
+  //    所以不能用 `.catch()` —— 得显式 try。
+  let pkgFiles: ReturnType<typeof listZipEntries> | null = null
+  try {
+    pkgFiles = listZipEntries(bytes)
+  } catch (e) {
+    // 记进 review_note 是**错的**（那字段给审核人看，且会被后续审核覆盖）；
+    // 这里只留日志，包本身照收。
+    console.warn('[m-hub] 包目录解析失败，关卡将无法判定条目:', String(e))
+  }
 
   const ins = await ctx.env.DB.prepare(
-    `INSERT INTO submissions (user_id, ext_id, version, status)
-     VALUES (?1, ?2, ?3, 'pending_review')`,
+    `INSERT INTO submissions (user_id, ext_id, version, status, pkg_sha256, pkg_size, pkg_files)
+     VALUES (?1, ?2, ?3, 'pending_review', ?4, ?5, ?6)`,
   )
-    .bind(user.id, extId, version)
+    .bind(
+      user.id,
+      extId,
+      version,
+      sha256,
+      bytes.byteLength,
+      pkgFiles ? JSON.stringify(pkgFiles) : null,
+    )
     .run()
   const subId = Number(ins.meta.last_row_id)
 
@@ -323,7 +365,3 @@ function compareSemver(a: string, b: string): number {
   return 0
 }
 
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const d = await crypto.subtle.digest('SHA-256', bytes)
-  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('')
-}
