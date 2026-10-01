@@ -910,7 +910,19 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
-            <div class="setting-row">
+            <!--
+              ⚠️ `v-if="account.platformAiAvailable"` —— 上游没配 Key 时**整行隐藏**，
+              而不是显示「剩余 0 次（共 0 次）」。
+              显示一个永远用不了的额度，比不显示更糟：用户会去试、试完发现不行，
+              反复回来试（截图里那个 0/0 就是这个症状）。
+
+              为什么是**隐藏**而不是删除代码：
+              · 服务端哪天配上 Key，这个界面会**自动**长回来（自愈）
+              · 删除「关闭平台额度」的入口，会让已开启过的用户配置里残留
+                `platform:` 条目**且无法清理** —— 它们会出现在对话模型列表里，
+                带占位 Key，每次发消息都失败。`disablePlatform` 是唯一的清理路径。
+            -->
+            <div v-if="account.platformAiAvailable" class="setting-row">
               <div class="setting-info">
                 <span class="setting-name">AI 额度</span>
                 <span class="setting-desc">
@@ -935,7 +947,7 @@ onBeforeUnmount(() => {
                   兑换的作用是**准入**。
                   「显示能用却不能用 / 说错了却让人以为有」都比明确说清更糟。
                 -->
-                <span class="setting-desc">用于解锁平台 AI 额度与「申请成为开发者」；兑换本身不发额度</span>
+                <span class="setting-desc">用于解锁「申请成为开发者」与发布扩展；兑换本身不发额度</span>
               </div>
               <div class="account-inline">
                 <input v-model="redeemInput" class="account-input" placeholder="邀请码" />

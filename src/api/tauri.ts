@@ -592,6 +592,19 @@ export interface AccountStatus {
   quotaRemaining: number
   /** 已兑换邀请码（= 有权益：额度 + 可申请开发者） */
   inviteRedeemed: boolean
+  /**
+   * 服务端是否配了平台 AI 的上游 Key。
+   *
+   * 为 false 时界面**隐藏**平台额度那一行与「使用平台免费额度」开关 ——
+   * 显示一个永远用不了的额度（剩余 0 次）只会让人反复试。
+   * 缺失时按 false 处理（服务端旧版本不返回该字段）。
+   *
+   * 判据：走自备供应商即可（设置 → AI 助手），**不影响**兑换邀请码、
+   * 申请开发者、发布扩展 —— 那三件与平台 AI 无关。
+   */
+  platformAiAvailable: boolean
+  /** 不可用原因（服务端给的人话，可直接展示；可用时为空串） */
+  platformAiReason: string
   /** none / pending / approved / rejected */
   developerStatus: 'none' | 'pending' | 'approved' | 'rejected'
   canApplyDeveloper: boolean

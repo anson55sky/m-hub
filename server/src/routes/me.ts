@@ -18,7 +18,7 @@ import {
 export async function me(ctx: Ctx) {
   const user = await currentUser(ctx.env, ctx.token)
   if (!user) return unauthorized()
-  return json(publicUser(user))
+  return json(publicUser(user, ctx.env))
 }
 
 /**
@@ -28,7 +28,22 @@ export async function me(ctx: Ctx) {
  * 「枚举用户」和「看懂会话表结构」两样没用的东西。
  * 客户端 `AccountPanel.vue` 只读 username / email / avatar。
  */
-function publicUser(u: import('../lib/http').User) {
+/**
+ * 账号公开信息。
+ *
+ * `platform_ai_available` / `platform_ai_reason` 让客户端能**在加载时就**知道
+ * 平台 AI 能不能用，而不必先去点一次开关看报错。
+ *
+ * ## 为什么放在 /me 而不是新开一个端点
+ *
+ * 账号面板本来就会拉 /me，加两个字段零额外请求；
+ * 而「点开关才知道能不能用」是坏交互 —— 用户会反复点。
+ *
+ * ⚠️ 这**不是**机密：`available` 只说「有没有配上游 Key」，
+ * 不泄露 Key 本身，也不影响任何权限判定（发不发额度仍看 `invite_redeemed`）。
+ */
+function publicUser(u: import('../lib/http').User, env?: import('../lib/http').Env) {
+  const available = !!env?.OPENAI_API_KEY
   return {
     username: u.username,
     email: u.email,
@@ -37,6 +52,10 @@ function publicUser(u: import('../lib/http').User) {
     is_developer: !!u.is_developer,
     developer_status: u.developer_status,
     invite_redeemed: !!u.invite_redeemed,
+    platform_ai_available: available,
+    platform_ai_reason: available
+      ? ''
+      : '平台 AI 未配置上游 Key。可改用「设置 → AI 助手」里的自备供应商，不影响其它功能。',
   }
 }
 

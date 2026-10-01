@@ -31,6 +31,17 @@ pub struct AccountStatus {
     pub quota_remaining: u64,
     /// 已兑换邀请码（= 有权益：额度 + 可申请开发者）
     pub invite_redeemed: bool,
+    /// 服务端是否配了平台 AI 的上游 Key（`/me` 的 `platform_ai_available`）。
+    ///
+    /// 界面据此**隐藏**平台额度的行与开关，而不是显示成「剩余 0 次」。
+    /// 理由：显示一个永远用不了的额度，比不显示更糟（用户会反复试）。
+    /// 它**不是**「平台模型是否已开启」—— 那个仍看本地配置的 `platformModels`。
+    ///
+    /// ⚠️ 缺失时按 `false` 处理（服务端旧版本不会返回该字段）：
+    ///    宁可隐藏到一个不需要它的界面，也不要给一个用不了的功能开绿灯。
+    pub platform_ai_available: bool,
+    /// 不可用时的原因（服务端给的人话，直接展示）
+    pub platform_ai_reason: String,
     /// none / pending / approved / rejected
     pub developer_status: String,
     pub can_apply_developer: bool,
@@ -48,6 +59,10 @@ impl AccountStatus {
             quota_total: 0,
             quota_remaining: 0,
             invite_redeemed: false,
+            // 未登录时无所谓平台 AI 能不能用；但仍给一句说明，
+            // 这样「隐藏额度行」的判断在未登录态下也有确定值（不依赖 undefined）。
+            platform_ai_available: false,
+            platform_ai_reason: String::new(),
             developer_status: "none".into(),
             can_apply_developer: false,
             error: None,
@@ -290,6 +305,17 @@ fn status_from_me(server: String, me: &Value) -> AccountStatus {
         quota_total: quota.get("total").and_then(|v| v.as_u64()).unwrap_or(0),
         quota_remaining: quota.get("remaining").and_then(|v| v.as_u64()).unwrap_or(0),
         invite_redeemed: me.get("invite_redeemed").and_then(|v| v.as_bool()).unwrap_or(false),
+        // ⚠️ 字段缺失（服务端是旧版本）时按 `false` 处理：宁可隐藏到一个
+        //    不需要它的界面，也不要给用不了的功能开绿灯。
+        platform_ai_available: me
+            .get("platform_ai_available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        platform_ai_reason: me
+            .get("platform_ai_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         developer_status: me
             .get("developer_status")
             .and_then(|v| v.as_str())

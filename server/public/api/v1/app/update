@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "version": "0.7.3",
   "minimumUpgradable": "0.7.2",
-  "notes": "清单拉取加入退避重试；「安装扩展」按钮恢复响应；市场与安装包改由 Cloudflare Pages 托管，服务端迁到 Pages Functions；AI 供应商新增 6 家国内 OpenAI 兼容预设；平台 AI 未配上游时明确提示而非显示虚假额度。",
+  "notes": "清单拉取加入退避重试；「安装扩展」按钮恢复响应；市场与安装包改由 Cloudflare Pages 托管，服务端迁到 Pages Functions；AI 供应商新增 6 家国内 OpenAI 兼容预设与豆包接入点引导；平台 AI 未配上游时隐藏相关入口而非显示虚假额度。",
   "platforms": {
     "macos-aarch64": {
       "url": "https://m-hub-server.pages.dev/downloads/0.7.3/m-hub_0.7.3_aarch64.dmg",
-      "sha256": "9337cee2d865e1e66072bd6f25a82f1258a2e153919acaf6efbf7c42c785f62e",
-      "size": 6045570
+      "sha256": "9e92cc8b2a9d6241bdfe315f906f06caebb14d319169c93a162afad9b2dd0314",
+      "size": 6046123
     }
   }
 }

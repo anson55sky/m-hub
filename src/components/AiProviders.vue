@@ -20,6 +20,15 @@ interface ProviderEdit {
   selected: Set<string>
   busy: boolean
   msg: string
+  /**
+   * 常驻引导（与 `msg` 分开）。
+   *
+   * ⚠️ 为什么不塞进 `msg`：`msg` 是**状态位**，每次「测试连通 / 获取模型 / 添加」
+   *    都会被覆盖（第 435~506 行共 7 处赋值）。而豆包火山这类**前置条件**
+   *    必须一直可见 —— 塞进 `msg` 的话用户点一下「测试连通」就永远看不到了，
+   *    而那正是他最需要看到提示的时刻。
+   */
+  guide?: string
   savedKey: string
   keyVisible: boolean
   editingKey: boolean
@@ -50,6 +59,31 @@ const platformUnavailable = ref('')
 const platformModels = ref<ChatModelConfig[]>([])
 
 const platformEnabled = computed(() => platformModels.value.length > 0)
+
+/**
+ * 服务端是否配了平台 AI 的上游 Key（`/me` 的 `platform_ai_available`）。
+ *
+ * 未登录时按 false 处理 —— 这不是「不可用」，而是「还不知道」，
+ * 但界面上两者都该表现为「不显示这一行」，故无需区分。
+ *
+ * 它控制的是**整块隐藏**而不是禁用：显示一个用不了的开关，
+ * 用户只会反复点、每次都失败。
+ */
+const platformEnabledByServer = ref(false)
+
+/**
+ * ⚠️ 死路兜底：配置里**有**平台条目、但服务端说上游不可用。
+ *
+ * 这时开关是隐藏的（见模板注释），而 `platform:` 条目会用占位 Key、
+ * 每次发消息都失败 —— 用户在模型列表里看得见、却在设置里找不到关它的入口。
+ * 这个组合必须给一条出路，否则就是「有痕迹、没归处」。
+ *
+ * 出现条件刻意收窄成「服务端明确说不可用」：其它情况（连不上、
+ * 未登录）不该在这里显示，那属于别的问题。
+ */
+const platformOrphaned = computed(
+  () => platformEnabled.value && !platformEnabledByServer.value && !!platformUnavailable.value,
+)
 
 /// 开关下方的状态说明：只说「开没开、平台现在有几个模型、对话里显示成什么」，
 /// 具体是哪些模型不在这里列（用户不需要选，后端会负载切换）
@@ -194,6 +228,18 @@ async function loadProviders(opts: { silent?: boolean } = {}) {
     const list = await tauriApi.getChatModels()
     // 平台条目单独摘出来（设置里它只是一个开关，不渲染成供应商卡片），其余按自备供应商分组
     platformModels.value = list.filter(isPlatformModel)
+    // 服务端是否配了上游 Key。**放在这里**而不是各自去拉 `/me`：
+    // `loadProviders` 是本组件唯一的加载入口（含开关切换后的回读），
+    // 放这儿保证「配置 + 服务端状态」始终一起刷新，不会出现
+    // 「开关刚被打开、服务端状态还是旧的」这种不一致。
+    try {
+      const acct = await tauriApi.accountStatus()
+      platformEnabledByServer.value = !!acct.platformAiAvailable
+      platformUnavailable.value = acct.platformAiAvailable ? '' : acct.platformAiReason || ''
+    } catch {
+      // 拉不到 /me（未登录）时保持 false：宁可隐藏，也不要在未知状态下开绿灯
+      platformEnabledByServer.value = false
+    }
     const prev = new Map(providers.value.map((p) => [p.key, p]))
     const map = new Map<string, ProviderEdit>()
     for (const m of list) {
@@ -254,7 +300,16 @@ const PROVIDER_PRESETS: { name: string; baseUrl: string; hint?: string }[] = [
   {
     name: '豆包（火山方舟）',
     baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
-    hint: '模型名要用控制台里推理接入点的 endpoint id（形如 ep-xxxxxxxx），不是通用模型名',
+    // ⚠️ 只有它需要引导：其余 5 家填完 Key 点「获取模型」就能勾选，
+    //    火山方舟的模型名是控制台「推理接入点」的 ep- id，不是通用模型名。
+    //
+    //    ⚠️ 措辞不许断言「获取模型一定列不出来」—— 该端点要鉴权，
+    //    我**没能实测**它返回什么（401）。所以两条路都写出来，
+    //    让用户自己判断，而不是我替他断言一个没验过的结论。
+    hint:
+      '火山方舟的「模型名」要用控制台里推理接入点的 ID（形如 ep-xxxxxxxx），不是 doubao 之类通用名。' +
+      '填好 Key 后先点「获取模型」—— 若列出了 ep- 开头的那几行，勾选即可；' +
+      '若提示未获取到，就去 console.volcengine.com 的「在线推理 → 推理接入点」新建一个，把它的 ID 手填进「添加模型」。',
   },
 ]
 
@@ -270,7 +325,7 @@ function addProviderFromPreset(preset: { name: string; baseUrl: string; hint?: s
   const p = providers.value[providers.value.length - 1]
   p.providerName = preset.name
   p.baseUrl = preset.baseUrl
-  if (preset.hint) p.msg = preset.hint
+  if (preset.hint) p.guide = preset.hint
 }
 
 function addProvider() {
@@ -551,9 +606,42 @@ defineExpose({ reload: () => void loadProviders() })
   <div class="ai-providers">
     <p class="ai-intro">配置 OpenAI 兼容的模型供应商（如 DeepSeek、OpenAI、Ollama）。填好 Base URL 与 API Key 后，可测试连通、拉取可用模型并勾选添加。API Key 仅保存在系统钥匙串。</p>
 
-    <!-- 平台免费额度：登录后可直接用，不需要自备 API Key。它不展开供应商字段（没有 Base URL /
-         API Key 要填，平台侧有哪些模型也不必让人关心），只有一个开关；与下面的自备供应商并存。 -->
-    <div class="setting-row ap-platform">
+    <!--
+      兜底出口：配置里残留着 `platform:` 条目，但服务端已不可用 → 开关是隐藏的，
+      而那些条目会用占位 Key、每次发消息都失败。没有这条就是「有痕迹、没归处」。
+      刻意不放成普通提示，而是给一个真能清掉它们的按钮。
+    -->
+    <div v-if="platformOrphaned" class="setting-row ap-platform ap-platform-orphan">
+      <div class="setting-info">
+        <span class="setting-name">清理已失效的平台额度</span>
+        <span class="setting-desc">
+          {{ platformUnavailable }}
+          对话模型列表里还留着 {{ platformModels.length }} 个「m-hub 平台」条目，它们已无法使用。
+        </span>
+      </div>
+      <button class="ghost-btn" :disabled="platformBusy" @click="disablePlatform()">
+        移除这些条目
+      </button>
+    </div>
+
+    <!--
+      平台免费额度：登录后可直接用，不需要自备 API Key。它不展开供应商字段（没有 Base URL /
+      API Key 要填，平台侧有哪些模型也不必让人关心），只有一个开关；与下面的自备供应商并存。
+
+      ⚠️ `v-if="platformEnabledByServer"` —— 服务端没配上游 Key 时**整块隐藏**。
+
+      为什么是隐藏而不是删代码：
+      · 服务端哪天配上 Key，它会自己长回来（自愈）
+      · **删除这段会让已开启过的用户无法清理残留**：配置里的 `platform:` 条目
+        只由 `disablePlatform()` 移除（它把 `platformModels` 置空后整体保存），
+        入口没了，这些条目就会永久留在对话模型列表里 —— 带占位 Key，
+        每次发消息都失败，用户还找不到地方删。
+      · 另有一个副作用：已开启过而开关被隐藏的用户，会出现
+        「模型列表里有 m-hub 平台，但找不到开关」的困惑。所以
+        `platformStatusText` 之外还留了下面那条「重新载入平台额度」的兜底路径
+        （仅在「配置里有平台条目但服务端说不可用」时才露出来）。
+    -->
+    <div v-if="platformEnabledByServer" class="setting-row ap-platform">
       <div class="setting-info">
         <span class="setting-name">使用 m-hub 平台免费额度</span>
         <span class="setting-desc">{{ platformStatusText }}</span>
@@ -651,6 +739,13 @@ defineExpose({ reload: () => void loadProviders() })
           </div>
 
           <p v-if="p.msg" class="prov-msg" :class="{ ok: p.msg.startsWith('连通正常') || p.msg.startsWith('已添加') || p.msg.startsWith('获取到') }">{{ p.msg }}</p>
+
+          <!--
+            常驻引导（与上面的状态位分开）。
+            `p.models.length` 条件：已经添加过模型就说明用户走通了，再显示就是噪音。
+            故不手动清除 —— 让它随状态自然消失，避免「清早了用户又迷路」。
+          -->
+          <p v-if="p.guide && !p.models.length" class="prov-guide">{{ p.guide }}</p>
 
           <!-- 获取到的模型列表：勾选添加 -->
           <div v-if="p.fetched.length" class="fetch-list">
@@ -895,6 +990,28 @@ defineExpose({ reload: () => void loadProviders() })
 }
 .prov-msg.ok {
   color: var(--c-green-ink);
+}
+
+/*
+  常驻引导（`prov-guide`）。与 `prov-msg` 视觉上必须**可区分** ——
+  `prov-msg` 是状态（红/绿，带情绪），引导是中性的说明。
+  用左边框 + 中性墨色，避免它看起来像一条错误。
+*/
+.prov-guide {
+  margin: 0;
+  padding: 6px 10px;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: var(--text-3);
+  background: var(--bg-card-soft);
+}
+
+/* 兜底出口那条：视觉上要像「需要你处理的一件事」，但**不是**错误 */
+.ap-platform-orphan {
+  border-left: 2px solid var(--c-orange, var(--c-yellow));
+  padding-left: 10px;
 }
 
 /* ---- 获取模型列表 ---- */
