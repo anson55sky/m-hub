@@ -38,6 +38,14 @@ const saving = ref(false)
 // AI 对话里这批条目折叠成「m-hub 平台」一个入口，具体用哪个模型由后端在多个平台模型之间负载切换。
 const PLATFORM_SENTINEL = '__mhub_platform__'
 const platformBusy = ref(false)
+/**
+ * 平台 AI **上游未配置**（服务端缺 `OPENAI_API_KEY`）时的说明。
+ *
+ * 为什么要单列一个状态：它**不是故障、也不会自己恢复**，重试无意义。
+ * 与「连不上」分开，是为了不把「永远不会好」说成「请稍后重试」——
+ * 后者会让用户反复点开关，每次都失败（约定 33 的判据）。
+ */
+const platformUnavailable = ref('')
 /// 平台条目：不进 providers（不渲染成卡片），但必须原样留在配置里（丢了等于关掉平台额度）
 const platformModels = ref<ChatModelConfig[]>([])
 
@@ -98,6 +106,7 @@ async function enablePlatform() {
       showToast('平台暂未开放任何模型')
       return
     }
+    // 上游可用才清掉「不可用」标记（见 platformAiUnavailable 的注释）
     const existing = collectAll().filter((m) => !isPlatformModel(m))
     const saved = await tauriApi.saveChatModels([...existing, ...ids.map((id) => platformModel(id, baseUrl))])
     store.setChatModels(saved)
@@ -110,7 +119,17 @@ async function enablePlatform() {
         : '平台额度已开启',
     )
   } catch (e) {
-    showToast(`开启失败：${e}`)
+    // ⚠️ 「上游没配」与「连不上」必须分开（约定 33 的那条判据）：
+    //   前者重试一万次也不会好（服务端缺 OPENAI_API_KEY），提示「请稍后重试」
+    //   会让用户反复点；后者才该重试。
+    //   `chat.rs::platform_models` 对前者回 `PLATFORM_UNAVAILABLE:` 前缀。
+    const raw = String(e)
+    if (raw.startsWith('PLATFORM_UNAVAILABLE')) {
+      platformUnavailable.value = raw.replace(/^PLATFORM_UNAVAILABLE:\s*/, '')
+      showToast('平台 AI 未配置上游 Key，请改用自备供应商')
+    } else {
+      showToast(`开启失败：${raw}`)
+    }
   } finally {
     platformBusy.value = false
   }
@@ -206,6 +225,52 @@ async function loadProviders(opts: { silent?: boolean } = {}) {
   } finally {
     if (!opts.silent) loading.value = false
   }
+}
+
+/**
+ * 国内可用的 OpenAI 兼容供应商预设（2026-10-01 实测）。
+ *
+ * ## 为什么要预设，而不是让用户手填地址
+ *
+ * 这些地址**没有统一规律**，手抄必错：
+ * · 阿里云走 `compatible-mode/v1`（不是 `/v1`），少一段就 404
+ * · 智谱是 `/api/paas/v4`（v4，不是 OpenAI 的 v1）
+ * · 豆包火山是 `/api/v3`，且**模型名是 endpoint id**（形如 `ep-2024xxxx`），
+ *   不是 `gpt-4` 这种通用名 —— 用户得先在火山控制台建推理接入点
+ *
+ * 实测（2026-10-01，从国内网络）：下面 6 家 `/models` 全部可达（回 401/403 = 端点存在、只是缺 key），
+ * 而 `api.openai.com` **连不上**（curl 直接 000）。故预设只列国内可达的。
+ *
+ * 「测试连通」与「拉取模型」对每家都成立 —— 它们都实现了 OpenAI 的
+ * `GET {base}/models`，故不需要为某家单独写分支。
+ */
+const PROVIDER_PRESETS: { name: string; baseUrl: string; hint?: string }[] = [
+  { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
+  { name: '月之暗面 Kimi', baseUrl: 'https://api.moonshot.cn/v1' },
+  { name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+  // ⚠️ 阿里云的兼容路径是 `compatible-mode/v1`，不是 `/v1`
+  { name: '阿里云百炼（通义千问）', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+  { name: '硅基流动 SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1' },
+  {
+    name: '豆包（火山方舟）',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    hint: '模型名要用控制台里推理接入点的 endpoint id（形如 ep-xxxxxxxx），不是通用模型名',
+  },
+]
+
+/**
+ * 按预设新建一个供应商。
+ *
+ * 复用 `addProvider` 而不是各写一份 —— 字段一多就会漂。
+ * 预设只填 name/baseUrl：**不预填 apiKey**（用户自己填，且不进配置文件，
+ * 存的是系统钥匙串）。
+ */
+function addProviderFromPreset(preset: { name: string; baseUrl: string; hint?: string }) {
+  addProvider()
+  const p = providers.value[providers.value.length - 1]
+  p.providerName = preset.name
+  p.baseUrl = preset.baseUrl
+  if (preset.hint) p.msg = preset.hint
 }
 
 function addProvider() {
@@ -624,6 +689,23 @@ defineExpose({ reload: () => void loadProviders() })
         </div>
       </div>
 
+      <!--
+        国内供应商预设。放在「添加供应商」旁边而不是取代它 ——
+        用户仍可手填任意 OpenAI 兼容地址（Ollama / one-api / vLLM 等）。
+      -->
+      <div class="ai-presets">
+        <span class="ai-presets-label">快速添加：</span>
+        <button
+          v-for="preset in PROVIDER_PRESETS"
+          :key="preset.baseUrl"
+          class="ghost-btn ai-preset-btn"
+          :title="preset.hint || preset.baseUrl"
+          @click="addProviderFromPreset(preset)"
+        >
+          {{ preset.name }}
+        </button>
+      </div>
+
       <div class="ai-actions">
         <button class="ghost-btn" @click="addProvider">
           <Plus :size="13" /> 添加供应商
@@ -916,6 +998,27 @@ defineExpose({ reload: () => void loadProviders() })
   gap: 10px;
   margin-top: 16px;
 }
+
+/*
+  国内供应商预设按钮。用 `flex-wrap` 是因为 6 个按钮在窄窗（设置面板最窄那档）
+  换行成两行才是对的；不换行会被挤出容器。
+*/
+.ai-presets {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.ai-presets-label {
+  font-size: var(--fs-caption);
+  color: var(--text-3);
+}
+.ai-preset-btn {
+  padding: 4px 10px;
+  font-size: var(--fs-caption);
+}
+
 .ai-save-btn {
   background: var(--brand-500);
   color: var(--text-on-accent);

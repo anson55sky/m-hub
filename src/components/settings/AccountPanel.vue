@@ -65,6 +65,18 @@ const loginNotice = ref<{ kind: 'busy' | 'warn' | 'error'; text: string; raw: st
 const platformDown = ref(false)
 /** 服务端**主动拒绝**（不是连不上），且属于「配置/未部署」而非「临时故障」 */
 const platformUnconfigured = ref<string>('')
+/**
+ * 平台 AI 上游未配置（服务端没有 `OPENAI_API_KEY`）。
+ *
+ * 与 `platformDown` 的区别很重要：**这不是故障，也不是临时不可用** ——
+ * 它不会自己恢复，重新登录也不会变。故不能用「请稍后重试」那套话术。
+ * 而 `platformUnconfigured`（服务端没配 GitHub 凭证）也不对：那是登录侧的问题，
+ * 账号本身是好着的（你已经能看到自己名字了）。
+ *
+ * 判据：**服务端明确说了「上游没配」**（`available:false` / `PLATFORM_UNAVAILABLE`）
+ * 才置位；连不上仍算 `platformDown`。
+ */
+const platformAiUnavailable = ref<string>('')
 
 /**
  * 传输层错误码 = 「服务不可用」，而不是「你密码填错了」这类可重试失败。
@@ -903,9 +915,11 @@ onBeforeUnmount(() => {
                 <span class="setting-name">AI 额度</span>
                 <span class="setting-desc">
                   {{
-                    account.inviteRedeemed
-                      ? `剩余 ${account.quotaRemaining} 次（共 ${account.quotaTotal} 次）`
-                      : '尚未兑换邀请码，当前没有额度'
+                    platformAiUnavailable
+                      ? '平台 AI 未配置上游 Key，暂不可用 —— 请改用「AI 助手」里自备供应商'
+                      : account.inviteRedeemed
+                        ? `剩余 ${account.quotaRemaining} 次（共 ${account.quotaTotal} 次）`
+                        : '尚未兑换邀请码，当前没有额度'
                   }}
                 </span>
               </div>
@@ -914,7 +928,14 @@ onBeforeUnmount(() => {
             <div v-if="!account.inviteRedeemed" class="setting-row">
               <div class="setting-info">
                 <span class="setting-name">兑换邀请码</span>
-                <span class="setting-desc">兑换后才发放额度，并开放「申请成为开发者」</span>
+                <!--
+                  ⚠️ 原文案「兑换后才发放额度」与实现不符：服务端兑换只置
+                  `invite_redeemed = 1`，**不发任何额度**。实际额度是每天懒发放
+                  （`ai.ts` 的 DAILY_GRANT，读时补行），不必兑换也每天有 —— 
+                  兑换的作用是**准入**。
+                  「显示能用却不能用 / 说错了却让人以为有」都比明确说清更糟。
+                -->
+                <span class="setting-desc">用于解锁平台 AI 额度与「申请成为开发者」；兑换本身不发额度</span>
               </div>
               <div class="account-inline">
                 <input v-model="redeemInput" class="account-input" placeholder="邀请码" />

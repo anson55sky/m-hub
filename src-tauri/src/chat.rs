@@ -87,18 +87,62 @@ fn key_file_path() -> std::path::PathBuf {
 }
 
 /// 拉取平台可用模型（「使用平台免费额度」用；需登录账号）
+///
+/// ## ⚠️ 这里曾把 `models[]` 的元素当**字符串**解析（2026-10-01 修）
+///
+/// 服务端返回的是 `{ "models": [{ "id": "platform:gpt-4o", "name": "…" }] }`
+/// —— 元素是**对象**，而原代码 `.filter_map(|x| x.as_str())` 只接受字符串，
+/// 于是**永远得到空数组**。症状：开关平台额度后模型列表是空的，
+/// 而不报错（空数组也是「成功返回」）。
+///
+/// 这类 bug 的形状值得记：**解析失败被 `unwrap_or_default()` 吞成了「空」**，
+/// 而「空」在界面上看起来像「服务端还没配模型」，不像故障。
+///
+/// 现在改成读 `.id`，并在 `available: false` 时**明确报错**而不是回空数组 ——
+/// 上游没配 Key 时静默给空列表，等于让用户以为是自己操作错了。
 #[tauri::command]
 pub async fn platform_models() -> Result<Vec<String>, String> {
     let token = crate::account::session_token().ok_or("UNAUTHORIZED: 请先在「设置 → 账号」登录")?;
     let v = crate::account::get_json(crate::api_spec::platform_models_path(), &token).await?;
-    Ok(v.get("models")
+
+    // 上游未配置：明确说明，别用空列表假装「没模型可选」
+    if v.get("available").and_then(|b| b.as_bool()) == Some(false) {
+        let reason = v
+            .get("reason")
+            .and_then(|s| s.as_str())
+            .unwrap_or("平台 AI 当前不可用，请改用自备供应商。");
+        return Err(format!("PLATFORM_UNAVAILABLE: {reason}"));
+    }
+
+    let models = parse_platform_models(&v);
+    if models.is_empty() {
+        return Err(
+            "PLATFORM_UNAVAILABLE: 平台没有可用模型。请改用「设置 → AI 助手」里自备供应商。"
+                .into(),
+        );
+    }
+    Ok(models)
+}
+
+/// 从 `/api/v1/ai/models` 的响应里取模型 id 列表。**纯函数**，可离线回归。
+///
+/// 抽出来是因为它曾经是个静默 bug：元素是 `{id, name}` 对象而旧代码按字符串解析，
+/// `unwrap_or_default()` 把解析失败吞成了空数组，界面上看起来像「服务端没配模型」。
+fn parse_platform_models(v: &Value) -> Vec<String> {
+    v.get("models")
         .and_then(|m| m.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect()
+                .filter_map(|x| {
+                    // 元素是 {id, name}；兼容历史的纯字符串形态
+                    x.get("id")
+                        .and_then(|i| i.as_str())
+                        .or_else(|| x.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect::<Vec<_>>()
         })
-        .unwrap_or_default())
+        .unwrap_or_default()
 }
 
 /// 发送一次 OpenAI 兼容流式对话请求，逐段回调 on_chunk，并把完整回复累积到 out
@@ -329,6 +373,67 @@ pub async fn fetch_provider_models(
 mod tests {
     use super::*;
     use crate::models::ChatMessage;
+
+    #[test]
+    fn platform_models_parse_object_entries() {
+        // 真实响应形状：元素是**对象** `{id, name}`。
+        // 旧代码按字符串解析 → 永远空数组，且被 unwrap_or_default 吞掉，
+        // 界面上表现为「服务端没配模型」而不是故障。
+        let v: Value = serde_json::from_str(
+            r#"{"available":true,"models":[
+                 {"id":"platform:deepseek-chat","name":"m-hub 平台 · deepseek-chat"},
+                 {"id":"platform:qwen-max","name":"m-hub 平台 · qwen-max"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_platform_models(&v),
+            vec!["platform:deepseek-chat".to_string(), "platform:qwen-max".to_string()]
+        );
+    }
+
+    #[test]
+    fn platform_models_tolerate_string_entries_and_missing_field() {
+        // 兼容历史的纯字符串形态
+        let v: Value = serde_json::from_str(r#"{"models":["platform:a","platform:b"]}"#).unwrap();
+        assert_eq!(
+            parse_platform_models(&v),
+            vec!["platform:a".to_string(), "platform:b".to_string()]
+        );
+
+        // 缺 models 字段 / 不是数组 → 空列表（由调用方转成明确报错）
+        assert!(parse_platform_models(&serde_json::json!({})).is_empty());
+        assert!(parse_platform_models(&serde_json::json!({"models": {}})).is_empty());
+    }
+
+    #[test]
+    fn platform_models_skip_malformed_entries_without_dropping_good_ones() {
+        // 单个坏条目不该让整份清单作废 —— 用户还能用其余模型。
+        //
+        // ⚠️ 预期是从**读实现 + 实跑解析**得来的，不是我想当然写的：
+        // 最初我断言 `"garbage"` 应被跳过，测试红了 —— 因为纯字符串条目走的是
+        // 兼容分支（服务端若回 `["platform:a"]` 就该收下），所以它**确实**该被收下。
+        // 真正该丢的是「既没有可取 id、又不是字符串」的条目：`{"nope":1}` 与 `{"id":7}`。
+        let v: Value = serde_json::from_str(
+            r#"{"models":[{"id":"platform:ok"},{"nope":1},{"id":7},"legacy:plain"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_platform_models(&v),
+            vec!["platform:ok".to_string(), "legacy:plain".to_string()]
+        );
+    }
+
+    #[test]
+    fn platform_models_unavailable_yields_empty_list() {
+        // available:false 时服务端回空清单；调用方据此报 PLATFORM_UNAVAILABLE。
+        // 这里锁住「空清单」这个事实，免得有人改成回占位模型名。
+        let v: Value = serde_json::from_str(
+            r#"{"available":false,"reason":"未配置上游 Key","models":[],"quota":{"granted":0}}"#,
+        )
+        .unwrap();
+        assert!(v.get("available").and_then(|b| b.as_bool()) == Some(false));
+        assert!(parse_platform_models(&v).is_empty());
+    }
 
     #[test]
     fn build_messages_map() {
