@@ -530,14 +530,32 @@ export interface PrecheckResult {
   items: { level: 'ok' | 'warn' | 'error'; label: string; detail?: string }[]
 }
 
-/** 一台在线设备（多设备登录；每台一条 token，可单独撤销） */
+/**
+ * 一台在线设备（多设备登录；每台一条 token，可单独撤销）。
+ *
+ * ⚠️ 字段名照抄服务端 `routes/me.ts::deviceTokens`，不要凭直觉写：
+ *   · 顶层是 **`{ items }`**，不是 `{ devices, max }`
+ *   · 设备名是 `device`，不是 `label`
+ *   · 有 `expires_at` / `expired`，**没有** `last_seen_at`（sessions 表没这列）
+ *   · **`id` 是字符串**（token 前 8 位，`r.token.slice(0, 8)`），不是数字
+ *
+ * 这一段原本整份写错（读 `r.devices` / `d.label` / `d.last_seen_at`、`id: number`），
+ * 于是设备列表永远是空的、撤销也传不出能用的 id —— 与「提交列表读不到」完全同款：
+ * `?? []` 把契约断裂静默成「没有数据」。由 `scripts/check-response-keys.mjs` 守着。
+ */
 export interface AccountDevice {
-  id: number
-  label: string
+  id: string
+  device: string | null
   created_at: number
-  last_seen_at: number
+  expires_at: number
+  expired: boolean
   /** 是不是本机（当前正在用的这枚 token）：本机不能「撤销」，否则等于把自己踢下线 */
-  current?: boolean
+  current: boolean
+}
+
+/** 设备列表响应：`{ items }`。⚠️ 不是 `{ devices, max }` —— 服务端没有 `max` 这个键 */
+export interface AccountDeviceList {
+  items: AccountDevice[]
 }
 
 /** 发布提交结果（关卡逐项结论；客户端只展示服务端结论，不内置任何审核规则） */
@@ -553,29 +571,51 @@ export interface SubmitResult {
   quota: { drafts_remaining?: number; published_remaining?: number; daily_submits_remaining?: number } | null
 }
 
-/** 我的一条提交记录 */
+/**
+ * 我的一条提交记录。
+ *
+ * ⚠️ **字段名必须是服务端真实发出的名字，不是「看起来更规整」的蛇形。**
+ *
+ * 这段类型曾经整份写错（`ext_id`/`review_note`/`created_at`/`size`/`runtime`/
+ * `reviewed_at`/`has_ai_report`），而服务端 SQL 一直别名成**驼峰**
+ * （`ext_id AS extId`、`review_note AS reviewNote`、`created_at AS createdAt`）。
+ * 两边只有 `id`/`version`/`status` 对得上，其余全是 `undefined`。
+ *
+ * 后果不是报错，是**界面说了一句与事实相反的话**：`first.submissions ?? []`
+ * 把「键名不存在」兜成「空列表」，于是明明有两条提交，弹窗却写
+ * 「账号下还没有提交记录」；`blockerFor` 里 `s.ext_id === extId` 恒不成立，
+ * 待审版本**再也拦不住**；「驳回原因」永远不显示。用户报上来的是三个
+ * 互不相干的现象，根因是同一处契约断裂。
+ *
+ * 记住这条的不对称性（约定 47 只说了请求侧）：
+ *   · **请求体** = 蛇形（Hono 直接读原始键名，不做驼峰转换）
+ *   · **响应体** = 驼峰（服务端 SQL 显式 `AS` 别名）
+ * 照抄服务端 `schema.sql` / 路由里的 `AS` 别名，不要凭直觉改回去。
+ * 形状由 `scripts/check-response-keys.mjs` 在构建期守着。
+ */
 export interface DevSubmissionRow {
   id: number
-  ext_id: string
+  extId: string
   version: string
-  runtime: string
   status: string
-  review_note: string
-  size: number
-  created_at: number
-  reviewed_at: number | null
-  has_ai_report: number
+  /** 审核备注；关卡失败原因也放这里（`schema.sql` 的列注释原话） */
+  reviewNote: string | null
+  createdAt: number
+  updatedAt: number
 }
 
-/** 提交详情（含关卡逐项结论；**不含** AI 预审报告——那是给审核者看的） */
-export interface DevSubmissionDetail extends DevSubmissionRow {
-  market: { changelog?: string; minAppVersion?: string; homepage?: string }
-  permissions: string[]
-  gate_report: { id: string; label: string; ok: boolean; detail?: string | null }[]
-}
+/**
+ * 提交详情 = **同一条记录**（服务端 `submissionDetail` 就是把行原样 `json(row)`）。
+ *
+ * 原类型凭空声明了 `market` / `permissions` / `gate_report` 三样服务端**根本没返回**
+ * 的东西，于是展开「关卡逐项结论」永远是空面板。关卡失败原因只有一个去处：
+ * `reviewNote`（文本）。不另造结构，也不假装有逐项结论。
+ */
+export interface DevSubmissionDetail extends DevSubmissionRow {}
 
 export interface DevSubmissionList {
-  submissions: DevSubmissionRow[]
+  /** ⚠️ 键名是 `items` 不是 `submissions`——服务端三处列表路由统一用 `items` */
+  items: DevSubmissionRow[]
   total: number
   quota: { drafts_remaining?: number; published_remaining?: number; daily_submits_remaining?: number }
 }
@@ -1389,10 +1429,9 @@ export const tauriApi = {
   devApply: (reason: string) => invoke<DevApplyStatus>('dev_apply', { reason }),
   devApplyStatus: () => invoke<DevApplyStatus>('dev_apply_status'),
   /** 我的在线设备（不含 token 明文） */
-  accountListDevices: () =>
-    invoke<{ devices: AccountDevice[]; max: number }>('account_list_devices'),
-  /** 撤销某台设备（换机/设备丢失时用） */
-  accountRevokeDevice: (id: number) => invoke<unknown>('account_revoke_device', { id }),
+  accountListDevices: () => invoke<AccountDeviceList>('account_list_devices'),
+  /** 撤销某台设备（换机/设备丢失时用）。⚠️ `id` 是 **token 前 8 位字符串**，不是数字 */
+  accountRevokeDevice: (id: string) => invoke<unknown>('account_revoke_device', { id }),
   // ---- 扩展发布（打包上传 / 我的提交 / 撤回） ----
   /** newVersion 非空时，Rust 端会先把它写回扩展 manifest.json（须大于当前版本）再打包上传 */
   devSubmit: (
@@ -1418,8 +1457,8 @@ export const tauriApi = {
       page: page ?? null,
       pageSize: pageSize ?? null,
     }),
-  devGetSubmission: (id: number) =>
-    invoke<{ submission: DevSubmissionDetail }>('dev_get_submission', { id }),
+  /** 提交详情 = 那一行本身（服务端原样 `json(row)`，**没有** `{submission:…}` 外壳） */
+  devGetSubmission: (id: number) => invoke<DevSubmissionDetail>('dev_get_submission', { id }),
   devWithdrawSubmission: (id: number) => invoke<unknown>('dev_withdraw_submission', { id }),
   /** 发布前本地预检（作者侧 lint：manifest / 权限申报 / 桥 API 可用性） */
   precheckExtension: (id: string) => invoke<PrecheckResult>('precheck_extension', { id }),

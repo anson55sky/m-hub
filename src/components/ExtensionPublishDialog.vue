@@ -46,7 +46,7 @@ const allLoaded = ref(false)
 const quota = ref<{ drafts_remaining?: number; published_remaining?: number; daily_submits_remaining?: number } | null>(null)
 
 /** 当前扩展的提交记录（列表只显示这一份：看版本历史不该被别的扩展刷屏） */
-const extSubmissions = computed(() => submissions.value.filter((s) => s.ext_id === props.extension?.id))
+const extSubmissions = computed(() => submissions.value.filter((s) => s.extId === props.extension?.id))
 
 /** 列表里要显示的记录（超过一页时按当前页截断） */
 const visibleSubmissions = computed(() => extSubmissions.value.slice(0, visibleCount.value))
@@ -61,7 +61,7 @@ const revokedKeys = ref<string[]>([])
 
 /** 某条提交对应的版本是否已被平台下架（下架只写 `revoked` 表、**不改 submissions.status**） */
 function isDelisted(s: DevSubmissionRow): boolean {
-  return s.status === 'published' && revokedKeys.value.includes(`${s.ext_id}@${s.version}`)
+  return s.status === 'published' && revokedKeys.value.includes(`${s.extId}@${s.version}`)
 }
 
 /** 列表里要显示的记录状态：已下架的不再算「已上架」 */
@@ -96,7 +96,7 @@ const draftBlockers = computed(() =>
 const blockingSubmission = computed(() => {
   const extId = props.extension?.id
   if (!extId) return null
-  return submissions.value.find((s) => s.ext_id === extId && (WITHDRAWABLE as readonly string[]).includes(s.status)) ?? null
+  return submissions.value.find((s) => s.extId === extId && (WITHDRAWABLE as readonly string[]).includes(s.status)) ?? null
 })
 
 /** 阻塞原因（null = 可以提交） */
@@ -244,6 +244,29 @@ function showMore() {
 }
 
 /**
+ * 取列表响应的 `items`，**取不到就抛**。
+ *
+ * 为什么不写 `resp.items ?? []`：`?? []` 把「服务端改了键名」和「真的没有记录」
+ * 变成同一个结果——界面显示「账号下还没有提交记录」，用户以为是自己没提交过，
+ * 于是反复重新发布；而待审版本的拦截也跟着失效（`blockerFor` 一条都匹配不上），
+ * 于是又能提交一次，撞上服务端的唯一索引才报错。这是本文件 2026-10-01 事故的
+ * 完整因果链，三步都由这一行兜底引起。
+ *
+ * 抛出来之后，`loadAllSubmissions` 的 catch 走「数据不完整」分支，
+ * 界面会明说可能不全，而不是假装「零条」。
+ */
+function requireItems(resp: { items?: unknown }): DevSubmissionRow[] {
+  if (!Array.isArray(resp.items)) {
+    const keys = Object.keys(resp ?? {}).join(', ') || '(空响应)'
+    throw new Error(
+      `提交列表响应里没有 items 数组（实际收到的键：${keys}）。` +
+        `这是服务端契约变了，不是「没有提交记录」——请检查 /api/v1/dev/submissions 的返回。`,
+    )
+  }
+  return resp.items as DevSubmissionRow[]
+}
+
+/**
  * 拉全量提交记录（翻页到底）。
  *
  * 为什么必须全量：阻塞判定与「待处理 N 条」的明细都要看**所有**未走完流程的提交，
@@ -256,14 +279,19 @@ async function loadAllSubmissions() {
   allLoaded.value = false
   try {
     const first = await tauriApi.devListSubmissions(1, 100)
-    let rows = first.submissions ?? []
+    // ⚠️ `items` 不是 `submissions`（服务端三处列表路由统一用 `items`）。
+    //    这里**故意不写 `?? []`**：那正是把契约断裂静默成「账号下还没有提交记录」
+    //    的那一行（2026-10-01 实机事故，用户报「审核完 APP 不显示」+「重新进入又要
+    //    重新发布」+「不能发布」三个现象，根因同一处）。读不到就报错，
+    //    让错误出现在错误的地方。
+    let rows = requireItems(first)
     const t = typeof first.total === 'number' ? first.total : rows.length
     quota.value = first.quota ?? quota.value
     let p = 1
     while (rows.length < t && p < 20) {
       p += 1
       const r = await tauriApi.devListSubmissions(p, 100)
-      const batch = r.submissions ?? []
+      const batch = requireItems(r)
       if (!batch.length) break
       rows = [...rows, ...batch]
     }
@@ -418,7 +446,18 @@ async function toggleDetail(row: DevSubmissionRow) {
   detailLoading.value = true
   try {
     const r = await tauriApi.devGetSubmission(row.id)
-    detailItems.value = r.submission.gate_report ?? []
+    // ⚠️ 服务端 `submissionDetail` 就是把那一行**原样** `json(row)`：没有
+    //    `{submission: …}` 外壳，也没有 `gate_report`——`schema.sql` 里
+    //    submissions 表根本没有逐项关卡结论的列，失败原因只作为**一段文本**
+    //    存在 `review_note`。原来读 `r.submission.gate_report ?? []`，
+    //    于是这个面板**永远空**，且看不出是坏了。
+    //
+    //    正确做法：把唯一的真相当成一条结论显示出来。不要为了「界面好看」
+    //    在客户端凭空造一个数组结构——那是本次事故的第四处同款断裂。
+    const note = (r as { reviewNote?: string | null }).reviewNote?.trim()
+    detailItems.value = note
+      ? [{ id: `note-${row.id}`, label: note, ok: false, detail: '' }]
+      : []
   } catch (e) {
     errorText.value = String(e)
   } finally {
@@ -604,15 +643,15 @@ onBeforeUnmount(() => {
               <div class="pub-item-main">
                 <!-- 别的扩展的记录也列在这里（账号级列表，撤回入口要能点到，见下方配额明细），
                      但用标签明确区分，避免看起来像本扩展的版本 -->
-                <span v-if="s.ext_id !== extension?.id" class="pub-item-other">
-                  其他扩展 · {{ s.ext_id }}
+                <span v-if="s.extId !== extension?.id" class="pub-item-other">
+                  其他扩展 · {{ s.extId }}
                 </span>
                 <span class="pub-item-title"><b>v{{ s.version }}</b></span>
                 <span class="pub-item-meta">
                   <span class="pub-tag" :class="`st-${statusKey(s)}`">{{ STATUS_TEXT[statusKey(s)] ?? s.status }}</span>
-                  {{ fmtTime(s.created_at) }}
+                  {{ fmtTime(s.createdAt) }}
                 </span>
-                <span v-if="s.review_note" class="pub-item-note">驳回原因：{{ s.review_note }}</span>
+                <span v-if="s.reviewNote" class="pub-item-note">驳回原因：{{ s.reviewNote }}</span>
                 <ul v-if="detailId === s.id" class="pub-item-gate">
                   <li v-if="detailLoading">加载中…</li>
                   <li
@@ -670,7 +709,7 @@ onBeforeUnmount(() => {
                 <li v-for="b in draftBlockers" :key="b.id">
                   <!-- 本扩展的直接跳过去（撤回入口就在那一行）；别的扩展没有对应行，用展开的「本扩展的提交」过滤 -->
                   <button
-                    v-if="b.ext_id === extension?.id"
+                    v-if="b.extId === extension?.id"
                     class="pub-detail-item"
                     type="button"
                     @click="focusSubmission(b.id)"
@@ -678,13 +717,13 @@ onBeforeUnmount(() => {
                     <span class="pub-detail-id">{{ extension?.name || extension?.id }}</span>
                     <span class="pub-detail-ver">v{{ b.version }}</span>
                     <span class="pub-tag" :class="`st-${b.status}`">{{ STATUS_TEXT[b.status] ?? b.status }}</span>
-                    <span class="pub-detail-time">{{ fmtTime(b.created_at) }}</span>
+                    <span class="pub-detail-time">{{ fmtTime(b.createdAt) }}</span>
                   </button>
                   <span v-else class="pub-detail-item pub-detail-item-static">
-                    <span class="pub-detail-id">{{ b.ext_id }}</span>
+                    <span class="pub-detail-id">{{ b.extId }}</span>
                     <span class="pub-detail-ver">v{{ b.version }}</span>
                     <span class="pub-tag" :class="`st-${b.status}`">{{ STATUS_TEXT[b.status] ?? b.status }}</span>
-                    <span class="pub-detail-time">{{ fmtTime(b.created_at) }}</span>
+                    <span class="pub-detail-time">{{ fmtTime(b.createdAt) }}</span>
                   </span>
                 </li>
               </ul>

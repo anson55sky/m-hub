@@ -71,7 +71,11 @@ pub fn device_tokens_path() -> &'static str {
 }
 
 /// 撤销某台设备
-pub fn device_revoke(base: &str, id: i64) -> Spec {
+/// ⚠️ `id` 是 **token 前 8 位**（服务端 `r.token.slice(0, 8)`），不是数据库行号 ——
+///    必须是 `&str`。原先声明成 `i64`，而前端也确实按 number 传，于是
+///    「撤销设备」这条链路两端都传着数字，服务端那边永远匹配不到任何会话。
+///    撤销路由按 `token LIKE '<prefix>%'` 匹配，且**必须**限定 `user_id`。
+pub fn device_revoke(base: &str, id: &str) -> Spec {
     (
         format!("{}/api/v1/me/device-tokens/{id}/revoke", base_of(base)),
         json!({}),
@@ -121,7 +125,12 @@ mod tests {
         assert_eq!(dev_apply(b, "reason").0, "https://x.example/api/v1/dev/apply");
         assert_eq!(dev_apply_status_path(), "/api/v1/dev/apply");
         assert_eq!(device_tokens_path(), "/api/v1/me/device-tokens");
-        assert_eq!(device_revoke(b, 7).0, "https://x.example/api/v1/me/device-tokens/7/revoke");
+        // 用真实的 token 前缀形态（8 位十六进制），别用 7 —— 数字样例会让
+        // 「id 到底是行号还是字符串前缀」这件事在测试里看不出来
+        assert_eq!(
+            device_revoke(b, "a1b2c3d4").0,
+            "https://x.example/api/v1/me/device-tokens/a1b2c3d4/revoke"
+        );
         assert_eq!(platform_models_path(), "/api/v1/ai/models");
         assert_eq!(submit_extension_path(), "/api/v1/dev/submissions");
         assert_eq!(submission_detail_path(9), "/api/v1/dev/submissions/9");
@@ -138,7 +147,7 @@ mod tests {
         assert_eq!(dev_apply("b", "想做一个扩展").1, json!({ "reason": "想做一个扩展" }));
         // 无参数端点必须是空对象（服务端会 await c.req.json().catch(() => null)，空对象最稳）
         assert_eq!(github_device_start("b").1, json!({}));
-        assert_eq!(device_revoke("b", 1).1, json!({}));
+        assert_eq!(device_revoke("b", "a1b2c3d4").1, json!({}));
         assert_eq!(withdraw_submission("b", 1).1, json!({}));
     }
 

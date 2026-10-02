@@ -6,7 +6,7 @@
   "scripts": {
     "test:security": "node --test tests/security.test.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/gen-settings-index.mjs && node scripts/check-settings-css.mjs && node scripts/check-rounded-window.mjs && node scripts/check-css-comment-balance.mjs && node scripts/check-dash-preset.mjs && node scripts/check-notice-dnd-gate.mjs && node scripts/check-window-margin.mjs && node scripts/check-window-min-size.mjs && node scripts/check-default-shortcuts.mjs && node scripts/check-shortcut-text.mjs && node scripts/check-ext-frame-watchdog.mjs && node scripts/check-clipboard-anchor.mjs && node scripts/check-drag-loop-blocking.mjs",
+    "prebuild": "node scripts/gen-settings-index.mjs && node scripts/check-settings-css.mjs && node scripts/check-rounded-window.mjs && node scripts/check-css-comment-balance.mjs && node scripts/check-dash-preset.mjs && node scripts/check-notice-dnd-gate.mjs && node scripts/check-window-margin.mjs && node scripts/check-window-min-size.mjs && node scripts/check-default-shortcuts.mjs && node scripts/check-shortcut-text.mjs && node scripts/check-ext-frame-watchdog.mjs && node scripts/check-clipboard-anchor.mjs && node scripts/check-drag-loop-blocking.mjs && node scripts/check-response-keys.mjs",
     "check:settings-css": "node scripts/check-settings-css.mjs",
     "build": "vue-tsc -b && vite build",
     "gen:settings-index": "node scripts/gen-settings-index.mjs",
@@ -25,7 +25,8 @@
     "check:shortcuts": "node scripts/check-default-shortcuts.mjs",
     "check:shortcut-text": "node scripts/check-shortcut-text.mjs",
     "check:ext-frame-watchdog": "node scripts/check-ext-frame-watchdog.mjs",
-    "verify:ext-cells": "node --experimental-strip-types scripts/verify-dash-ext-cells.ts"
+    "verify:ext-cells": "node --experimental-strip-types scripts/verify-dash-ext-cells.ts",
+    "check:response-keys": "node scripts/check-response-keys.mjs"
   },
   "dependencies": {
     "@internationalized/date": "^3.12.3",

@@ -474,10 +474,13 @@ pub async fn account_list_devices() -> Result<Value, String> {
 
 /// 撤销某一台设备（换机 / 设备丢失时用；上限由服务端控制，超出会自动淘汰最久未用的）
 #[tauri::command]
-pub async fn account_revoke_device(id: i64) -> Result<Value, String> {
+/// ⚠️ `id` 是 token 前 8 位**字符串**，不是数字（见 `api_spec::device_revoke` 的注释）。
+///    改成 `i64` 会让前端传数字时 serde 直接反序列化失败——用户看到的是
+///    「撤销失败」，而不是「参数类型不对」。
+pub async fn account_revoke_device(id: String) -> Result<Value, String> {
     let token = load_token().ok_or("UNAUTHORIZED: 请先登录")?;
     let base = server_url();
-    let (url, body) = crate::api_spec::device_revoke(&base, id);
+    let (url, body) = crate::api_spec::device_revoke(&base, &id);
     crate::account::post_json(&url, Some(&token), body).await
 }
 

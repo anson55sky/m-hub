@@ -246,15 +246,22 @@ async function loadAccount() {
 
 // ---- 在线设备（多设备登录：换机不被顶下线，丢失时可单独撤销） ----
 const devices = ref<AccountDevice[]>([])
-const devicesMax = ref(5)
+/** 同时在线设备数上限。⚠️ 服务端**不返回**这个数（运营参数不进开放仓，见约定 61 同款理由），
+ *  故这是界面上的固定文案常量，不是「服务端告诉我的」。 */
+const DEVICE_MAX = 5
+const devicesMax = ref(DEVICE_MAX)
 const devicesBusy = ref(false)
 
 async function loadDevices() {
   if (!isTauri()) return
   try {
     const r = await tauriApi.accountListDevices()
-    devices.value = r.devices ?? []
-    devicesMax.value = r.max ?? 5
+    // ⚠️ 键名与服务端 `routes/me.ts::deviceTokens` 一致：`{ items }`。
+    //    原来读 `r.devices ?? []` / `r.max` —— 两个键都不存在，于是设备列表
+    //    **恒为空**，界面还看不出是坏了（与发布弹窗读 `submissions` 同款）。
+    devices.value = r.items ?? []
+    // `max` 服务端确实没返回（设备数上限是运营参数，不进开放仓），故固定文案常量。
+    devicesMax.value = DEVICE_MAX
   } catch {
     devices.value = []
   }
@@ -273,7 +280,7 @@ async function handleAuthError(e: unknown): Promise<boolean> {
   return false
 }
 
-async function revokeDevice(id: number) {
+async function revokeDevice(id: string) {
   devicesBusy.value = true
   try {
     await tauriApi.accountRevokeDevice(id)
@@ -1014,10 +1021,10 @@ onBeforeUnmount(() => {
             <p v-if="!devices.length" class="account-device-empty">暂无设备记录</p>
             <div v-for="d in devices" :key="d.id" class="account-device-item">
               <span class="account-device-name">
-                {{ d.label || '未命名设备' }}
+                {{ d.device || '未命名设备' }}
                 <b v-if="d.current" class="account-device-self">本机</b>
               </span>
-              <span class="account-device-meta">最近使用 {{ fmtDeviceTime(d.last_seen_at) }}</span>
+              <span class="account-device-meta">{{ d.expired ? '已过期' : '有效至' }} {{ fmtDeviceTime(d.expires_at) }}</span>
               <button
                 v-if="!d.current"
                 class="ghost-btn"
