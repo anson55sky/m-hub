@@ -17,7 +17,7 @@
 // `listZipEntries` 已经把清单拿出来；唯一要读内容的是 manifest.json，
 // 而它必须限制解压后的大小（zip bomb：几 KB 压缩包能解出几 GB）。
 
-import { listZipEntries, type ZipEntry } from './zipdir.ts'
+import type { ZipEntry } from './zipdir.ts'
 
 /** 包内允许出现的文件扩展名（小写，含点） */
 const ALLOWED_EXT = new Set([

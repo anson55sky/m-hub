@@ -21,12 +21,19 @@ function mk(
   opts: { encrypted?: string[]; sizes?: Record<string, number> } = {},
 ): { entries: ZipEntry[]; readFile: (p: string) => Promise<Uint8Array | null> } {
   const enc = new Set(opts.encrypted ?? [])
-  const entries: ZipEntry[] = Object.entries(files).map(([path, content]) => ({
-    path,
-    size: opts.sizes?.[path] ?? Buffer.byteLength(content),
-    method: 8,
-    encrypted: enc.has(path),
-  }))
+  const entries: ZipEntry[] = Object.entries(files).map(([path, content]) => {
+    const size = opts.sizes?.[path] ?? Buffer.byteLength(content)
+    return {
+      path,
+      size,
+      method: 8,
+      encrypted: enc.has(path),
+      // 关卡不读这两个字段，但类型要求；给 0 表示「未知」
+      // （关卡层不该关心偏移 —— 那是 zipread 的事）
+      compressedSize: 0,
+      localOffset: 0,
+    }
+  })
   const blobs = new Map(Object.entries(files).map(([k, v]) => [k, Buffer.from(v)]))
   return {
     entries,
@@ -130,7 +137,7 @@ test('拒：manifest 的 id 与提交的扩展 id 不一致（防「审的是 A�
 })
 
 test('拒：读不出 manifest 内容（不能当成「没问题」）', async () => {
-  const entries: ZipEntry[] = [{ path: 'manifest.json', size: 100, method: 8, encrypted: false }]
+  const entries: ZipEntry[] = [{ path: 'manifest.json', size: 100, method: 8, encrypted: false, compressedSize: 0, localOffset: 0 }]
   const r = await runGate(entries, async () => null, 'com.demo')
   assert.equal(r.ok, false, '读不出就是读不出，不许静默放行')
   assert.match(r.reason ?? '', /读不出/)
@@ -150,7 +157,7 @@ test('拒：manifest 是乱码时给出可读原因，而不是抛异常', async
   // ⚠️ 这条曾是一个**真 bug**：没有 try 时 JSON.parse 直接抛，
   //    异常冒到 handle.ts 的兜底 → 客户端收到  500，
   //    完全看不出是「包坏了」。而上传了损坏的包是很常见的事。
-  const entries: ZipEntry[] = [{ path: 'manifest.json', size: 3, method: 8, encrypted: false }]
+  const entries: ZipEntry[] = [{ path: 'manifest.json', size: 3, method: 8, encrypted: false, compressedSize: 0, localOffset: 0 }]
   const r = await runGate(entries, async () => new Uint8Array([0xff, 0xfe, 0xfd]), 'com.demo')
   assert.equal(r.ok, false)
   assert.match(r.reason ?? '', /不是合法 JSON/)

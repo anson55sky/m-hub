@@ -22,8 +22,18 @@
 export async function inflateRaw(data: Uint8Array, maxOutputBytes: number): Promise<Uint8Array> {
   const ds = new DecompressionStream('deflate-raw')
   const writer = ds.writable.getWriter()
-  void writer.write(data as unknown as BufferSource)
-  void writer.close()
+
+  // ⚠️ 写入侧的 promise **必须**显式接住，否则超限时 cancel 掉 readable
+  //    会让 writable 以 AbortError 拒绝，而这个拒绝**没人等** →
+  //    Node 报 unhandledRejection，把真正的错误（超限）盖掉。
+  //    实测踩过：测试看到的是 AbortError 而不是「超过上限」。
+  const feed = (async () => {
+    await writer.write(data as unknown as BufferSource)
+    await writer.close()
+  })()
+  feed.catch(() => {
+    /* 超限路径下这是预期的；真正的错误由下面的 throw 报出 */
+  })
 
   const reader = ds.readable.getReader()
   const chunks: Uint8Array[] = []
@@ -36,6 +46,7 @@ export async function inflateRaw(data: Uint8Array, maxOutputBytes: number): Prom
     // ⚠️ 边读边判，而不是读完再判 —— 见文件头坑 ①
     if (total > maxOutputBytes) {
       await reader.cancel().catch(() => {})
+      await feed.catch(() => {})
       throw new Error(`解压后超过 ${maxOutputBytes} 字节上限（可能是 zip bomb）`)
     }
     chunks.push(value as Uint8Array)

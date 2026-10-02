@@ -24,6 +24,8 @@ import { canApplyDeveloper } from '../lib/developerGate.ts'
 // 那个脚本从来不存在）→ 审核通过了也发布不出去。详见 submit() 里那段注释。
 import { putBlob } from '../lib/pkgStore.ts'
 import { listZipEntries } from '../lib/zipdir.ts'
+import { readZipEntry } from '../lib/zipread.ts'
+import { runGate } from '../lib/gate.ts'
 
 /**
  * 单包上限。
@@ -33,6 +35,15 @@ import { listZipEntries } from '../lib/zipdir.ts'
  * 又不会让一次上传跑太久触发 Functions 的 CPU 限制。
  */
 const MAX_PACKAGE_BYTES = 64 * 1024 * 1024
+
+/**
+ * manifest.json 解压后的大小上限（防 zip bomb）。
+ *
+ * 与 `lib/gate.ts::MAX_MANIFEST_BYTES` 数值相同但**用途不同**：
+ * 那边是「manifest 不该这么大」（规则），这边是「解压时最多吐这么多」（资源上限）。
+ * 两者恰好取同一个数，**改一个不会自动改另一个** —— 故都在注释里点明。
+ */
+const MAX_MANIFEST_BYTES = 256 * 1024
 
 /** 未走完流程的提交状态。必须与客户端可撤回白名单一致。 */
 const OPEN_STATUSES = ['uploaded', 'pending_review', 'gate_failed'] as const
@@ -204,14 +215,32 @@ export async function submit(ctx: Ctx) {
     console.warn('[m-hub] 包目录解析失败，关卡将无法判定条目:', String(e))
   }
 
+  // ---- 关卡：提交时就跑，不通过**不入库** ----
+  //
+  // 为什么在提交时而不是审核时跑：
+  // · 提交者**立刻**拿到可照着改的具体原因（约定 51 的前端会显示 review_note）
+  // · 审核人看到的队列里全是「已过关卡」的包，不会出现「一眼就有的问题」
+  //
+  // 但**审核时仍要再跑一次**（admin 端会做）—— 包在库里可能被改，
+  // 且关卡规则以后会变；提交时过的，不代表今天还过。
+  const gate = await runGate(
+    pkgFiles ?? [],
+    (p) => readZipEntry(bytes, pkgFiles ?? [], p, MAX_MANIFEST_BYTES),
+    extId,
+  )
+  const status = gate.ok ? 'pending_review' : 'gate_failed'
+  const note = gate.ok ? null : gate.problems.slice(0, 5).join('；')
+
   const ins = await ctx.env.DB.prepare(
-    `INSERT INTO submissions (user_id, ext_id, version, status, pkg_sha256, pkg_size, pkg_files)
-     VALUES (?1, ?2, ?3, 'pending_review', ?4, ?5, ?6)`,
+    `INSERT INTO submissions (user_id, ext_id, version, status, review_note, pkg_sha256, pkg_size, pkg_files)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
   )
     .bind(
       user.id,
       extId,
       version,
+      status,
+      note,
       sha256,
       bytes.byteLength,
       pkgFiles ? JSON.stringify(pkgFiles) : null,
@@ -239,7 +268,7 @@ export async function submit(ctx: Ctx) {
     if (s.size > 2 * 1024 * 1024) return fail(400, 'screenshot_too_large', '单张截图超过 2MB')
   }
 
-  return json({ ok: true, id: subId, version, status: 'pending_review', screenshots: shots.length })
+  return json({ ok: true, id: subId, version, status, review_note: note, screenshots: shots.length })
 }
 
 /** GET /api/v1/dev/submissions —— 按账号全量，**不支持** ext_id 过滤（约定 61） */

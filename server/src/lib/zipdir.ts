@@ -30,10 +30,20 @@ export interface ZipEntry {
   path: string
   /** 未压缩大小（字节） */
   size: number
+  /** 压缩后大小（字节） */
+  compressedSize: number
   /** 压缩方式：0 = store（未压缩），8 = deflate，其他为私有方法 */
   method: number
   /** 加密标志位（general purpose flag bit 0） */
   encrypted: boolean
+  /**
+   * 本条目**局部文件头**在文件中的偏移（中央目录 +42 处）。
+   *
+   * 有它就不必「从第一个头一路扫过去」—— 那种扫描在 data descriptor
+   * （局部头里 compSize=0，flag bit 3）下会算错步长。
+   * 直接用中央目录给的偏移是精确的。
+   */
+  localOffset: number
 }
 
 const EOCD_SIG = 0x06054b50
@@ -84,6 +94,7 @@ export function listZipEntries(bytes: Uint8Array): ZipEntry[] {
     out.push({
       path,
       size: rd32(bytes, p + 24),
+      compressedSize: rd32(bytes, p + 20),
       // ⚠️ **压缩与否看 method（+10），不看 flags 的 bit 3**。
       //    bit 3（0x0008）是「数据描述符跟在数据后面」，与压缩无关 ——
       //    我第一版就是把它当压缩标志，导致「deflate 压缩的条目」断言失败。
@@ -91,6 +102,7 @@ export function listZipEntries(bytes: Uint8Array): ZipEntry[] {
       //    所以那个断言本来也不该那么写。
       method: rd16(bytes, p + 10),
       encrypted: (flags & 0x0001) !== 0,
+      localOffset: rd32(bytes, p + 42),
     })
     p = nameStart + nameLen + extraLen + commentLen
   }
