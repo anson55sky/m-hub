@@ -265,9 +265,44 @@ for (const [k, p] of tables.DYNAMIC) {
     fail(`paths.ts::DYNAMIC.${k} = ${want} ${p}，但 src/index.ts 里没有对应注册${hint} → 运行期 404/405`)
   }
 }
+/**
+ * 故意**不在** `paths.ts` 里的路径前缀（2026-10-01 起）。
+ *
+ * 管理端（`/api/v1/admin/*`）没有**客户端消费者** —— 没有管理界面，
+ * 走的是 CLI（`npm run review`）。把它塞进 `DYNAMIC` 会让本守卫要求
+ * `api_spec.rs` 也有对应项，而客户端永远不会调它，那条契约是假的。
+ *
+ * 所以这里列一个**显式豁免**，而不是放宽整个「注册了但表里没有」的检查。
+ * 理由：放宽会让**任何**新端点都能悄悄逃过契约对账（那才是真问题）。
+ * 豁免是**窄的、具名的**，且下面另有一条断言检查「它确实没有客户端」。
+ */
+const NO_CLIENT_PREFIXES = [
+  {
+    prefix: '/api/v1/admin/',
+    why: '管理端：没有客户端消费者（无管理界面，走 CLI）。放进去会要求 api_spec.rs 有一条客户端永不调用的假契约。',
+  },
+]
+
 for (const r of registered) {
-  if (!serverPaths.has(r.path)) {
-    fail(`src/index.ts 注册了 ${r.path}，但它不在 paths.ts 的任何表里（表与代码漂移）`)
+  if (serverPaths.has(r.path)) continue
+  const exempt = NO_CLIENT_PREFIXES.find((e) => r.path.startsWith(e.prefix))
+  if (exempt) continue
+  fail(`src/handle.ts 注册了 ${r.path}，但它不在 paths.ts 的任何表里（表与代码漂移）`)
+}
+
+/**
+ * 豁免是**双向**的：上面说「不要求它在契约里」，这里就要求
+ * **客户端确实没有在调它**。少了这条，豁免就变成了「一个可以随手加端点
+ * 而不用对账的后门」—— 将来真给管理端做了界面，这条会红，
+ * 提醒你把它挪进正式契约（那时它就是有消费者的真端点了）。
+ */
+for (const { prefix, why } of NO_CLIENT_PREFIXES) {
+  if (specSrc.includes(prefix)) {
+    fail(
+      `api_spec.rs 里出现了 ${prefix}* —— 它已经有客户端消费者了，\n` +
+        `    请把它加进 paths.ts::DYNAMIC（以及本文件的注册对账），别留在豁免里。\n` +
+        `    豁免理由是：${why}`,
+    )
   }
 }
 

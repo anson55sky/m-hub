@@ -25,6 +25,19 @@ import { chatCompletions, models } from './routes/ai.ts'
 import { send, verify } from './routes/email.ts'
 import { apply, applyStatus, mySubmissions, submissionDetail, submit, withdraw } from './routes/submissions.ts'
 
+// ⚠️ 管理端**不在** `paths.ts::DYNAMIC` 里，因为它**没有客户端消费者** ——
+//    没有管理界面，走的是 CLI（`npm run review`）。把它塞进 DYNAMIC 会让
+//    `check-api-spec-conformance.mjs` 要求 `api_spec.rs` 也有对应项，而客户端
+//    永远不会调它。故单独列在这里，并在下面的守卫里断言「DYNAMIC 里确实没有 admin」。
+import {
+  approveDevApplication,
+  approveSubmission,
+  listDevApplications,
+  listSubmissions,
+  rejectDevApplication,
+  rejectSubmission,
+} from './routes/admin.ts'
+
 export type { Env }
 
 const r = new Router()
@@ -47,6 +60,15 @@ r.add('GET', '/api/v1/dev/submissions/:id', (c) => submissionDetail(c, c.params)
 r.add('POST', '/api/v1/dev/submissions/:id/withdraw', (c) => withdraw(c, c.params))
 // 约定 33：平台对话是 OpenAI 兼容面，**不在** api_spec.rs 里（见 paths.ts::OPENAI_COMPAT）
 r.add('POST', OPENAI_COMPAT.post_chat_completions, (c) => chatCompletions(c))
+
+// ---- 管理端（门禁 role=admin，见 routes/admin.ts::requireAdmin）----
+// 没有客户端消费者，走 `npm run review`。故不在 DYNAMIC 里（见上方 import 的注释）。
+r.add('GET', '/api/v1/admin/dev-applications', (c) => listDevApplications(c))
+r.add('POST', '/api/v1/admin/dev-applications/:id/approve', (c) => approveDevApplication(c, c.params))
+r.add('POST', '/api/v1/admin/dev-applications/:id/reject', (c) => rejectDevApplication(c, c.params))
+r.add('GET', '/api/v1/admin/submissions', (c) => listSubmissions(c))
+r.add('POST', '/api/v1/admin/submissions/:id/approve', (c) => approveSubmission(c, c.params))
+r.add('POST', '/api/v1/admin/submissions/:id/reject', (c) => rejectSubmission(c, c.params))
 
 /**
  * 必须由静态资产应答、**不得**经本函数转发的路径。

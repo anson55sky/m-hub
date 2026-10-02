@@ -176,6 +176,18 @@ export interface Env {
   OPENAI_API_KEY?: string
   /** 邮件服务商（Resend）API Key；未配置时邮箱登录明确回「未配置」而不是假装成功 */
   RESEND_API_KEY?: string
+  /**
+   * 管理端**机器凭据**（`npm run review` 用，2026-10-01 加）。
+   *
+   * 与账号会话 token 是**两条独立**的路：会话 token 存在应用私有目录里，
+   * 让 CLI 去读等于让脚本进另一个程序的家目录（耦合 + 读到用户身份 +
+   * 重装即失效）。
+   *
+   * ⚠️ 门禁**仍要求 role='admin'** —— 这只是「用哪把钥匙开门」，
+   *    不是「谁可以开门」。
+   * ⚠️ 未配置时管理端对机器凭据**一律拒绝**（见 admin.ts::machineOk）。
+   */
+  ADMIN_TOKEN?: string
   EMAIL_FROM?: string
 }
 
@@ -191,6 +203,22 @@ export function bearer(req: Request): string | undefined {
   if (!h) return undefined
   const m = /^Bearer\s+(.+)$/i.exec(h.trim())
   return m?.[1]?.trim() || undefined
+}
+
+/**
+ * 定长字符串比较。
+ *
+ * ⚠️ 用它而不用 `a === b`：`===` 会在**第一个不同的字符**处提前返回，
+ *   攻击者能用响应时间逐位试探出正确前缀。管理端 token 比的是机密，
+ *   这点差别值得一个函数。
+ *
+ * 长度不同直接返回 false（那种情况本来就无解，长度不是秘密）。
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return diff === 0
 }
 
 export interface User {
