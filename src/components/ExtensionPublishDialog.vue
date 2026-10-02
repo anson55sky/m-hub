@@ -79,13 +79,23 @@ function isWithdrawable(s: DevSubmissionRow): boolean {
 // 先 pack_to_temp + upload，服务端 `checkDevQuota` 才回 429）。所以这里前置判定、就地说明原因。
 //
 // 口径：**同一扩展同时只允许一个待审版本**——有一条未走完流程的提交时必须先撤回或等结果。
-// ⚠️ 两个集合刻意分开，别合并：
-//   · `WITHDRAWABLE`（阻塞集合）：能撤回的才拦——拦住也一定能靠自己解开，不会「被拦又无从下手」；
-//   · `DRAFT_STATUSES`（配额明细集合）：服务端 `quotaView` 的 drafts 口径，比上面**多一个 `approved`**
-//     （审核通过、但还没真正写进市场清单的短暂过渡态）。它占名额，却**不可撤回**（服务端只允许
-//     uploaded / gate_failed / pending_review 撤回），所以只用于算明细、不用于拦提交。
+//
+// ⚠️ 原来这里有两个集合，`DRAFT_STATUSES` 比撤回白名单**多一个 `approved`**，
+//   注释还写「与服务端 quotaView 同源」——**那是错的**（2026-10-02 实测撞上）：
+//   服务端 `mySubmissions` 算 `drafts_remaining` 用的是
+//     `COUNT(status IN ('uploaded','pending_review','gate_failed'))`
+//   **不含 approved**。于是同一屏上「3 条未走完流程」与顶栏
+//   「待处理还可 5 条」（= 5 − 0）直接打架：明明三条都已通过，
+//   界面却说占满了额度、还让人去撤回已通过的东西。
+//
+// 结论：**只有一个集合**，且必须与服务端 SQL 逐字一致。
+// 「approved 但还没上架」是真实存在的过渡态（上架是构建期动作），
+// 但它**不占用待处理名额** —— 服务端说了算，不由客户端另立一套口径。
+// 展示上它由 statusKey 渲染成「已通过」；真要提醒「还没上架」，
+// 应另起一条与额度无关的提示，而不是把它塞进额度明细。
 const WITHDRAWABLE = ['uploaded', 'pending_review', 'gate_failed'] as const
-const DRAFT_STATUSES = ['uploaded', 'pending_review', 'gate_failed', 'approved'] as const
+/** ⚠️ 必须与服务端 `quotaView` 的 SQL 逐字一致（约定 61：两处别互相抄） */
+const DRAFT_STATUSES = WITHDRAWABLE
 
 /** 占用「待处理」名额的提交（账号级、含所有扩展，与配额视图数字同源） */
 const draftBlockers = computed(() =>

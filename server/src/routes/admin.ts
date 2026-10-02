@@ -299,3 +299,173 @@ export async function rejectSubmission(ctx: Ctx, params: Record<string, string>)
   if (!r.meta.changes) return fail(409, 'already_reviewed', '提交不存在或已审核')
   return json({ ok: true, id, status: 'rejected' })
 }
+
+/**
+ * DELETE /api/v1/admin/submissions/:id —— 删除一条**已终结**的提交。
+ *
+ * ## 为什么需要它（2026-10-02 用户反馈）
+ *
+ * 提交一旦走完流程就永远留在作者侧的列表里：撤回只对未终结状态开放，
+ * 驳回会把状态改成 `rejected` 但**不删行**。于是连续发 5 个版本后，
+ * 作者的「提交记录」里堆着 5 条 approved，界面上还把它们算成
+ * 「5 条未走完流程、占满待处理额度」—— 与顶栏「待处理还可 5 条」直接矛盾。
+ *
+ * 所以「删除旧版」这个诉求不能靠撤回（撤回不了已 approved 的），
+ * 也不该靠驳回（那是审核动作，会给作者留一条「你被拒绝过」的记录）。
+ * 需要一个独立的**管理员删除**，语义干净：这条提交不存在了。
+ *
+ * ## 三条安全边界（都必须成立，否则就是数据损坏漏洞）
+ *
+ * ① **只能删已终结的**：`published` / `rejected` / `withdrawn`。
+ *    未终结的三态（`uploaded` / `pending_review` / `gate_failed`）删掉等于
+ *    让作者凭空少一条待办 —— 而且 `idx_sub_one_open` 那个部分唯一索引
+ *    会因此放行，于是**绕过**「同一扩展同时只允许一条未走完流程」的产品口径。
+ *    `WHERE status IN (…)` 让这个约束落在 SQL 里，不靠应用层 if（约定 70 的判据）。
+ *
+ * ② **包体 blob 一并清掉，但只清没人引用的**：`pkg_blobs` 是**内容寻址**的
+ *    （约定：同一份字节只存一份），所以别的提交很可能指向同一个 sha256。
+ *    直接 `DELETE WHERE sha256 = ?` 会把别人的包体也删掉 → 那些提交审核通过后
+ *    发布不出来（`package_missing`）。故必须先确认没有别的行还在引用它。
+ *
+ * ③ **已在市场清单里的版本删不得**：那会让清单指向一个不存在的字节。
+ *    `published` 的删除靠「先下架（写 revoked + 重签清单）再删」两步走，
+ *    不在本接口的职责内 —— 所以本接口**不含** `published`，
+ *    下架走 `/api/v1/admin/market/:id/revoke`。
+ */
+export async function deleteSubmission(ctx: Ctx, params: Record<string, string>) {
+  const admin = await requireAdmin(ctx)
+  if (admin instanceof Response) return admin
+
+  const id = Number(params.id)
+  if (!Number.isInteger(id)) return fail(400, 'bad_request', 'id 不合法')
+
+  // 先读出来：既要拿 sha256 做引用检查，也要把 status 写进错误信息
+  const row = await ctx.env.DB.prepare(
+    `SELECT status, pkg_sha256 AS pkgSha256 FROM submissions WHERE id = ?1`,
+  )
+    .bind(id)
+    .first<{ status: string; pkgSha256: string | null }>()
+  if (!row) return fail(404, 'not_found', '提交不存在')
+
+  if (row.status === 'published') {
+    return fail(
+      409,
+      'still_published',
+      '这条已上架，删不掉。先在市场把它下架（会写 revoked 并重签清单），再删这条记录。',
+    )
+  }
+  if (!(DELETABLE_STATUSES as readonly string[]).includes(row.status)) {
+    return fail(
+      409,
+      'not_deletable',
+      `只能删已走完流程的提交（${DELETABLE_STATUSES.join(' / ')}），` +
+        `这条是 ${row.status}。走完流程前请走撤回。`,
+    )
+  }
+
+  // ⚠️ 状态白名单**必须出现在 DELETE 自己的 WHERE 里**，不能只靠上面那段 JS 判断。
+  //   两次请求之间状态可能被别人改掉（作者撤回 / 另一个管理员操作），
+  //   只在 JS 里判就会删掉一条此刻正处于未终结状态的提交 —— 而那等于给该扩展
+  //   解开了 `idx_sub_one_open` 的部分唯一索引，绕过「同一扩展同时只允许
+  //   一个待审版本」的产品口径。故 SQL 复述一遍白名单：即便状态在这中间
+  //   变了，这一行也删不掉它（changes = 0 → 走下面的 409）。
+  const placeholders = DELETABLE_STATUSES.map((_, i) => `?${i + 2}`).join(', ')
+  const del = await ctx.env.DB.prepare(
+    `DELETE FROM submissions WHERE id = ?1 AND status IN (${placeholders})`,
+  )
+    .bind(id, ...DELETABLE_STATUSES)
+    .run()
+  if (!del.meta.changes) {
+    return fail(409, 'not_deletable', '提交不存在，或它的状态已变（请刷新后重试）')
+  }
+
+  // ② 内容寻址：只有没有任何提交再引用它时才清 blob
+  let blobFreed = false
+  if (row.pkgSha256) {
+    const stillUsed = await ctx.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM submissions WHERE pkg_sha256 = ?1`,
+    )
+      .bind(row.pkgSha256)
+      .first<{ n: number }>()
+    if ((stillUsed?.n ?? 0) === 0) {
+      await ctx.env.DB.prepare(`DELETE FROM pkg_blobs WHERE sha256 = ?1`)
+        .bind(row.pkgSha256)
+        .run()
+      blobFreed = true
+    }
+  }
+
+  return json({ ok: true, id, deleted: row.status, blobFreed })
+}
+
+/**
+ * GET /api/v1/admin/health —— **只读**探活端点，用于确认新部署是否已生效。
+ *
+ * ## 为什么需要它
+ *
+ * `scripts/publish-approved.mjs` 部署完要立刻标记提交为 published，
+ * 但 `wrangler pages deploy` 报 "Deployment complete" 只代表**上传完成**，
+ * 边缘节点还在跑旧 worker。第一版拿 `POST .../mark-published` 当探针，
+ * 结果拿到 405；改对之后又发现**更糟**：那次探针在旧代码上「失败」是对的，
+ * 可一旦新旧顺序反过来（新代码先到），探针就**真的把某条提交标成 published** ——
+ * 一次纯探活动作改了业务数据。
+ *
+ * 探活端点必须是**无副作用**的。这条端点只回一个常量字符串，
+ * 旧版本里根本没有这条路由（404），新版本回 200 —— 判据干净且零副作用。
+ */
+export async function adminHealth(ctx: Ctx): Promise<Response> {
+  // 也要过门禁：它在 /admin 前缀下，不该成为一个不需要鉴权的公开端点
+  const admin = await requireAdmin(ctx)
+  if (admin instanceof Response) return admin
+  return json({ ok: true, marker: 'admin-delete-v1' })
+}
+
+/** 允许管理员删除的状态。⚠️ **不含** `published`（见上面③） */
+const DELETABLE_STATUSES = ['approved', 'rejected', 'withdrawn'] as const
+
+/**
+ * POST /api/v1/admin/submissions/:id/mark-published —— 标记为「已上架」。
+ *
+ * ## 为什么需要它
+ *
+ * 状态机本来缺这一环：`approved` →（构建期发布）→ 清单里有了这个版本，
+ * 但**提交行永远停在 `approved``**。后果有两个方向：
+ *
+ *   · 作者侧那条记录永远显示「已通过」，约定 60 的「已下架是客户端派生状态，
+ *     判据是 `status === 'published'` 命中清单 `revoked`」整段不触发；
+ *   · `deleteSubmission` 按「`published` 不许删」保护在架版本 ——
+ *     而状态到不了 published，那条保护就是**死代码**，在架版本可以被直接删掉。
+ *
+ * 只由 `scripts/publish-approved.mjs` 在**部署成功后**调用。
+ *
+ * ## 为什么只允许 approved → published（单向）
+ *
+ * 下架不回写 `submissions.status`（约定 60 的口径：那会破坏
+ * 「已下架是客户端派生状态」这条设计）。所以 published 是**单向终点**，
+ * 不接受从 published 改回任何状态 —— 否则就等于在本接口里偷偷实现下架，
+ * 而下架必须走「写 revoked + 重签清单」两步。
+ */
+export async function markSubmissionPublished(ctx: Ctx, params: Record<string, string>) {
+  const admin = await requireAdmin(ctx)
+  if (admin instanceof Response) return admin
+
+  const id = Number(params.id)
+  if (!Number.isInteger(id)) return fail(400, 'bad_request', 'id 不合法')
+
+  const r = await ctx.env.DB.prepare(
+    `UPDATE submissions SET status = 'published', updated_at = ?1
+      WHERE id = ?2 AND status = 'approved'`,
+  )
+    .bind(Date.now(), id)
+    .run()
+  if (!r.meta.changes) {
+    // 已经是 published 时**不算错** —— 重跑发布脚本是正常操作，幂等。
+    const row = await ctx.env.DB.prepare(`SELECT status FROM submissions WHERE id = ?1`)
+      .bind(id)
+      .first<{ status: string }>()
+    if (!row) return fail(404, 'not_found', '提交不存在')
+    if (row.status === 'published') return json({ ok: true, id, status: 'published' })
+    return fail(409, 'not_approved', `只有 approved 能标记为已上架，这条是 ${row.status}`)
+  }
+  return json({ ok: true, id, status: 'published' })
+}

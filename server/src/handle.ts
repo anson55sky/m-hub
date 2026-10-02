@@ -37,6 +37,9 @@ import {
   listSubmissions,
   rejectDevApplication,
   rejectSubmission,
+  deleteSubmission,
+  markSubmissionPublished,
+  adminHealth,
 } from './routes/admin.ts'
 
 export type { Env }
@@ -67,9 +70,14 @@ r.add('POST', OPENAI_COMPAT.post_chat_completions, (c) => chatCompletions(c))
 r.add('GET', '/api/v1/admin/dev-applications', (c) => listDevApplications(c))
 r.add('POST', '/api/v1/admin/dev-applications/:id/approve', (c) => approveDevApplication(c, c.params))
 r.add('POST', '/api/v1/admin/dev-applications/:id/reject', (c) => rejectDevApplication(c, c.params))
+r.add('GET', '/api/v1/admin/health', (c) => adminHealth(c))
 r.add('GET', '/api/v1/admin/submissions', (c) => listSubmissions(c))
 r.add('POST', '/api/v1/admin/submissions/:id/approve', (c) => approveSubmission(c, c.params))
 r.add('POST', '/api/v1/admin/submissions/:id/reject', (c) => rejectSubmission(c, c.params))
+r.add('DELETE', '/api/v1/admin/submissions/:id', (c) => deleteSubmission(c, c.params))
+r.add('POST', '/api/v1/admin/submissions/:id/mark-published', (c) =>
+  markSubmissionPublished(c, c.params),
+)
 r.add('GET', '/api/v1/admin/submissions/:id/package', (c) => submissionPackage(c, c.params))
 
 /**

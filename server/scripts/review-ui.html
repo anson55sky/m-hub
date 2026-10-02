@@ -103,8 +103,12 @@
       const listEl = $('#list')
 
       async function call(path, init = {}) {
+        // ⚠️ method 必须显式透传：原来只按「有没有 body」猜，于是 DELETE 请求
+        //   会被发成 GET（body 为空）——服务端回 405 method_not_allowed，
+        //   而界面上显示的是「HTTP 405」，用户完全看不出是自己点错了动词。
+        const method = init.method || (init.body ? 'POST' : 'GET')
         const res = await fetch('/api' + path, {
-          method: init.body ? 'POST' : 'GET',
+          method,
           headers: init.body ? { 'content-type': 'application/json' } : {},
           body: init.body ? JSON.stringify(init.body) : undefined,
         })
@@ -155,10 +159,22 @@
           </div>`
       }
 
-      /** 审核按钮。驳回必填理由 —— 服务端也会拒空理由，界面上先拦住更省事。 */
+      /**
+       * 审核按钮。驳回必填理由 —— 服务端也会拒空理由，界面上先拦住更省事。
+       *
+       * 删除只对**已走完流程**的提交给按钮（approved / rejected / withdrawn），
+       * 与服务端 `DELETABLE_STATUSES` 一致。`published` 故意不给：那条正在
+       * 市场清单里服役，删了要让用户先下架 —— 服务端也会用 409 挡住。
+       * 界面不给按钮，是为了让「为什么删不掉」在点之前就说清楚。
+       */
       function acts(x, kind) {
         if (kind === 'dev' && x.status !== 'pending') return ''
-        if (kind === 'sub' && !['pending_review', 'gate_failed'].includes(x.status)) return ''
+        if (kind === 'sub' && !['pending_review', 'gate_failed'].includes(x.status)) {
+          return DELETABLE.includes(x.status)
+            ? `<div class="acts"><button class="danger" data-act="delete-${x.id}">删除这条记录</button>
+                 <span class="next">删除只清理记录，不影响市场里已上架的版本。</span></div>`
+            : ''
+        }
         const id = kind === 'dev' ? `approve-dev-${x.id}` : `approve-sub-${x.id}`
         return `
           <div class="acts">
@@ -167,6 +183,8 @@
             <button class="danger" data-act="reject-${kind}-${x.id}">驳回</button>
           </div>`
       }
+      /** 与服务端 routes/admin.ts::DELETABLE_STATUSES 逐字一致 */
+      const DELETABLE = ['approved', 'rejected', 'withdrawn']
 
       const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round((n || 0) / 1024)} KB`)
       const esc = (s) =>
@@ -198,6 +216,12 @@
             } else if (act.startsWith('approve-sub-')) {
               const r = await call(`/v1/admin/submissions/${act.split('-').pop()}/approve`, { body: {} })
               toast(r.next || '已通过')
+            } else if (act.startsWith('delete-')) {
+              const id = act.slice('delete-'.length)
+              // 二次确认：删除不可撤销、没有回收站
+              if (!confirm(`永久删除提交 #${id}？\n\n不可撤销，也没有回收站。\n（只删这条记录，不影响市场里已上架的版本）`)) return
+              const r = await call(`/v1/admin/submissions/${id}`, { method: 'DELETE' })
+              toast(`已删除 #${r.id}（原状态 ${r.deleted}）${r.blobFreed ? '，包体一并清理' : ''}`)
             } else {
               const [, kind, id] = act.split('-')
               const note = document.getElementById(`note-${id}`).value.trim()

@@ -145,10 +145,29 @@ switch (cmd) {
       body: JSON.stringify({ note: flag('note') }),
     }).then((r) => console.log(`✓ 提交 #${r.id} 已驳回`))
     break
+  case 'delete-sub':
+    // ⚠️ 二次确认：删除**不可撤销**，且没有回收站。
+    //   服务端只允许删已走完流程的（approved / rejected / withdrawn）——
+    //   published 的必须先下架，否则市场清单会指向一个不存在的字节。
+    if (!rest.includes('--yes')) {
+      console.error(
+        `这会**永久删除**提交 #${pos[0]}（不可撤销，没有回收站）。\n` +
+          '确认无误请加 --yes 重跑。',
+      )
+      process.exit(2)
+    }
+    await api(`/api/v1/admin/submissions/${pos[0]}`, { method: 'DELETE' }).then((r) =>
+      console.log(
+        `✓ 提交 #${r.id} 已删除（原状态 ${r.deleted}）` +
+          (r.blobFreed ? '，包体一并清理' : '，包体仍被其它提交引用故保留'),
+      ),
+    )
+    break
   default:
     console.error(
       `未知命令：${cmd}\n` +
         '可用：list / list-dev / list-subs / approve-dev <id> / reject-dev <id> / approve-sub <id> / reject-sub <id>\n' +
+        '      delete-sub <id> --yes（永久删除已走完流程的提交，需二次确认）\n' +
         '      可选 --note "理由"（驳回时必填）',
     )
     process.exit(2)

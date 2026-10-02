@@ -67,6 +67,28 @@ function adminToken() {
   return t
 }
 
+/**
+ * 与 `api()` 同签名，但**抛错而不是 exit**。
+ *
+ * ⚠️ `api()` 内部调 `die()` → `process.exit(1)`。这在「取提交列表」那种
+ *   必需步骤上是对的（拿不到就该停），但对**部署之后的收尾动作**是错的：
+ *   实测 `markWithRetry` 里调 `api()`，第一次 405 就把整个进程干掉了 ——
+ *   重试逻辑根本没机会执行，日志里也看不出「它本该重试」。
+ *
+ *   凡是「失败可以继续、或者要自己重试」的调用，一律走这个。
+ */
+async function apiSoft(path, init = {}) {
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers: {
+      authorization: `Bearer ${adminToken()}`,
+      ...(init.headers || {}),
+    },
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
 async function api(path, wantBytes = false) {
   const res = await fetch(`${BASE}${path}`, { headers: { authorization: `Bearer ${adminToken()}` } })
   if (!res.ok) die(`取 ${path} 失败：HTTP ${res.status}`)
@@ -76,12 +98,55 @@ async function api(path, wantBytes = false) {
 async function main() {
   console.log('取已批准的提交…')
   const { items } = await api('/api/v1/admin/submissions')
-  const approved = items.filter((s) => s.status === 'approved')
+  // ⚠️ 候选集 = `approved` ∪ `published`，不是只看 approved。
+  //
+  //   只看 approved 会造成一个死锁：某扩展最新的那条发完就是 `published`，
+  //   于是它不再进候选集；而旧的 approved（同一扩展的更早版本）**单独**发是错的
+  //   —— 少了它就没法比版本号，只能把旧版本当最新发上去（实测：v0.1.5 会被
+  //   当成「唯一可发的」推上清单，把已经在架的 v0.1.6 顶掉）。
+  //
+  //   带上 published 是**幂等**的：重跑一次清单字节相同（版本相同、sha 相同），
+  //   而比版本号时它天然会赢过那些更早的 approved。
+  const candidates = items.filter((s) => s.status === 'approved' || s.status === 'published')
 
-  if (approved.length === 0) {
-    console.log('没有已批准的提交，无需发布。')
+  if (candidates.length === 0) {
+    console.log('没有可发布的提交（approved / published 都为空），无需发布。')
     return
   }
+
+  // 同一扩展取最高版本。
+  // ⚠️ 注意这里比的是**候选集**（含 published），不是「只看 approved」：
+  //   最新那条发完就是 published、不再进「只看 approved」的集合，于是比版本号时
+  //   只剩更早的 approved —— 清单会被旧版本顶掉（实测差点发生）。
+  const latest = new Map()
+  for (const s of candidates) {
+    const prev = latest.get(s.extId)
+    if (!prev || cmpVersion(s.version, prev.version) > 0) latest.set(s.extId, s)
+  }
+
+  // ⚠️ 真正要上架的 = 「最新版里**还没 published** 的那些」。
+  //   已经是 published 的最新版**不要重发**：
+  //     ① 它已经在清单里，重发的字节相同，没必要；
+  //     ② `GET /admin/submissions/:id/package` **只对 approved 发包**，
+  //        去取 published 的会拿到 409（`not_approved`）。
+  const approved = [...latest.values()].filter((s) => s.status === 'approved')
+  // ⚠️ 早期版本在这里直接 return，于是**应用自动更新清单被跳过了**。
+  //   而更新清单里存着 DMG 的 sha256 —— 只要重新构建过 DMG，它就过期了。
+  //   实测：清单写着 70740a02…，本地 DMG 已经是 c39baca6…，
+  //   用户点「立即更新」会卡在 sha256 校验失败，而自动更新不校验就装不上。
+  //
+  //   所以「没有扩展要上架」≠「什么都不用做」：更新清单照样要重签。
+  const NOTHING_TO_LIST = approved.length === 0
+  if (NOTHING_TO_LIST) {
+    console.log('每个扩展的最新版本都已上架，无需重新上架；但仍需重签更新清单（DMG 可能变了）。')
+  }
+  const superseded = candidates.length - approved.length
+  if (superseded > 0) {
+    console.log(
+      `  ${candidates.length} 条候选里，${superseded} 条被更高版本取代或已在架，不会上架`,
+    )
+  }
+
 
   console.log(`\n已批准 ${approved.length} 条：`)
   for (const s of approved) {
@@ -191,9 +256,113 @@ async function main() {
     { stdio: 'inherit', cwd: SERVER_ROOT },
   )
   console.log('\n✓ 已部署。注意 Pages 有边缘传播：刚部署完立刻请求可能拿到旧内容或 522。')
+
+  await markPublished(approved)
+}
+
+/**
+ * 部署成功后，把这批提交标记为 `published`。
+ *
+ * ## 为什么**必须**有这一步（2026-10-02 实测）
+ *
+ * 状态机缺了这一环，`published` 永远到不了，于是：
+ *
+ *   ① 作者侧的提交记录永远显示「已通过」，而不是「已上架」——
+ *      而约定 60 的整段逻辑（已下架是**客户端派生**状态，判据是
+ *      `status === 'published'` 命中清单 `revoked`）根本不会触发。
+ *   ② 管理端的删除接口按「`published` 不许删」保护在架版本，
+ *      但因为状态永远停在 `approved`，**那条保护是死代码** ——
+ *      正在市场里服役的版本可以被直接删掉。
+ *      「死代码比没有更糟」：它让人以为这里有防护。
+ *
+ * ## 顺序：部署**之后**才改状态
+ *
+ * 反过来的话，清单部署失败而状态已改成 published，作者侧就会显示
+ * 「已上架」而用户根本装不到 —— 与事实相反的那类谎报。
+ * 部署成功是唯一能让 `published` 成真的前提。
+ */
+async function markPublished(approved) {
+  const ids = approved.map((s) => s.id)
+  if (!ids.length) return
+  const done = []
+  for (const s of approved) {
+    try {
+      await markWithRetry(s.id)
+      done.push(s.id)
+    } catch (e) {
+      // 状态没改成不影响「已经上架」这个事实 —— 部署已完成。
+      // 但必须说出来：作者侧会继续显示「已通过」，且在架版本失去删除保护。
+      console.warn(`⚠ #${s.id} 没能标记为 published：${e.message ?? e}`)
+    }
+  }
+  if (done.length) {
+    console.log(`✓ 已标记 published：#${done.join(' #')}（作者侧会显示「已上架」）`)
+  } else {
+    console.warn(
+      '⚠ 一条都没标记成功。清单已是新的，但提交状态仍是 approved ——\n' +
+        '  作者侧会显示「已通过」，且在架版本不受删除保护。\n' +
+        '  等两分钟后重跑本命令即可补上（发布本身是幂等的）。',
+    )
+  }
 }
 
 main().catch((e) => {
   console.error(e)
   process.exit(1)
 })
+/**
+ * 标记 published，并对「新版本还没生效」重试。
+ *
+ * ## 为什么必须等
+ *
+ * `wrangler pages deploy` 报 "Deployment complete" **只代表上传完成**，
+ * 边缘节点还在跑旧 worker —— 此刻调 mark-published 会拿到 **404/405**。
+ * 踩过两次：一次是 405（路由不在旧版本里），一次是 522。
+ * 「部署成功」与「已生效」是两件事。
+ *
+ * ## 为什么**重试真正的标记调用**、而不是先探活
+ *
+ * 试过两条错路：
+ * ① 拿 `POST .../mark-published` 当**前置**探针 → 探针本身就是改数据的动作。
+ *    新代码先到时，探针会把某条提交真的标成 published —— 而那次调用的目的
+ *    并不是标记它。等价于「用副作用去做判断」，判据就不可信了。
+ * ② 拿 `GET /admin/health` 当探针 → 它**上一次部署就已经有了**，
+ *    于是探针立刻通过，而本次部署还没生效。探针必须**每次部署都不同**，
+ *    而打包进函数的常量做不到。
+ *
+ * 直接重试真正的调用就没有这些问题：失败时**什么也没发生**（旧代码里
+ * 路由不存在），成功时**正是想要的结果**。等待与副作用合成了同一次动作。
+ *
+ * 只对 404/405 重试：其它状态码（400/401/403/409）说明新版本已经在服务了，
+ * 是这条调用本身被拒，再等也没用。
+ */
+async function markWithRetry(id, timeoutMs = 150_000) {
+  const started = Date.now()
+  let shown = false
+  while (true) {
+    try {
+      return await apiSoft(`/api/v1/admin/submissions/${id}/mark-published`, { method: 'POST' })
+    } catch (e) {
+      const msg = String(e?.message ?? e)
+      const stale = /HTTP (404|405|502|522)/.test(msg)
+      if (!stale || Date.now() - started > timeoutMs) throw e
+      if (!shown) {
+        console.log('  等新部署在边缘节点生效（Pages 传播有延迟，通常 30~60s）…')
+        shown = true
+      }
+      process.stdout.write('.')
+      await new Promise((r) => setTimeout(r, 6000))
+    }
+  }
+}
+
+/** 三段式数字版本比较（与客户端 `parseXyz`、服务端 `compareSemver` 同口径） */
+function cmpVersion(a, b) {
+  const pa = String(a).split('.')
+  const pb = String(b).split('.')
+  for (let i = 0; i < 3; i++) {
+    const d = (Number(pa[i]) || 0) - (Number(pb[i]) || 0)
+    if (d !== 0) return d < 0 ? -1 : 1
+  }
+  return 0
+}

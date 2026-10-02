@@ -5,7 +5,14 @@
 // 对账脚本就得跟着框架的实现走 —— 那比 60 行手写路由更容易漂。
 // 依赖越少，Worker bundle 越小，免费额度下也更稳。
 
-export type Method = 'GET' | 'POST'
+/**
+ * 支持的方法。**含 DELETE**（2026-10-02 加，管理员删已终结的提交用）。
+ *
+ * 为什么不用「POST + `?action=delete`」凑：那类假删除会被日志与浏览器缓存
+ * 当成可重放的普通请求，而删除是**不可重放**的语义（删了就没了，
+ * 重复执行会命中 404 而不是再删一次）。方法名本身就是幂等性的声明。
+ */
+export type Method = 'GET' | 'POST' | 'DELETE'
 
 export interface Ctx {
   req: Request
