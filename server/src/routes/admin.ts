@@ -28,6 +28,7 @@ import {
 import { listZipEntries } from '../lib/zipdir.ts'
 import { readZipEntry } from '../lib/zipread.ts'
 import { runGate } from '../lib/gate.ts'
+import { rebuildRegistry } from '../lib/marketSign.ts'
 import { getBlob } from '../lib/pkgStore.ts'
 
 /**
@@ -263,20 +264,134 @@ export async function approveSubmission(ctx: Ctx, params: Record<string, string>
     return fail(422, 'gate_failed', gate.problems[0] ?? '未通过关卡', { problems: gate.problems })
   }
 
+  // 顺手把包内 manifest 存下来：清单里的 name/description/permissions 来自它，
+  // 而包是分块存在 pkg_blobs 里的、读取要解 zip。审核这一步手里已经有那个包，
+  // 此刻存下来，「上架」就只是纯数据库读 —— 不必每次上架都解一遍 zip。
+  // 存不下（manifest 读不出）**不拦审核**：关卡已经过了，manifest 缺失是
+  // 上架时会再报一次的另一件事，不该在这里让审核人白忙。
+  let manifestJson: string | null = null
+  try {
+    const mf = await readZipEntry(bytes, entries, 'manifest.json', MAX_MANIFEST_BYTES)
+    if (mf) {
+      const text = new TextDecoder().decode(mf)
+      JSON.parse(text) // 先确认能解析，别把半截 JSON 存进去
+      manifestJson = text
+    }
+  } catch {
+    /* 交给上架那一步报错 */
+  }
+
   const body = await readJson(ctx.req)
   const note = typeof body.note === 'string' ? body.note.slice(0, 500) : ''
   await ctx.env.DB.prepare(
-    `UPDATE submissions SET status = 'approved', review_note = ?1, updated_at = ?2 WHERE id = ?3`,
+    `UPDATE submissions
+        SET status = 'approved', review_note = ?1, updated_at = ?2,
+            manifest_json = COALESCE(?3, manifest_json)
+      WHERE id = ?4`,
   )
-    .bind(note, Date.now(), id)
+    .bind(note, Date.now(), manifestJson, id)
     .run()
   return json({
     ok: true,
     id,
     status: 'approved',
     // 明确告诉审核人**下一步**：状态改了不等于已上架
-    next: '已通过审核。仍需运行 `npm run publish:approved` 才会进市场清单并部署。',
+    next: '已通过审核。再点「上架」才会进市场清单（不需要再跑任何命令）。',
   })
+}
+
+/**
+ * POST /api/v1/admin/submissions/:id/publish —— 把已审核通过的提交**上架**。
+ *
+ * ## 为什么要单独一个动作（2026-10-02）
+ *
+ * 原来「审核通过」与「上架」之间隔着一道**没有按钮**的步骤：必须有人在那台
+ * 持有市场私钥的机器上跑 `npm run publish:approved`。用户报的是「重新发布
+ * 新版本后市场还是旧版，而且没有上架按钮」—— 不是他不会用，是这条路径
+ * 根本没有按钮可按。
+ *
+ * 私钥上传为 Pages 加密 secret 后，「上架」可以在运行期完成，于是这里
+ * 就是那个按钮背后的动作：状态置 `published` + 重建并重签市场清单。
+ *
+ * ## 为什么不并进 approve
+ *
+ * 审核（人看内容）与上架（对所有用户生效）是两件不同的事，分开才谈得上
+ * 「先看再放」。并成一个动作的话，审核台的「通过」就等于「立刻上线」，
+ * 想再看一眼就没有回头路了。
+ *
+ * ## 失败处理：上架失败**不回滚**审核结果
+ *
+ * 签名失败（私钥没配）或 D1 写失败时，提交**已经**是 approved —— 那是审核的
+ * 结论，与上架无关，不该被上架的失败连累。所以：状态照改，把错误如实返回，
+ * 让管理员能重试。反过来（状态没改但假装成功）才是谎报。
+ */
+export async function publishSubmission(ctx: Ctx, params: Record<string, string>) {
+  const admin = await requireAdmin(ctx)
+  if (admin instanceof Response) return admin
+
+  const id = Number(params.id)
+  if (!Number.isInteger(id)) return fail(400, 'bad_request', 'id 不合法')
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT status, manifest_json AS manifestJson FROM submissions WHERE id = ?1`,
+  )
+    .bind(id)
+    .first<{ status: string; manifestJson: string | null }>()
+  if (!row) return fail(404, 'not_found', '提交不存在')
+  if (row.status !== 'approved') {
+    return fail(409, 'not_approved', `只有 approved 能上架，这条是 ${row.status}`)
+  }
+  // ⚠️ 没有 manifest 就上架不了：清单的 name/description/permissions 全来自它。
+  //   放一个空壳条目进市场比不发布更糟 —— 用户看到一个只有 id 和下载链接的条目。
+  if (!row.manifestJson) {
+    return fail(
+      409,
+      'manifest_missing',
+      '这条提交没有存下包内 manifest，无法上架。请让作者用修正过的包重新提交。',
+    )
+  }
+
+  await ctx.env.DB.prepare(
+    `UPDATE submissions SET status = 'published', updated_at = ?1 WHERE id = ?2 AND status = 'approved'`,
+  )
+    .bind(Date.now(), id)
+    .run()
+
+  // 清单重建失败时如实报错：提交已经是 published（审核结论成立），
+  // 但市场还是旧的 —— 管理员需要知道，且能重试。
+  let reg: { extensions: number }
+  try {
+    reg = await rebuildRegistry(ctx)
+  } catch (e) {
+    return json(
+      {
+        ok: false,
+        id,
+        status: 'published',
+        error: 'registry_rebuild_failed',
+        message: `已标记上架，但市场清单没更新：${String((e as Error)?.message ?? e)}`,
+      },
+      502,
+    )
+  }
+  return json({
+    ok: true,
+    id,
+    status: 'published',
+    next: `已上架，市场清单现有 ${reg.extensions} 个扩展。`,
+  })
+}
+
+/** POST /api/v1/admin/market/rebuild —— 只重建清单，不改任何状态。 */
+export async function rebuildMarket(ctx: Ctx) {
+  const admin = await requireAdmin(ctx)
+  if (admin instanceof Response) return admin
+  try {
+    const reg = await rebuildRegistry(ctx)
+    return json({ ok: true, ...reg })
+  } catch (e) {
+    return fail(502, 'registry_rebuild_failed', String((e as Error)?.message ?? e))
+  }
 }
 
 /** POST /api/v1/admin/submissions/:id/reject —— body `{ note }`（必填） */

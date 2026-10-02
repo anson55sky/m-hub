@@ -145,6 +145,20 @@ switch (cmd) {
       body: JSON.stringify({ note: flag('note') }),
     }).then((r) => console.log(`✓ 提交 #${r.id} 已驳回`))
     break
+  case 'publish-sub':
+    // 上架 = 状态置 published + 运行期重建并重签市场清单。
+    // ⚠️ 不再需要 `npm run publish:approved` 那条构建期路径 —— 私钥已作为
+    //    Pages 加密 secret 在服务端，跑这条就够。
+    await api(`/api/v1/admin/submissions/${pos[0]}/publish`, { method: 'POST' }).then((r) => {
+      if (!r.ok) console.error(`✗ ${r.error}：${r.message}`)
+      else console.log(`✓ 提交 #${r.id} ${r.next}`)
+    })
+    break
+  case 'rebuild-market':
+    await api('/api/v1/admin/market/rebuild', { method: 'POST' }).then((r) =>
+      console.log(`✓ 市场清单已重建：${r.extensions} 个扩展 / ${r.bytes} 字节`),
+    )
+    break
   case 'delete-sub':
     // ⚠️ 二次确认：删除**不可撤销**，且没有回收站。
     //   服务端只允许删已走完流程的（approved / rejected / withdrawn）——
@@ -167,6 +181,8 @@ switch (cmd) {
     console.error(
       `未知命令：${cmd}\n` +
         '可用：list / list-dev / list-subs / approve-dev <id> / reject-dev <id> / approve-sub <id> / reject-sub <id>\n' +
+        '      publish-sub <id>（上架：置 published 并重建市场清单）\n' +
+        '      rebuild-market（只重建清单，不改任何状态）\n' +
         '      delete-sub <id> --yes（永久删除已走完流程的提交，需二次确认）\n' +
         '      可选 --note "理由"（驳回时必填）',
     )

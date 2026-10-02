@@ -185,6 +185,30 @@ CREATE INDEX IF NOT EXISTS idx_asset_sub ON submission_assets(submission_id);
 
 -- 额度按天发放（约定 53：平台额度是「一个开关 + 一个对话入口」，
 -- 客户端只拉模型清单，额度在服务端核销）。此处只记发放与消耗流水。
+-- 市场清单的**已签名字节**（2026-10-02 加：把上架从构建期搬进运行期）。
+--
+-- 为什么要存字节而不是每次请求现签：客户端取的是**两个独立请求**
+-- （`/registry` 与 `/registry.sig`）然后验签。现签的话两次请求可能落在
+-- 不同的 D1 快照 / 不同的边缘节点，中间只要有一次重建，两边字节就对不上
+-- → 客户端报「验签失败」。存成**单行**，两个端点读同一个值，竞态从根上不存在。
+CREATE TABLE IF NOT EXISTS market_registry (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),  -- 恒为一行；CHECK 防误插第二行
+  bytes      TEXT    NOT NULL,                  -- 签名前的清单 JSON（**签名覆盖的就是这份字节**）
+  sig        TEXT    NOT NULL,                  -- base64 的 Ed25519 签名
+  updated_at INTEGER NOT NULL
+);
+
+-- submissions 的市场元数据（原本只有构建期解包时能读到）。
+--
+-- 清单里的 name/description/homepage/permissions 来自**包内 manifest.json**，
+-- 而包在 `pkg_blobs` 里是分块存的，读取要解 zip。运行期上架时我们手里已经有
+-- 那个包（审核通过那一步就要跑关卡），顺手把 manifest 存下来，
+-- 重建清单时就变成一次纯数据库读 —— 不必每次上架都解一遍 zip。
+--
+-- ⚠️ 只在「上架」那一刻写。approved 的提交**没有**这一列内容，
+--   rebuild 会跳过它们（`status='published'` 才进清单）。
+ALTER TABLE submissions ADD COLUMN manifest_json TEXT;
+
 CREATE TABLE IF NOT EXISTS ai_quota (
   user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   day         TEXT    NOT NULL,           -- 'YYYY-MM-DD'（UTC）

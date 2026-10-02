@@ -21,10 +21,11 @@
 // 另有两条结构断言：schemaVersion 必须是 2（抬版本会让老客户端市场全空）、
 // `revoked` 必须是数组（约定 60：下架只往这里加 `id@version`）。
 
-import { readFileSync, existsSync, statSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, rmSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, normalize } from 'node:path'
+import { tmpdir } from 'node:os'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PUBLIC = join(ROOT, 'public')
@@ -49,11 +50,39 @@ const EXPECTED_HOST = (process.env.MHUB_SERVER_URL || 'https://m-hub-server.page
   .replace(/\/+$/, '')
   .replace(/^https?:\/\//, '')
 
-if (!existsSync(REGISTRY)) {
-  console.error('✗ 市场清单不存在。请先在 server/ 下跑 npm run seed:manifests')
+/**
+ * ⚠️ 清单现在有**两个来源**，本脚本要明确检查的是哪一个。
+ *
+ * 2026-10-02 起 `/api/v1/market/registry` 改成**运行期签名**：
+ * 字节存在 D1 的 `market_registry` 单行里，由 `POST /api/v1/admin/market/rebuild`
+ * 生成 —— 上架必须能在审核台点一下就生效，而构建期脚本要求有人在持有私钥的
+ * 机器上跑命令（用户报的就是「没有上架按钮、市场还是旧版」）。
+ *
+ * 于是本地 `public/api/v1/market/registry` **不再存在**，那是正常的。
+ * 本脚本改为：优先读本地文件（构建期脚本刚跑过时它在），没有就读线上。
+ * 两者都没有 → 报「还没上架过任何东西」，那才是真问题。
+ */
+const ONLINE = `https://${EXPECTED_HOST}/api/v1/market/registry`
+
+/** 清单字节：本地优先（构建期脚本刚跑过），没有就读线上 */
+let registryText = existsSync(REGISTRY) ? readFileSync(REGISTRY, 'utf8') : null
+if (registryText === null) {
+  try {
+    const res = await fetch(ONLINE)
+    if (res.ok) registryText = await res.text()
+  } catch {
+    /* 下面统一报错 */
+  }
+}
+if (registryText === null) {
+  console.error(
+    `✗ 市场清单拿不到（本地 public/ 没有，线上 ${ONLINE} 也没有）。\n` +
+      `    说明清单从没被生成过 —— 在审核台把某个扩展点「上架」，或跑：\n` +
+      `      npm run review -- rebuild-market`,
+  )
   process.exit(1)
 }
-const registry = JSON.parse(readFileSync(REGISTRY, 'utf8'))
+const registry = JSON.parse(registryText)
 
 // ---------------------------------------------------------------- 结构
 
@@ -108,16 +137,31 @@ for (const e of registry.extensions ?? []) {
       fail(`${where}：downloadUrl 路径越界（${u.pathname}）`)
       continue
     }
-    if (!existsSync(file)) {
-      fail(
-        `${where}：清单指向 ${rel}，但该文件不在 server/public/ 下。\n` +
-          `    包不会被部署 → 用户点安装报 HTTP 404。跑 npm run seed:manifests 重新生成。`,
-      )
-      continue
+
+    /**
+     * 包字节取自**那个 URL 本身**，不是 `server/public/` 下的文件。
+     *
+     * ⚠️ 2026-10-02 起扩展包改成运行期从 D1 直发（routes/pkg.ts），
+     *   `public/packages/` 已删除。查磁盘会永远报「文件不在 public/ 下」，
+     *   而真正的故障（URL 取不到 / 字节对不上）反而看不见。
+     *
+     *   而且**取线上**比查磁盘更强：它验的是「客户端真正会下载到的那份字节」，
+     *   包含部署漏了、Functions 没生效、路由写错这些**磁盘检查全都看不到**的问题。
+     *   本地文件（构建期脚本刚跑过时）只作为离线兜底 —— CI 里没有网络。
+     */
+    let buf = null
+    if (existsSync(file)) {
+      buf = readFileSync(file)
+    } else {
+      try {
+        const res = await fetch(u.href)
+        if (res.ok) buf = Buffer.from(await res.arrayBuffer())
+        else fail(`${where}：包地址取不到 —— HTTP ${res.status}（${u.host}${u.pathname}）`)
+      } catch (err) {
+        fail(`${where}：包地址取不到 —— ${String(err)}`)
+      }
     }
-    // sha256 / size 一致性：抓到「清单与包版本不匹配」——
-    // 症状是客户端 sha256 校验失败（ERR），比 404 更难查
-    const buf = readFileSync(file)
+    if (!buf) continue
     const sha = createHash('sha256').update(buf).digest('hex')
     if (e.sha256 && sha !== e.sha256) {
       fail(
@@ -126,7 +170,7 @@ for (const e of registry.extensions ?? []) {
           `    客户端会在下载后校验 sha256，不一致即安装失败。`,
       )
     }
-    const size = statSync(file).size
+    const size = buf.byteLength
     if (typeof e.size === 'number' && e.size !== size) {
       fail(`${where}：包大小与清单不符（清单 ${e.size} / 实际 ${size}）`)
     }
@@ -134,10 +178,21 @@ for (const e of registry.extensions ?? []) {
     // sha256 也是对着错文件算的）。而客户端的失败点在解包，症状是
     // 「下载成功 → 解压失败」，与 404 是完全不同的现象、却同样只在实机暴露。
     // 故这里真的解一遍，并要求 manifest.json 在**包根**（客户端的硬要求）。
-    if (file.endsWith('.xhpack')) {
+    if (rel.endsWith('.xhpack')) {
       try {
         const { execFileSync } = await import('node:child_process')
-        const list = execFileSync('unzip', ['-Z1', file], { encoding: 'utf8' })
+        // ⚠️ 必须解**手上那份 buf**，不能解磁盘路径：包已经是运行期从 D1 直发的，
+        //   `public/packages/` 早就删了，原来的 `file` 现在指向一个不存在的路径。
+        //   （症状是 `unzip: cannot find or open …` —— 看着像包坏了，其实是取错了源。）
+        const tmp = join(tmpdir(), `mhub-check-${Date.now()}.xhpack`)
+        writeFileSync(tmp, buf)
+        let raw
+        try {
+          raw = execFileSync('unzip', ['-Z1', tmp], { encoding: 'utf8' })
+        } finally {
+          rmSync(tmp, { force: true })
+        }
+        const list = raw
           .split('\n')
           .map((x) => x.trim())
           .filter(Boolean)
@@ -205,7 +260,7 @@ if (existsSync(UPDATE)) {
           if (entry.sha256 && sha !== entry.sha256) {
             fail(`${want}：安装包 sha256 与清单不符（清单 ${entry.sha256.slice(0, 12)}… / 实际 ${sha.slice(0, 12)}…）`)
           }
-          if (typeof entry.size === 'number' && entry.size !== statSync(file).size) {
+          if (typeof entry.size === 'number' && entry.size !== buf.byteLength) {
             fail(`${want}：安装包大小与清单不符`)
           }
         }

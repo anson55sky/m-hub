@@ -169,6 +169,16 @@
        */
       function acts(x, kind) {
         if (kind === 'dev' && x.status !== 'pending') return ''
+        // approved = 审核过了但**还没上架**。这一档必须有「上架」按钮 ——
+        // 用户报的就是「没有点击可以上架的按钮」：原来上架是构建期脚本，
+        // 在界面上没有任何一个动作能触发它。
+        if (kind === 'sub' && x.status === 'approved') {
+          return `<div class="acts">
+              <button class="primary" data-act="publish-${x.id}">上架（市场立刻可见）</button>
+              <button class="danger" data-act="delete-${x.id}">删除这条记录</button>
+              <span class="next">上架会立刻重建并重签市场清单，不需要再跑任何命令。</span>
+            </div>`
+        }
         if (kind === 'sub' && !['pending_review', 'gate_failed'].includes(x.status)) {
           return DELETABLE.includes(x.status)
             ? `<div class="acts"><button class="danger" data-act="delete-${x.id}">删除这条记录</button>
@@ -216,6 +226,11 @@
             } else if (act.startsWith('approve-sub-')) {
               const r = await call(`/v1/admin/submissions/${act.split('-').pop()}/approve`, { body: {} })
               toast(r.next || '已通过')
+            } else if (act.startsWith('publish-')) {
+              const id = act.slice('publish-'.length)
+              ev.target.textContent = '上架中…'
+              const r = await call(`/v1/admin/submissions/${id}/publish`, { method: 'POST' })
+              toast(r.next || '已上架')
             } else if (act.startsWith('delete-')) {
               const id = act.slice('delete-'.length)
               // 二次确认：删除不可撤销、没有回收站

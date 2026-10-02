@@ -184,6 +184,19 @@ export interface Env {
   /** 邮件服务商（Resend）API Key；未配置时邮箱登录明确回「未配置」而不是假装成功 */
   RESEND_API_KEY?: string
   /**
+   * 市场清单的 Ed25519 **私钥**（PKCS8 PEM），Pages 加密 secret。
+   *
+   * ⚠️ 2026-10-02 起它**离开过本机**：为了让「上架」在运行期完成（不再需要
+   *    在持有私钥的机器上跑构建脚本），私钥上传到了 Cloudflare。
+   *    这是整个信任模型里**唯一一处第三方持有的凭据** ——
+   *    拿到它就能签任意市场清单，即能让所有客户端装上任意扩展。
+   *    换钥匙时必须同时更新 `src-tauri/keys/market_public.key`（客户端内嵌的公钥）。
+   *
+   * 未配置时**不要**降级成「写一份没签名的清单」—— 那会让客户端从
+   * 「能用」变成「全部验签失败」。见 `marketSign.ts::rebuildRegistry`。
+   */
+  MARKET_PRIVATE_KEY?: string
+  /**
    * 管理端**机器凭据**（`npm run review` 用，2026-10-01 加）。
    *
    * 与账号会话 token 是**两条独立**的路：会话 token 存在应用私有目录里，

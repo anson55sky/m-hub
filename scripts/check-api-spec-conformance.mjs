@@ -27,10 +27,10 @@
 //  · `POST /v1/chat/completions` 必须存在（约定 33；它由 `chat.rs` 拼出来，
 //    **不在** api_spec.rs 里，所以前四条的机械对账抓不到它）
 
-import { readFileSync, existsSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { createPublicKey, verify } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SPEC_RS = join(ROOT, 'src-tauri/src/api_spec.rs')
@@ -54,11 +54,57 @@ const PUBLIC = join(ROOT, 'server/public')
  *
  * 少一个的失败现场很远（部署后客户端才报 404/验签失败），故在这里拦。
  */
-const PAGES_FUNCTIONS = [
-  { file: 'functions/api/v1/[[path]].ts', covers: '/api/v1/', why: '14 条 /api/v1/* 动态路由' },
-  { file: 'functions/me.ts', covers: '/me', why: '根路径账号状态' },
-  { file: 'functions/v1/chat/completions.ts', covers: '/v1/chat/completions', why: 'OpenAI 兼容面（约定 33）' },
-]
+/**
+ * Pages Functions 覆盖的前缀 —— **从 `functions/` 目录推导**，不手写列表。
+ *
+ * ⚠️ 原来是一份手写的 `{ file, covers, why }[]`。那是本脚本自己在别处警告过的
+ *   东西（「靠人维护的对照表会悄悄漂移，而它守的恰恰就是漂移」），而这里守的
+ *   正是漂移：漏一个前缀 = 一整段路由在 Pages 上变成**死路由**。
+ *
+ *   它真的漏过：`/packages/:extId/:version/:file`（2026-10-02 加的包体直发）
+ *   在 `handle.ts` 里注册了、Workers 上跑得好好的，而 Pages 上因为没有
+ *   `functions/packages/` 目录，请求根本不进 Function —— 由静态资产应答了
+ *   `public/packages/` 下**重新打包**的那份字节（7853 字节，sha 不符）。
+ *   症状是「HTTP 200、能下载、只有客户端校验 sha256 时才失败」，而服务端无报错。
+ *
+ * 推导规则：文件相对 `functions/` 的路径去掉 `.ts` 与 `[[path]]` 段，
+ * 即为它覆盖的前缀（`api/v1/[[path]].ts` → `/api/v1/`、`me.ts` → `/me`）。
+ */
+function pagesFunctionPrefixes() {
+  const base = join(ROOT, 'server', 'functions')
+  if (!existsSync(base)) return []
+  /** @type {{ file: string; covers: string }[]} */
+  const out = []
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      if (statSync(full).isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (!name.endsWith('.ts')) continue
+      // ⚠️ 相对 **functions/ 自己**取，不是相对 server/ —— 否则前缀会变成
+      //   /functions/api/v1，与注册路径 /api/v1/... 永远匹配不上（第一版就这么写的，
+      //   结果整份守卫把 20 条路由全报成死路由）。
+      const rel = relative(base, full)
+      const covers =
+        '/' +
+        rel
+          .replace(/\.ts$/, '')
+          .split('/')
+          .filter((seg) => seg !== '[[path]]')
+          .join('/')
+      // file 相对 **server/**（下游会 join(ROOT, 'server', file)），
+      // 而 covers 相对 **functions/**（那才是路由前缀）。两个基准不同，
+      // 第一版把两个都用同一个基准，害得整份守卫把 20 条路由报成死路由。
+      out.push({ file: join('functions', rel), covers })
+    }
+  }
+  walk(base)
+  return out
+}
+
+const PAGES_FUNCTIONS = pagesFunctionPrefixes()
 
 const problems = []
 const fail = (m) => problems.push(m)
@@ -283,11 +329,92 @@ const NO_CLIENT_PREFIXES = [
   },
 ]
 
+/**
+ * `.sig` 是**客户端按 `{url}.sig` 拼出来**的，不是独立调用的路径。
+ *
+ * ⚠️ 这不是「随便加个端点」的例外，而是一条真实存在的约定：
+ *   `market.rs::fetch_market_once` 取 `{endpoint}` 与 `format!("{endpoint}.sig")`。
+ *   把它列进 `paths.ts` 反而是错的 —— 客户端代码里**没有**这个字面量，
+ *   一旦有人照着表去生成调用就会发现对不上。
+ *
+ * 双向断言在下面：`.sig` 必须在客户端源码里真的以「`{endpoint}.sig`」的形态出现。
+ */
+const DERIVED_SIG_SUFFIX = '.sig'
+
+/**
+ * `/packages/*` 的 URL 形状是**服务端自己的事**，不是客户端契约。
+ *
+ * ⚠️ 客户端从来不拼这个路径：它只取清单里的 `entry.downloadUrl`，
+ *   而那个值由服务端写进已签名的清单。所以把它列进 `paths.ts` 反而要求
+ *   `api_spec.rs` 有一条「客户端代码里根本没有这个字面量」的假契约。
+ *
+ * 双向断言在下面：客户端源码里必须**找不到** `/packages/` 字面量 ——
+ * 哪天有人在 Rust 侧硬编码了这个路径，这条会红，
+ * 因为那意味着下载地址不再由清单决定（而清单是验过签的）。
+ */
+const SERVER_SHAPED_PREFIXES = [
+  {
+    prefix: '/packages/',
+    why: '扩展包分发：地址来自已签名清单里的 downloadUrl，客户端只取该值、不拼路径。',
+  },
+]
+
 for (const r of registered) {
   if (serverPaths.has(r.path)) continue
+  if (r.path.endsWith(DERIVED_SIG_SUFFIX)) continue
+  if (SERVER_SHAPED_PREFIXES.some((e) => r.path.startsWith(e.prefix))) continue
   const exempt = NO_CLIENT_PREFIXES.find((e) => r.path.startsWith(e.prefix))
   if (exempt) continue
   fail(`src/handle.ts 注册了 ${r.path}，但它不在 paths.ts 的任何表里（表与代码漂移）`)
+}
+
+/** 反向：每个 `.sig` 端点都必须有一个对应的非 `.sig` 端点，否则客户端取不到签名 */
+for (const r of registered) {
+  if (!r.path.endsWith(DERIVED_SIG_SUFFIX)) continue
+  const base = r.path.slice(0, -DERIVED_SIG_SUFFIX.length)
+  if (!registered.some((x) => x.path === base)) {
+    fail(`${r.path} 有签名端点却没有对应的清单端点 ${base} —— 客户端会取到签名却取不到内容`)
+  }
+}
+
+for (const { prefix, why } of SERVER_SHAPED_PREFIXES) {
+  if (specSrc.includes(prefix)) {
+    fail(`api_spec.rs 里出现了 ${prefix} —— ${why}\n    一旦客户端硬编码这个路径，下载地址就不再由已签名的清单决定。`)
+  }
+}
+
+/**
+ * **死路由检查**：每条注册在 `handle.ts` 里的路径，都必须落在某个
+ * `functions/` 目录覆盖的前缀下。
+ *
+ * ⚠️ Pages 的 Functions 是**按目录结构**声明的，没有全局 catch-all。
+ *   没有对应目录 → 请求不进 Function → 由静态资产应答 → `handle.ts` 里
+ *   那条 `r.add` 在 Pages 上是**死代码**，Workers 上却正常工作。
+ *
+ * 实测踩过（2026-10-02）：`/packages/:extId/:version/:file` 加进去时忘了建
+ * `functions/packages/`，于是 Pages 仍在发 `public/packages/` 下**重新打包**的
+ * 字节（7853 vs 清单声明的 7775）。症状是 HTTP 200、能下载、
+ * 只有客户端校验 sha256 时失败 —— 服务端日志一片正常。
+ */
+for (const r of registered) {
+  // 需要的 functions 目录 = 路径里**第一个参数段之前**的那段字面量。
+  // ⚠️ 不要「过滤掉所有参数段再拼」—— 那样 `/a/:id/b` 会变成 `/a/b`，
+  //   然后错误地要求建 `functions/a/b/`（实测第一版就写成了这样，
+  //   结果把 `/api/v1/admin/submissions/:id/package` 报成缺 `functions/api/v1/admin/submissions/package/`）。
+  const segs = r.path.split('/')
+  const firstParam = segs.findIndex((seg) => seg.startsWith(':'))
+  // ⚠️ `r.path` 本身以 `/` 开头，所以 split 的第 0 段是空串。必须原样保留，
+  //   否则拼出来是 `api/v1/...`（无前导斜杠）而 `/api/v1/` 匹配不上 ——
+  //   报错信息里那条 `//api/v1/...` 的双斜杠正是这个来源。
+  const literal = segs.slice(0, firstParam === -1 ? undefined : firstParam).join('/')
+  const covered = PAGES_FUNCTIONS.some((f) => literal.startsWith(f.covers))
+  if (!covered) {
+    fail(
+      `src/handle.ts 注册了 ${r.path}，但 functions/ 下没有任何目录覆盖 ${literal} —— ` +
+        `它在 Pages 上是**死路由**（请求不进 Function，由静态资产应答，而 Workers 上却正常）。\n` +
+        `    修法：建 server/functions/${literal.replace(/^\//, '')}/[[path]].ts 并转给 handleRequest。`,
+    )
+  }
 }
 
 /**
@@ -355,7 +482,26 @@ function verifyDetached(pubB64, content, sigB64) {
 
 const pubB64 = readFileSync(PUBKEY, 'utf8')
 
+/**
+ * `/api/v1/market/registry` 不再是静态文件（2026-10-02 起运行期签名）。
+ *
+ * 原来它由 `scripts/seed-manifests.mjs` 写进 `public/` 再由 CDN 直发。
+ * 改成运行期签名后由 `routes/market.ts` 从 D1 取已签名字节 —— 因为上架
+ * 必须能在审核台点一下就生效，而构建期脚本要求有人在持有私钥的机器上跑命令
+ * （用户报的就是「没有上架按钮、市场还是旧版」）。
+ *
+ * ⚠️ 这里**显式列出**而不是「从 STATIC 表里减掉」：`tables.STATIC` 是从
+ *   `paths.ts` 读的，改那里会连带影响客户端契约的判定。而「哪些清单是静态的」
+ *   是一个**语义决定**，写在这里并配注释，比让它悄悄从表里消失更安全。
+ *
+ * 少了这条豁免的话，下一个人会把静态文件路径加回 `paths.ts`，
+ * 于是又出现「构建期一份、运行期一份」的清单 —— 两份签名不同，
+ * 而客户端缓存哪份就决定了市场显示哪个版本，且没有任何报错。
+ */
+const RUNTIME_SIGNED = new Set(['/api/v1/market/registry'])
+
 for (const [, p] of tables.STATIC) {
+  if (RUNTIME_SIGNED.has(p)) continue
   const base = join(PUBLIC, p.replace(/^\//, ''))
   const sigFile = base + '.sig'
   if (!existsSync(base)) {

@@ -21,6 +21,8 @@ import { Router, fail, type Ctx, type Env } from './lib/http.ts'
 import { OPENAI_COMPAT } from './lib/paths.ts'
 import { devicePoll, deviceStart } from './routes/github.ts'
 import { deviceRevoke, deviceTokens, me, redeem } from './routes/me.ts'
+import { marketRegistry, marketRegistrySig } from './routes/market.ts'
+import { extensionPackage } from './routes/pkg.ts'
 import { chatCompletions, models } from './routes/ai.ts'
 import { send, verify } from './routes/email.ts'
 import { apply, applyStatus, mySubmissions, submissionDetail, submit, withdraw } from './routes/submissions.ts'
@@ -40,6 +42,8 @@ import {
   deleteSubmission,
   markSubmissionPublished,
   adminHealth,
+  publishSubmission,
+  rebuildMarket,
 } from './routes/admin.ts'
 
 export type { Env }
@@ -70,6 +74,13 @@ r.add('POST', OPENAI_COMPAT.post_chat_completions, (c) => chatCompletions(c))
 r.add('GET', '/api/v1/admin/dev-applications', (c) => listDevApplications(c))
 r.add('POST', '/api/v1/admin/dev-applications/:id/approve', (c) => approveDevApplication(c, c.params))
 r.add('POST', '/api/v1/admin/dev-applications/:id/reject', (c) => rejectDevApplication(c, c.params))
+// 市场清单：运行期签名，字节存 D1（见 routes/market.ts 的文件头）
+r.add('GET', '/packages/:extId/:version/:file', (c) => extensionPackage(c, c.params))
+r.add('GET', '/api/v1/market/registry', (c) => marketRegistry(c))
+r.add('GET', '/api/v1/market/registry.sig', (c) => marketRegistrySig(c))
+
+r.add('POST', '/api/v1/admin/submissions/:id/publish', (c) => publishSubmission(c, c.params))
+r.add('POST', '/api/v1/admin/market/rebuild', (c) => rebuildMarket(c))
 r.add('GET', '/api/v1/admin/health', (c) => adminHealth(c))
 r.add('GET', '/api/v1/admin/submissions', (c) => listSubmissions(c))
 r.add('POST', '/api/v1/admin/submissions/:id/approve', (c) => approveSubmission(c, c.params))
@@ -90,14 +101,27 @@ r.add('GET', '/api/v1/admin/submissions/:id/package', (c) => submissionPackage(c
  *    但前缀匹配必须**精确到目录**（`/api/v1/market/registry`）而不是
  *    `/api/v1/`：后者会把 15 条动态 API 一起吞掉。
  */
-const STATIC_EXACT = new Set(['/api/v1/market/registry', '/api/v1/app/update'])
+/**
+ * ⚠️ `/api/v1/market/registry` **已从本集合移出**（2026-10-02）：
+ *   清单改成运行期签名（`lib/marketSign.ts`），由 Function 从 D1 取已签名的字节。
+ *   它必须经 Function —— 静态资产那份是**构建期**写的，会与运行期重建的
+ *   字节不同步：上架了新版而客户端还在验构建期那份的签名，两边都「正常」
+ *   而市场永远停在旧版。
+ *
+ *   `/api/v1/app/update` 仍在集合里：更新清单要**跟着 DMG 走**，
+ *   而 DMG 只在构建机上存在，运行期无从取得。
+ */
+const STATIC_EXACT = new Set(['/api/v1/app/update'])
 
 /** 该路径是否应由静态资产直接应答（含 `.sig` 与 `/packages/`、`/downloads/`） */
 export function is_static_asset(pathname: string): boolean {
   if (STATIC_EXACT.has(pathname)) return true
   if (STATIC_EXACT.has(pathname.replace(/\.sig$/, ''))) return true
-  // 二进制资源：扩展包与安装包。Functions 不该碰它们（流式、体积、无 JSON）。
-  return pathname.startsWith('/packages/') || pathname.startsWith('/downloads/')
+  // ⚠️ `/packages/` **不再放行**（2026-10-02）：扩展包改成从 D1 的 blob 直发
+  //   （routes/pkg.ts 的文件头说明了为什么不再重新打包）。
+  //   `/downloads/`（应用安装包 DMG）仍然静态分发 —— 它只存在于构建机上，
+  //   运行期拿不到。
+  return pathname.startsWith('/downloads/')
 }
 
 export async function handleRequest(req: Request, env: Env): Promise<Response> {
