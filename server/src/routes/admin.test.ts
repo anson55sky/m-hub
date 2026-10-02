@@ -154,6 +154,13 @@ test('审核扩展时重跑关卡，不信任提交时的结果', () => {
   assert.match(body, /package_missing/, '包体缺失要单独报错（不能当过关）')
 })
 
+test('取包体只对 approved 开放（否则这是个「读未审核用户代码」的洞）', () => {
+  const body = fnBody('submissionPackage')
+  assert.match(body, /status !== 'approved'/, '非 approved 必须拦')
+  assert.match(body, /not_approved/, '要有专门错误码，让发布脚本能分辨「没批准」与「没这条」')
+  assert.match(body, /no-store/, '包体按 sha256 变化，缓存错了就是「下到旧版本」')
+})
+
 test('管理端路由都注册了，且没混进 paths.ts::DYNAMIC', () => {
   // 注册漏了 → 端点 404；混进 DYNAMIC → 契约守卫会要求 api_spec.rs 也有，
   // 而客户端永远不会调它。
@@ -164,6 +171,9 @@ test('管理端路由都注册了，且没混进 paths.ts::DYNAMIC', () => {
     '/api/v1/admin/submissions',
     '/api/v1/admin/submissions/:id/approve',
     '/api/v1/admin/submissions/:id/reject',
+    // ⚠️ 这条最容易漏：漏了的话「审核通过 → 发布」会在最后一步 404，
+    //    而前面所有环节都显示成功。
+    '/api/v1/admin/submissions/:id/package',
   ]) {
     assert.ok(HANDLE_SRC.includes(`'${p}'`), `handle.ts 没注册 ${p}`)
   }

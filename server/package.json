@@ -24,7 +24,8 @@
     "check:manifests": "node scripts/check-manifest-urls.mjs",
     "check:wrangler": "node scripts/check-wrangler-config.mjs",
     "deploy:pages": "wrangler pages deploy public --project-name m-hub-server --branch main",
-    "review": "node scripts/review.mjs"
+    "review": "node scripts/review.mjs",
+    "publish:approved": "node scripts/publish-approved.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250109.0",

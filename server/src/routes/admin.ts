@@ -30,8 +30,45 @@ import { readZipEntry } from '../lib/zipread.ts'
 import { runGate } from '../lib/gate.ts'
 import { getBlob } from '../lib/pkgStore.ts'
 
-/** 审核时给关卡的 manifest 解压上限（与提交时同一量级） */
-const MAX_MANIFEST_BYTES = 256 * 1024
+/**
+ * GET /api/v1/admin/submissions/:id/package —— 取包体原始字节。
+ *
+ * 存在的理由：`scripts/publish-approved.mjs` 需要拿到包才能上架，
+ * 而它**刻意不直连 D1**（直连会绕过门禁与关卡）。
+ *
+ * ⚠️ 只对**已 approved** 的返回正文，其余一律 409。
+ *   否则这个端点就是个「任意读用户上传内容」的洞 —— 而包是未审核的
+ *   用户代码，即使只在本机 CLI 用，也不该从 pending_review 就能取。
+ */
+export async function submissionPackage(ctx: Ctx, params: Record<string, string>) {
+  const admin = await requireAdmin(ctx)
+  if (admin instanceof Response) return admin
+
+  const id = Number(params.id)
+  if (!Number.isInteger(id)) return fail(400, 'bad_request', 'id 不合法')
+  const row = await ctx.env.DB.prepare(
+    `SELECT pkg_sha256 AS pkgSha256, pkg_size AS pkgSize, status
+       FROM submissions WHERE id = ?1`,
+  )
+    .bind(id)
+    .first<{ pkgSha256: string | null; pkgSize: number | null; status: string }>()
+  if (!row) return fail(404, 'not_found', '提交不存在')
+  if (row.status !== 'approved') {
+    return fail(409, 'not_approved', `该提交是 ${row.status}，只有 approved 能取包体`)
+  }
+  if (!row.pkgSha256 || !row.pkgSize) return fail(409, 'package_missing', '该提交没有包体')
+
+  const bytes = await getBlob(ctx.env.DB, row.pkgSha256, row.pkgSize)
+  if (!bytes) return fail(409, 'package_missing', '包体在库里找不到')
+
+  return new Response(bytes as unknown as BodyInit, {
+    headers: {
+      'content-type': 'application/octet-stream',
+      // ⚠️ 明确不缓存：包体按 sha256 变化，缓存错了就是「下到旧版本」。
+      'cache-control': 'no-store',
+    },
+  })
+}
 
 /**
  * 机器凭据是否正确。
@@ -39,6 +76,9 @@ const MAX_MANIFEST_BYTES = 256 * 1024
  * ⚠️ **没配置时一律拒绝** —— 不能「没配就放行」，那种写法在
  *    「先上线、密钥后补」的过程中会让管理端裸奔。
  */
+/** 审核时给关卡的 manifest 解压上限（与提交时同一量级） */
+const MAX_MANIFEST_BYTES = 256 * 1024
+
 function machineOk(env: Env, token: string | undefined): boolean {
   const expect = env.ADMIN_TOKEN
   if (!expect || !token) return false

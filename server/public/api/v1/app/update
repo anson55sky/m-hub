@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "version": "0.7.3",
-  "minimumUpgradable": "0.7.2",
-  "notes": "清单拉取加入退避重试；「安装扩展」按钮恢复响应；市场与安装包改由 Cloudflare Pages 托管，服务端迁到 Pages Functions；AI 供应商新增 6 家国内 OpenAI 兼容预设与豆包接入点引导；修复开发者申请状态自相矛盾（已兑换却提示先兑换）。",
+  "minimumUpgradable": "",
+  "notes": "",
   "platforms": {
     "macos-aarch64": {
       "url": "https://m-hub-server.pages.dev/downloads/0.7.3/m-hub_0.7.3_aarch64.dmg",

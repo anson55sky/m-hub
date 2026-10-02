@@ -32,6 +32,7 @@ import { apply, applyStatus, mySubmissions, submissionDetail, submit, withdraw }
 import {
   approveDevApplication,
   approveSubmission,
+  submissionPackage,
   listDevApplications,
   listSubmissions,
   rejectDevApplication,
@@ -69,6 +70,7 @@ r.add('POST', '/api/v1/admin/dev-applications/:id/reject', (c) => rejectDevAppli
 r.add('GET', '/api/v1/admin/submissions', (c) => listSubmissions(c))
 r.add('POST', '/api/v1/admin/submissions/:id/approve', (c) => approveSubmission(c, c.params))
 r.add('POST', '/api/v1/admin/submissions/:id/reject', (c) => rejectSubmission(c, c.params))
+r.add('GET', '/api/v1/admin/submissions/:id/package', (c) => submissionPackage(c, c.params))
 
 /**
  * 必须由静态资产应答、**不得**经本函数转发的路径。
