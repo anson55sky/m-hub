@@ -105,6 +105,18 @@ pub fn bump_manifest_in_dir(dir: &Path, new_version: &str) -> Result<String, Str
     Ok(current)
 }
 
+/// 原子写文件：先写 `.` 开头的临时文件再 rename 覆盖（约定 72）。
+///
+/// ⚠️ 为什么必须「写临时 + rename」而不是直接写：
+///    写到一半崩溃/磁盘满会留下**半截文件**，而 manifest.json 半截是解析不了的
+///    —— 扩展直接变成「读 manifest 失败」且**没有任何工具能修**。
+///    rename(2) 本身即原子替换，不需要先删目标。
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.rollback-tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// 上传打包产物：multipart（package 文件 + 展示字段），返回服务端结论
 async fn upload(
     base: &str,
@@ -200,32 +212,84 @@ pub async fn dev_submit(
     let token = crate::account::session_token().ok_or("UNAUTHORIZED: 请先在「设置 → 账号」登录")?;
     let base = crate::account::base_url();
 
-    // 先落盘再打包：打包读的就是 manifest.json，顺序反了包里还是旧版本
-    if let Some(v) = new_version.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let dir = crate::ext_protocol::resolve_ext_dir(&app, &id)?;
-        let old = bump_manifest_in_dir(&dir, v)?;
-        log::info!("发布版本回写: {id} {old} -> {v}");
+    // ⚠️ 版本回写在上传**之前**落盘（打包要读它），但**失败必须回滚**。
+    //
+    // 实测踩过（2026-10-01）：第一次提交把关卡/配额挡下了，而 manifest.json
+    // 已经写成 0.1.4 并留在盘上。用户改完再提交时填 0.1.4 → 服务端回
+    // 「新版本 0.1.4 必须大于当前 manifest 版本 0.1.4」——
+    // **被自己的残留挡死**，而界面完全看不出 0.1.4 是上一步写进去的。
+    //
+    // 形状照约定 72：落新 → 尝试 → 失败则恢复原件 → 最后才 commit。
+    // 注意回滚要**在错误上追加说明**，否则用户仍以为「版本号非法」。
+    let bumped: Option<(std::path::PathBuf, String)> = match new_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(v) => {
+            let dir = crate::ext_protocol::resolve_ext_dir(&app, &id)?;
+            let mpath = dir.join("manifest.json");
+            // 先记下原值，供回滚
+            let before = std::fs::read_to_string(&mpath).unwrap_or_default();
+            let old = bump_manifest_in_dir(&dir, v)?;
+            log::info!("发布版本回写: {id} {old} -> {v}");
+            Some((mpath, before))
+        }
+        None => None,
+    };
+
+    // 打包 + 上传。**任何一步失败都要先回滚版本**再把错误抛出去。
+    //
+    // pack_id / version 要在闭包**外**可见：后面的日志与 SubmitResult 还要用。
+    // 闭包返回它们与上传结果。
+    let mut sent: Option<(String, String)> = None;
+    let attempt = async {
+        let (pkg, pack_id, version) = pack_to_temp(&app, &id)?;
+        log::info!("发布打包完成: {pack_id} v{version} -> {}", pkg.display());
+        let shots = screenshots.clone().unwrap_or_default();
+        let r: Result<Value, String> = upload(
+            &base,
+            &token,
+            &pkg,
+            &pack_id,
+            &version,
+            changelog.clone().unwrap_or_default().trim(),
+            min_app_version.clone().unwrap_or_default().trim(),
+            homepage.clone().unwrap_or_default().trim(),
+            &shots,
+        )
+        .await;
+        // 无论成败都清掉临时包（源码目录从不被写入）
+        let _ = std::fs::remove_file(&pkg);
+        // ⚠️ 这里**不能**写成 `Ok((r, ...))` —— 那样 attempt 会变成
+        //    `Result<Result<Value,String>, String>`，外层 Ok 里还套一个 Result，
+        //    下面 `v.get("gate")` 就编译不过（第一版就是这么写的）。
+        //    拍平：直接把 upload 的结果当作闭包的返回值。
+        r.map(|val| (val, (pack_id, version)))
     }
-
-    let (pkg, pack_id, version) = pack_to_temp(&app, &id)?;
-    log::info!("发布打包完成: {pack_id} v{version} -> {}", pkg.display());
-
-    let shots = screenshots.unwrap_or_default();
-    let result = upload(
-        &base,
-        &token,
-        &pkg,
-        &pack_id,
-        &version,
-        changelog.unwrap_or_default().trim(),
-        min_app_version.unwrap_or_default().trim(),
-        homepage.unwrap_or_default().trim(),
-        &shots,
-    )
     .await;
-    // 无论成败都清掉临时包（源码目录从不被写入）
-    let _ = std::fs::remove_file(&pkg);
-    let v = result?;
+
+    let (result, (pack_id, version)) = match attempt {
+        Ok(pair) => pair,
+        Err(e) => {
+            if let Some((mpath, before)) = &bumped {
+                if let Err(rb) = write_atomic(mpath, before.as_bytes()) {
+                    log::warn!("发布失败且版本回滚失败: {}（原始错误：{e}）", rb);
+                    return Err(format!(
+                        "{e}\n\n⚠️ 版本号回滚也失败了，请手动检查 {}\n   （manifest.json 可能停留在一个已提交的版本上）",
+                        mpath.display()
+                    ));
+                }
+                log::info!("发布失败，已回滚 manifest.json 版本");
+                return Err(format!(
+                    "{e}\n\n（本次填写的版本号已回滚 —— 它只在你提交成功时才会真正生效。）"
+                ));
+            }
+            return Err(e);
+        }
+    };
+    let v = result;
+    log::info!("发布上传完成: {pack_id} v{version}");
 
     let gate = v.get("gate").cloned().unwrap_or(Value::Null);
     let items: Vec<GateItem> = gate
@@ -321,6 +385,63 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc::{channel, Receiver};
+
+    /// 发布失败时 manifest.json 的版本必须**回滚**（2026-10-01 实机事故）。
+    ///
+    /// 事故形状：版本先落盘（打包要读它），上传被关卡/配额挡下后**没回滚**。
+    /// 用户改完再提交时填同一个版本号 → 服务端回「必须大于当前版本 0.1.4」——
+    /// **被自己的残留挡死**，而界面完全看不出 0.1.4 是上一步写进去的。
+    ///
+    /// 判据：模拟「服务端拒绝」之后，磁盘上的 manifest.json 必须回到原样。
+    /// 约定 72 的形状 —— 落新 → 尝试 → 失败恢复原件 → 才 commit。
+    #[test]
+    fn publish_failure_rolls_back_manifest_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let mpath = dir.path().join("manifest.json");
+        // ⚠️ 必须带齐 manifest 必填字段（id/name/version/runtime/kind/surfaces）：
+        //    bump_manifest_in_dir 是**真的解析** manifest 的，字段不全会直接拒。
+        //    我第一版只写了 id+version，测试红在「manifest 解析失败」——
+        //    症状与「回滚逻辑坏了」一样，先确认实现才知道是数据不合规。
+        let original = r#"{"id":"com.example","name":"示例","version":"0.1.3",
+                          "runtime":"web","kind":"module","surfaces":[]}"#;
+        std::fs::write(&mpath, original).unwrap();
+
+        // 先模拟「回写版本」（与 dev_submit 里同一函数）
+        let old = bump_manifest_in_dir(dir.path(), "0.1.4").unwrap();
+        assert_eq!(old, "0.1.3");
+        let after_bump = std::fs::read_to_string(&mpath).unwrap();
+        assert!(
+            after_bump.contains("0.1.4"),
+            "回写没生效，后续断言就没意义"
+        );
+
+        // 上传失败 → 回滚
+        let rollback = write_atomic(&mpath, original.as_bytes());
+        assert!(rollback.is_ok(), "回滚不应失败：{rollback:?}");
+        assert_eq!(
+            std::fs::read_to_string(&mpath).unwrap(),
+            original,
+            "发布失败后 manifest.json 必须回到原样 —— 否则用户被自己的残留挡死"
+        );
+    }
+
+    /// write_atomic 失败时**不能**留下半截文件（约定 72）
+    #[test]
+    fn write_atomic_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("manifest.json");
+        std::fs::write(&p, "OLD").unwrap();
+        write_atomic(&p, b"NEW-NEW-NEW").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "NEW-NEW-NEW");
+        // 临时文件不该残留（它会被 pack_dir_to_archive 排除，但留着仍是垃圾）
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("rollback-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "临时文件残留：{leftovers:?}");
+    }
     use std::time::Duration;
 
     fn header_end(buf: &[u8]) -> Option<usize> {

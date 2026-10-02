@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>m-hub 审核台</title>
+    <!--
+      本地审核界面。
+
+      ## 为什么是「本地网页」而不是应用内的一个页面
+      · 管理端只有平台所有者一个使用者。为一个人做界面意味着在 Tauri 里
+        再加一套路由 + 鉴权态 + 前端状态，而它与主应用**完全无关**。
+      · 本地网页零构建：`node scripts/review-ui.mjs` 起一个静态服务，
+        浏览器打开即用。改了刷新就生效，不用等 `tauri build`（10 分钟）。
+      · 它连的是**线上管理端**（和 CLI 完全同一套接口与门禁），
+        所以界面上看到的每一个状态都是真的，不是本地模拟。
+
+      ## 凭据从哪来
+      页面**不持有** token：`review-ui.mjs` 在本地起服务时读
+      `~/.m-hub-signing/admin_token` 并代发请求。理由与 CLI 相同 ——
+      token 不该出现在浏览器历史 / localStorage / 截图里。
+
+      ⚠️ 故本服务只监听 127.0.0.1（不对外），且只代理 `/api/*` 白名单路径
+         （不是开放代理）。
+    -->
+    <style>
+      :root {
+        --bg: #14161a; --card: #1c1f26; --line: #2a2f3a;
+        --fg: #e6e8ec; --fg2: #9aa3b2; --fg3: #6b7480;
+        --ok: #3fb950; --warn: #d29922; --bad: #f85149; --brand: #5b5bf5;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: var(--bg); color: var(--fg);
+        font: 14px/1.6 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+        padding: 32px 24px 64px;
+      }
+      .wrap { max-width: 900px; margin: 0 auto; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      .sub { color: var(--fg3); font-size: 13px; margin-bottom: 24px; }
+      .tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+      .tab {
+        background: transparent; color: var(--fg2); border: 1px solid transparent;
+        padding: 7px 14px; border-radius: 8px; cursor: pointer; font-size: 14px;
+      }
+      .tab[aria-selected='true'] { background: var(--card); color: var(--fg); border-color: var(--line); }
+      .card {
+        background: var(--card); border: 1px solid var(--line);
+        border-radius: 12px; padding: 16px; margin-bottom: 12px;
+      }
+      .row { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+      .title { font-weight: 600; }
+      .meta { color: var(--fg3); font-size: 12.5px; margin-top: 3px; }
+      .reason {
+        color: var(--fg2); font-size: 13px; margin-top: 10px; white-space: pre-wrap;
+        background: #23262e; border-radius: 6px; padding: 8px 10px; max-height: 120px; overflow: auto;
+      }
+      .tag {
+        display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 20px;
+        border: 1px solid var(--line); color: var(--fg2);
+      }
+      .tag.pending_review { color: var(--warn); border-color: #4a3c1a; }
+      .tag.approved, .tag.published { color: var(--ok); border-color: #1d4429; }
+      .tag.rejected, .tag.gate_failed { color: var(--bad); border-color: #5a2226; }
+      .acts { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+      button {
+        font: inherit; padding: 6px 14px; border-radius: 7px; cursor: pointer;
+        border: 1px solid var(--line); background: #23262e; color: var(--fg);
+      }
+      button.primary { background: var(--ok); border-color: var(--ok); color: #06240c; font-weight: 600; }
+      button.danger { background: transparent; color: var(--bad); border-color: #5a2226; }
+      input[type='text'] {
+        flex: 1; font: inherit; padding: 6px 10px; border-radius: 7px;
+        border: 1px solid var(--line); background: #12141a; color: var(--fg);
+      }
+      input::placeholder { color: var(--fg3); }
+      .empty { color: var(--fg3); text-align: center; padding: 40px 0; }
+      .toast {
+        position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+        background: #23262e; border: 1px solid var(--line); border-radius: 10px;
+        padding: 10px 18px; opacity: 0; transition: opacity .2s; pointer-events: none;
+      }
+      .toast.show { opacity: 1; }
+      .toast.bad { border-color: #5a2226; color: #ffb4ae; }
+      .next { color: var(--fg3); font-size: 12.5px; margin-top: 8px; }
+      code { background: #23262e; padding: 1px 6px; border-radius: 4px; font-size: 12.5px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>m-hub 审核台</h1>
+      <div class="sub">连的是线上管理端 · 状态与 CLI 完全一致</div>
+      <div class="tabs">
+        <button class="tab" data-tab="dev" aria-selected="true">开发者申请</button>
+        <button class="tab" data-tab="sub" aria-selected="false">扩展提交</button>
+        <button class="tab" id="reload">刷新</button>
+      </div>
+      <div id="list"><div class="empty">加载中…</div></div>
+    </div>
+    <div class="toast" id="toast"></div>
+    <script type="module">
+      let tab = 'dev'
+      const $ = (s) => document.querySelector(s)
+      const listEl = $('#list')
+
+      async function call(path, init = {}) {
+        const res = await fetch('/api' + path, {
+          method: init.body ? 'POST' : 'GET',
+          headers: init.body ? { 'content-type': 'application/json' } : {},
+          body: init.body ? JSON.stringify(init.body) : undefined,
+        })
+        const j = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(j.message || `HTTP ${res.status}`)
+        return j
+      }
+
+      function toast(msg, bad = false) {
+        const t = $('#toast')
+        t.textContent = msg
+        t.className = 'toast show' + (bad ? ' bad' : '')
+        setTimeout(() => (t.className = 'toast'), 3200)
+      }
+
+      /** 状态标签：颜色与「能不能通过」一致，别把 gate_failed 显示成中性的 */
+      const tagOf = (s) => `<span class="tag ${s}">${s}</span>`
+
+      function devCard(a) {
+        return `
+          <div class="card">
+            <div class="row">
+              <div>
+                <div class="title">${esc(a.username)} <span class="meta">#${a.id}</span></div>
+                <div class="meta">账号状态 ${tagOf(a.developerStatus)} · 申请 ${tagOf(a.status)}</div>
+              </div>
+            </div>
+            ${a.reason ? `<div class="reason">${esc(a.reason)}</div>` : ''}
+            ${a.reviewNote ? `<div class="meta" style="margin-top:8px">审核备注：${esc(a.reviewNote)}</div>` : ''}
+            ${acts(a, 'dev')}
+          </div>`
+      }
+
+      function subCard(s) {
+        const pkg = s.hasPackage
+          ? `${fmtSize(s.pkgSize)}`
+          : '<span style="color:var(--bad)">包体缺失，发不出去</span>'
+        return `
+          <div class="card">
+            <div class="row">
+              <div>
+                <div class="title">${esc(s.extId)} <span class="meta">v${esc(s.version)} · #${s.id}</span></div>
+                <div class="meta">${esc(s.username)} · ${pkg} · ${tagOf(s.status)}</div>
+              </div>
+            </div>
+            ${s.reviewNote ? `<div class="reason">${esc(s.reviewNote)}</div>` : ''}
+            ${acts(s, 'sub')}
+          </div>`
+      }
+
+      /** 审核按钮。驳回必填理由 —— 服务端也会拒空理由，界面上先拦住更省事。 */
+      function acts(x, kind) {
+        if (kind === 'dev' && x.status !== 'pending') return ''
+        if (kind === 'sub' && !['pending_review', 'gate_failed'].includes(x.status)) return ''
+        const id = kind === 'dev' ? `approve-dev-${x.id}` : `approve-sub-${x.id}`
+        return `
+          <div class="acts">
+            <button class="primary" data-act="${id}">通过</button>
+            <input type="text" id="note-${x.id}" placeholder="驳回理由（驳回时必填）" />
+            <button class="danger" data-act="reject-${kind}-${x.id}">驳回</button>
+          </div>`
+      }
+
+      const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round((n || 0) / 1024)} KB`)
+      const esc = (s) =>
+        String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+
+      async function refresh() {
+        listEl.innerHTML = '<div class="empty">加载中…</div>'
+        try {
+          if (tab === 'dev') {
+            const { items } = await call('/v1/admin/dev-applications')
+            listEl.innerHTML = items.length ? items.map(devCard).join('') : '<div class="empty">没有开发者申请</div>'
+          } else {
+            const { items } = await call('/v1/admin/submissions')
+            listEl.innerHTML = items.length ? items.map(subCard).join('') : '<div class="empty">没有扩展提交</div>'
+          }
+        } catch (e) {
+          listEl.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`
+        }
+      }
+
+      document.addEventListener('click', async (ev) => {
+        const act = ev.target.dataset?.act
+        if (act) {
+          ev.target.disabled = true
+          try {
+            if (act.startsWith('approve-dev-')) {
+              await call(`/v1/admin/dev-applications/${act.split('-').pop()}/approve`, { body: {} })
+              toast('已通过。可发布扩展的用户已解锁')
+            } else if (act.startsWith('approve-sub-')) {
+              const r = await call(`/v1/admin/submissions/${act.split('-').pop()}/approve`, { body: {} })
+              toast(r.next || '已通过')
+            } else {
+              const [, kind, id] = act.split('-')
+              const note = document.getElementById(`note-${id}`).value.trim()
+              if (!note) return toast('驳回必须填理由 —— 对方要知道改什么', true)
+              await call(`/v1/admin/${kind === 'dev' ? 'dev-applications' : 'submissions'}/${id}/reject`, { body: { note } })
+              toast('已驳回')
+            }
+            await refresh()
+          } catch (e) {
+            toast(e.message, true)
+            ev.target.disabled = false
+          }
+          return
+        }
+        const t = ev.target.dataset?.tab
+        if (t) {
+          tab = t
+          document.querySelectorAll('.tab[data-tab]').forEach((b) =>
+            b.setAttribute('aria-selected', String(b.dataset.tab === t)),
+          )
+          refresh()
+        }
+        if (ev.target.id === 'reload') refresh()
+      })
+
+      refresh()
+    </script>
+  </body>
+</html>

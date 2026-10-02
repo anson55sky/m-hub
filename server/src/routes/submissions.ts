@@ -268,7 +268,31 @@ export async function submit(ctx: Ctx) {
     if (s.size > 2 * 1024 * 1024) return fail(400, 'screenshot_too_large', '单张截图超过 2MB')
   }
 
-  return json({ ok: true, id: subId, version, status, review_note: note, screenshots: shots.length })
+  // ⚠️ `gate` 字段**不是可选的**：客户端 `publisher.rs` 读
+//    `gate.passed` 决定显示「已提交，等待人工审核」还是「机器关卡未通过」。
+//    缺了它 → `unwrap_or(false)` → **明明提交成功了却说「关卡未通过」**，
+//    而且下面没有任何条目可显示（症状正是「未通过」+ 空白）。
+//    实机踩过：2026-10-01 用户看到「机器关卡未通过，请按下面提示修改后重新发布」
+//    而下方一片空白，连重试三次，最后是版本号回写残留才暴露真正原因。
+//
+//    这是同一类 bug 的第三次：响应少一个字段，客户端静默兜成默认值，
+//    于是界面说了一句**与事实相反**的话。见 test 的「形状」断言。
+const gateItems = gate.problems.map((p, i) => ({
+  id: `g${i}`,
+  label: p,
+  ok: false,
+  detail: '',
+}))
+return json({
+  ok: true,
+  id: subId,
+  version,
+  status,
+  review_note: note,
+  // ↓ 通过时也要给 items（可以为空数组）——前端 v-for 依赖它存在
+  gate: { passed: gate.ok, items: gateItems },
+  screenshots: shots.length,
+})
 }
 
 /** GET /api/v1/dev/submissions —— 按账号全量，**不支持** ext_id 过滤（约定 61） */
