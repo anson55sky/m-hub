@@ -110,6 +110,15 @@ async fn upload(
     base: &str,
     token: &str,
     pkg: &Path,
+    // ⚠️ 这两个字段**不是可选的**：服务端 `POST /api/v1/dev/submissions` 拿它们
+    // 做版本递增关卡与市场清单条目，缺了直接回 400 `缺少 ext_id 或 version`
+    // （2026-10-01 实机：发布弹窗报 BAD_REQUEST，实际是这里根本没发）。
+    //
+    // 值来自 `pack_to_temp()` 的返回值 —— 它们本来就在手里（打包时读 manifest
+    // 得到的），只是没往下传。别再「顺手删掉看着没用���参数」：
+    // 端口契约的字段是**服务端要的**，不是本地用不用得到。
+    ext_id: &str,
+    version: &str,
     changelog: &str,
     min_app_version: &str,
     homepage: &str,
@@ -121,6 +130,9 @@ async fn upload(
         .mime_str("application/zip")
         .map_err(|e| e.to_string())?;
     let mut form = reqwest::multipart::Form::new().part("package", part);
+    // 蛇形键名（约定 47：服务端读原始键名、不做驼峰转换）
+    form = form.text("ext_id", ext_id.to_string());
+    form = form.text("version", version.to_string());
     if !changelog.is_empty() {
         form = form.text("changelog", changelog.to_string());
     }
@@ -203,6 +215,8 @@ pub async fn dev_submit(
         &base,
         &token,
         &pkg,
+        &pack_id,
+        &version,
         changelog.unwrap_or_default().trim(),
         min_app_version.unwrap_or_default().trim(),
         homepage.unwrap_or_default().trim(),
@@ -381,6 +395,8 @@ mod tests {
             &base,
             "tok-test",
             &pkg,
+            "com.example.x",
+            "1.0.0",
             "首版说明",
             "0.5.5",
             "https://example.com/x",
@@ -407,7 +423,25 @@ mod tests {
             "必须带 Bearer 鉴权头：{raw}"
         );
         // 字段名是服务端 parseBody 读取的键，拼错就整单失败
-        for field in ["package", "changelog", "min_app_version", "homepage"] {
+        // ⚠️ 列表里**必须有** `ext_id` 与 `version`（2026-10-01 补）。
+        //
+        // 这条契约测试在它们缺席的情况下**一直是绿的** —— 它只断言了
+        // package/changelog/min_app_version/homepage，而真正的两个必填字段
+        // 一个都没查。症状是实机点「打包并发布」报
+        // `BAD_REQUEST: 缺少 ext_id 或 version`，服务端一切正常。
+        //
+        // 教训：mock 服务端**只回固定的 200**，于是「客户端少发字段」这类
+        // 错误永远不会被发现 —— 除非那条测试显式断言请求体里有它。
+        // 凡是「服务端必填」的字段，都要在这个列表里。
+        for field in [
+            "package",
+            // ↓ 服务端拿它做版本递增关卡与市场清单条目，缺了直接 400
+            "ext_id",
+            "version",
+            "changelog",
+            "min_app_version",
+            "homepage",
+        ] {
             assert!(
                 raw.contains(&format!("name=\"{field}\"")),
                 "缺少 multipart 字段 {field}：{raw}"
@@ -429,7 +463,9 @@ mod tests {
         let pkg = dir.path().join("p.xhpack");
         std::fs::write(&pkg, b"PK\x03\x04x").unwrap();
 
-        upload(&base, "t", &pkg, "", "", "", &[]).await.expect("上传应当成功");
+        upload(&base, "t", &pkg, "com.example.x", "1.0.0", "", "", "", &[])
+            .await
+            .expect("上传应当成功");
         let raw = rx.recv_timeout(Duration::from_secs(5)).expect("mock 未收到请求");
         assert!(raw.contains("name=\"package\""));
         for field in ["changelog", "min_app_version", "homepage"] {
@@ -449,7 +485,9 @@ mod tests {
 
         // mock 一律返回 200，这里只验「错误码能被解析出来」的路径；
         // 4xx 分支由服务端 smoke 覆盖（服务端返回的是同样的 JSON 形状）
-        let v = upload(&base, "t", &pkg, "", "", "", &[]).await.expect("200 时应当成功解析");
+        let v = upload(&base, "t", &pkg, "com.example.x", "1.0.0", "", "", "", &[])
+            .await
+            .expect("200 时应当成功解析");
         assert_eq!(
             v.get("error").and_then(|x| x.as_str()),
             Some("draft_quota_exceeded")
@@ -475,6 +513,8 @@ mod tests {
             &base,
             "t",
             &pkg,
+            "com.example.x",
+            "1.0.0",
             "",
             "",
             "",
