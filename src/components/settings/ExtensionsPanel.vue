@@ -51,8 +51,27 @@ async function loadDevMode() {
 onMounted(() => {
   void loadDevMode()
 })
-</script>
 
+const ROW_CLICK_OPTIONS = [
+  { value: 'detail', label: '看详情' },
+  { value: 'open', label: '直接打开' },
+]
+
+/**
+ * 扩展中心「点一行」的行为（2026-10-03）。
+ *
+ * ⚠️ 只写 `state.config` 再 `saveConfig` —— 与 `onRuntimeStrategyChange` 同款路径。
+ *   `ExtensionCenter` 读的就是这个响应式对象，所以改完立刻生效，
+ *   不需要重启、也不需要等配置回读。
+ *
+ * ⚠️ 未知值（手改过的 app.json）由 `rowClickOpens()` 那边兜成 `detail`，
+ *   这里只把**已知**值写回去，不去「修正」配置 —— 否则用户会发现
+ *   自己没动过设置、配置却被改了。
+ */
+async function onRowClickChange(v: unknown) {
+  await store.setExtensionRowClick(v === 'open' ? 'open' : 'detail')
+}
+</script>
 <template>
         <section id="sv-sec-extensions" class="sv-sec" aria-label="扩展">
           <h3 class="sv-sec-title">扩展</h3>
@@ -69,6 +88,21 @@ onMounted(() => {
               :options="RUNTIME_STRATEGY_OPTIONS"
               aria-label="service 运行时策略"
               @update:model-value="onRuntimeStrategyChange"
+            />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">点击扩展一行</span>
+              <span class="setting-desc">
+                默认点一行看详情（信息 / 权限 / 打开方式），右侧 ▶ 直接打开；改成「直接打开」后详情改走行内的「详情」按钮
+              </span>
+            </div>
+            <AppSelect
+              :model-value="store.state.config.extension_row_click || 'detail'"
+              :options="ROW_CLICK_OPTIONS"
+              aria-label="点击扩展一行"
+              @update:model-value="onRowClickChange"
             />
           </div>
 

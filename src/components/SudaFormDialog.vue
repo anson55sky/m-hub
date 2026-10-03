@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
-import { FolderOpen, ImageDown, ImagePlus, Link } from 'lucide-vue-next'
+import { Download, FolderOpen, ImageDown, ImagePlus, Link } from 'lucide-vue-next'
 import { isTauri, tauriApi, type Resource } from '../api/tauri'
 import { categorize } from '../utils/categories'
 import { useFocusTrap } from '../composables/useFocusTrap'
@@ -80,7 +80,7 @@ const targetPlaceholder = computed(() => {
 })
 
 const iconPlaceholder = computed(() => {
-  if (kind.value === 'web') return '留空使用当前网站 favicon'
+  if (kind.value === 'web') return '留空则自动取网站图标，取不到用名称首字母'
   return 'Emoji 或留空自动生成'
 })
 
@@ -219,7 +219,14 @@ function submit() {
 
 function normalizeWebTarget() {
   if (kind.value !== 'web' || !target.value.trim()) return
+  const before = iconFetchedFrom.value
   target.value = normalizeWebUrl(target.value)
+  // 换网址 = 之前抓的图标属于别的站点，不能继续沿用
+  if (before && before !== target.value) {
+    iconFetchedFrom.value = ''
+    icon.value = ''
+    iconFetchNote.value = ''
+  }
   if (!icon.value.trim()) icon.value = deriveFaviconUrl(target.value) ?? ''
 }
 
@@ -235,6 +242,48 @@ function onIconInputBlur() {
     icon.value = deriveFaviconUrl(normalizeWebUrl(target.value)) ?? ''
   }
 }
+
+/**
+ * 抓取网站图标（2026-10-03）。
+ *
+ * 为什么要**真的抓**：原来只是把 `${origin}/favicon.ico` 填进 icon 字段，
+ * 而速达图标最终要经 `convertFileSrc` 从数据根读 —— 一个**外站 URL**
+ * 会被资产协议白名单拒掉，图标于是永远显示不出来（退化成首字母）。
+ * 现在由后端抓下字节、落进 `icons/`、返回**本地路径**。
+ *
+ * ⚠️ 抓不到**不报错**：绝大多数站点 favicon 就在根路径，但仍有不少不是
+ *   （VitePress/Hugo 放 assets 下，抖音小红书直接 403）。让它抛错会把
+ *   「加一个网页速达」变成需要重试的事，而界面已有首字母兜底。
+ *
+ * ⚠️ 抓取中**禁用提交**：否则用户会存下一个还没图标的条目，
+ * 之后再打开弹窗也不会重抓（icon 字段已经非空了）—— 想补图得手动删了重来。
+ */
+const iconFetching = ref(false)
+
+async function fetchFavicon() {
+  if (kind.value !== 'web' || !target.value.trim() || iconFetching.value) return
+  iconFetching.value = true
+  try {
+    const url = normalizeWebUrl(target.value)
+    const local = await tauriApi.fetchWebFavicon(url)
+    if (local) {
+      icon.value = local
+      iconFetchedFrom.value = url
+    } else {
+      // 抓不到：把推导地址还回去，界面上说明为什么没有图标
+      icon.value = deriveFaviconUrl(url) ?? ''
+      iconFetchedFrom.value = ''
+      iconFetchNote.value = '没能取到这个站点的图标，将用名称首字母代替'
+    }
+  } catch (e) {
+    iconFetchNote.value = `取图标失败：${String(e)}`
+  } finally {
+    iconFetching.value = false
+  }
+}
+
+const iconFetchedFrom = ref('')
+const iconFetchNote = ref('')
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && props.visible) emit('close')
@@ -365,6 +414,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               <span v-if="isExtractedIcon" class="extracted-badge" title="已从文件导入图标">
                 ✓ 已导入
               </span>
+            </div>
+            <!-- 网页资源：自动取站点图标（2026-10-03） -->
+            <div v-if="kind === 'web' && target.trim()" class="favicon-row">
+              <button
+                class="input-btn"
+                type="button"
+                :disabled="iconFetching"
+                :title="iconFetching ? '正在取图标…' : '去这个网站取图标'"
+                @click="fetchFavicon"
+              >
+                <Download :size="15" :stroke-width="1.8" />
+                {{ iconFetching ? '取图标中…' : iconFetchedFrom ? '重新取图标' : '自动取图标' }}
+              </button>
+              <span v-if="iconFetchedFrom" class="extracted-badge">✓ 已取到</span>
+              <span v-else-if="iconFetchNote" class="field-hint">{{ iconFetchNote }}</span>
             </div>
           </template>
 
@@ -574,5 +638,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 .mask-enter-from,
 .mask-leave-to {
   opacity: 0;
+}
+
+/* 网页 favicon 抓取（2026-10-03） */
+.favicon-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.favicon-row .input-btn:disabled {
+  opacity: 0.55;
+  cursor: progress;
 }
 </style>

@@ -1463,6 +1463,41 @@ enum ConfiguredShortcut {
 }
 
 impl ConfiguredShortcut {
+    /// 字符串键 → 枚举。
+    ///
+    /// ⚠️ 写错键名要**报出有哪些合法值**而不是静默当成第一个 ——
+    ///   静默兜底的形状本工程已经吃过好几次亏（响应少字段 → 客户端
+    ///   兜成默认值 → 界面说了一句与事实相反的话）。
+    fn parse(key: &str) -> Result<Self, String> {
+        Ok(match key.trim() {
+            "toggle" => Self::Main,
+            "clipboard" => Self::Clipboard,
+            "search" => Self::Search,
+            "chat" => Self::Chat,
+            "capture" => Self::Capture,
+            other => {
+                return Err(format!(
+                    "未知的快捷键标识：{other}（合法值：toggle / clipboard / search / chat / capture）"
+                ))
+            }
+        })
+    }
+
+    /// 该快捷键的「启用」开关（2026-10-03 补）。
+    ///
+    /// ⚠️ 与 `field()` 分开而不是合成一个枚举：`field()` 改的是**组合**，
+    ///   这里改的是**要不要用**。关掉时组合必须原样留着（用户随时开回来，
+    ///   不必重录），所以两者不可能塞进同一个字段。
+    fn enabled<'a>(&self, cfg: &'a mut crate::config::AppConfig) -> &'a mut bool {
+        match self {
+            ConfiguredShortcut::Main => &mut cfg.shortcut_toggle_enabled,
+            ConfiguredShortcut::Clipboard => &mut cfg.shortcut_clipboard_enabled,
+            ConfiguredShortcut::Search => &mut cfg.shortcut_search_enabled,
+            ConfiguredShortcut::Chat => &mut cfg.shortcut_chat_enabled,
+            ConfiguredShortcut::Capture => &mut cfg.shortcut_capture_enabled,
+        }
+    }
+
     fn field<'a>(&self, cfg: &'a mut crate::config::AppConfig) -> &'a mut String {
         match self {
             ConfiguredShortcut::Main => &mut cfg.global_shortcut,
@@ -1512,6 +1547,45 @@ fn set_configured_shortcut(
     crate::config::save(&config)?;
     log::info!("[快捷键] {}快捷键已改为 {}", which.label(), shortcut);
     Ok(shortcut.to_string())
+}
+
+/// 启停某一个全局快捷键（2026-10-03）。
+///
+/// 「关掉」= 反注册，**组合保留在配置里**（用户随时开回来，不必重录）。
+/// 注册/反注册失败会把真实错误抛给界面 —— 界面据此提示，
+/// 而不显示成一个「开关拧了但没反应」的状态。
+#[tauri::command]
+pub async fn set_shortcut_enabled(
+    app: tauri::AppHandle,
+    key: String,
+    enabled: bool,
+) -> Result<bool, String> {
+    // ⚠️ 接字符串键而不是枚举参数：既有的四个 `set_*_shortcut` 也是这么做的
+    //   （各自一个薄命令 + 私有枚举），保持同款口径。枚举直接当命令参数会要求
+    //   `CommandArg` 实现（serde derive + 生命周期标注），为一个参数引入那套更重。
+    let which = ConfiguredShortcut::parse(&key)?;
+    let _guard = crate::config::lock();
+    let mut config = crate::config::load();
+    let current = *which.enabled(&mut config);
+    if current == enabled {
+        return Ok(current);
+    }
+    let combo = config_field(&config, &which);
+
+    if let Err(e) = crate::shortcut::set_enabled(&app, &combo, &combo, enabled) {
+        // 配置一个字都没动（失败路径不写盘），把真实错误抛出去
+        log::warn!("[快捷键] {} 启用状态改为 {} 失败: {}", which.label(), enabled, e);
+        return Err(crate::shortcut::format_shortcut_error(&e));
+    }
+    *which.enabled(&mut config) = enabled;
+    crate::config::save(&config)?;
+    log::info!(
+        "[快捷键] {} 已{}（组合保留: {}）",
+        which.label(),
+        if enabled { "启用" } else { "停用" },
+        combo
+    );
+    Ok(enabled)
 }
 
 fn config_field(cfg: &crate::config::AppConfig, which: &ConfiguredShortcut) -> String {

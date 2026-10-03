@@ -242,7 +242,6 @@ pub async fn dev_submit(
     //
     // pack_id / version 要在闭包**外**可见：后面的日志与 SubmitResult 还要用。
     // 闭包返回它们与上传结果。
-    let mut sent: Option<(String, String)> = None;
     let attempt = async {
         let (pkg, pack_id, version) = pack_to_temp(&app, &id)?;
         log::info!("发布打包完成: {pack_id} v{version} -> {}", pkg.display());

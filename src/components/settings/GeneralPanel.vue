@@ -135,6 +135,29 @@ const {
   showToast,
 })
 
+// ---- 快捷键启用开关（2026-10-03 补）----
+//
+// 五个开关共用一份逻辑：调命令 → 用**返回的最终状态**覆盖本地 → 失败弹回并提示。
+// ⚠️ 不做乐观更新后不回滚：那会让界面显示「已关闭」而实际仍在生效。
+//   （同一类谎报本工程已经吃过四次：响应少字段 → 客户端兜成默认值。）
+
+
+const shortcutBusy = ref<string | null>(null)
+
+async function toggleShortcutEnabled(key: string, next: boolean) {
+  if (shortcutBusy.value) return
+  shortcutBusy.value = key
+  try {
+    await store.setShortcutEnabled(key, next)
+    showToast(next ? '已启用（按键组合保持不变）' : '已停用（按键组合已保留，随时可重新打开）')
+  } catch (e) {
+    // 失败时配置未变，store 已自行弹回；这里只负责把原因说清楚
+    showToast(`操作失败：${String(e)}`)
+  } finally {
+    shortcutBusy.value = null
+  }
+}
+
 // inputRef 仅在模板 ref 绑定中使用（把 DOM 输入框连到 recorder 内部，点击「录入」自动聚焦），
 // vue-tsc 不把模板 ref 视为「读取」，这里显式求值一次以通过 noUnusedLocals
 void shortcutInputRef
@@ -562,6 +585,23 @@ onMounted(async () => {
             </div>
           </div>
           <p v-if="shortcutError" class="shortcut-error">{{ shortcutError }}</p>
+          <div class="setting-row shortcut-row shortcut-enable-row">
+            <div class="setting-info">
+              <span class="setting-name">启用全局快捷键</span>
+              <span class="setting-desc">关掉只是暂时停用，按键组合保留，随时可重新打开</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="store.state.config.shortcut_toggle_enabled"
+              :class="{ on: store.state.config.shortcut_toggle_enabled }"
+              :disabled="shortcutBusy === 'toggle'"
+              @click="toggleShortcutEnabled('toggle', !store.state.config.shortcut_toggle_enabled)"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
 
           <div class="setting-row shortcut-row">
             <div class="setting-info">
@@ -590,6 +630,23 @@ onMounted(async () => {
             </div>
           </div>
           <p v-if="clipError" class="shortcut-error">{{ clipError }}</p>
+          <div class="setting-row shortcut-row shortcut-enable-row">
+            <div class="setting-info">
+              <span class="setting-name">启用剪贴板快捷键</span>
+              <span class="setting-desc">关掉只是暂时停用，按键组合保留，随时可重新打开</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="store.state.config.shortcut_clipboard_enabled"
+              :class="{ on: store.state.config.shortcut_clipboard_enabled }"
+              :disabled="shortcutBusy === 'clip'"
+              @click="toggleShortcutEnabled('clip', !store.state.config.shortcut_clipboard_enabled)"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
 
           <div class="setting-row shortcut-row">
             <div class="setting-info">
@@ -618,6 +675,23 @@ onMounted(async () => {
             </div>
           </div>
           <p v-if="searchError" class="shortcut-error">{{ searchError }}</p>
+          <div class="setting-row shortcut-row shortcut-enable-row">
+            <div class="setting-info">
+              <span class="setting-name">启用搜索快捷键</span>
+              <span class="setting-desc">关掉只是暂时停用，按键组合保留，随时可重新打开</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="store.state.config.shortcut_search_enabled"
+              :class="{ on: store.state.config.shortcut_search_enabled }"
+              :disabled="shortcutBusy === 'search'"
+              @click="toggleShortcutEnabled('search', !store.state.config.shortcut_search_enabled)"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
 
           <div class="setting-row shortcut-row">
             <div class="setting-info">
@@ -646,6 +720,23 @@ onMounted(async () => {
             </div>
           </div>
           <p v-if="chatError" class="shortcut-error">{{ chatError }}</p>
+          <div class="setting-row shortcut-row shortcut-enable-row">
+            <div class="setting-info">
+              <span class="setting-name">启用AI 对话快捷键</span>
+              <span class="setting-desc">关掉只是暂时停用，按键组合保留，随时可重新打开</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="store.state.config.shortcut_chat_enabled"
+              :class="{ on: store.state.config.shortcut_chat_enabled }"
+              :disabled="shortcutBusy === 'chat'"
+              @click="toggleShortcutEnabled('chat', !store.state.config.shortcut_chat_enabled)"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
 
           <!-- 统一捕获（2026-09-29 新增） -->
           <div class="setting-row shortcut-row">
@@ -678,5 +769,22 @@ onMounted(async () => {
             </div>
           </div>
           <p v-if="captureError" class="shortcut-error">{{ captureError }}</p>
+          <div class="setting-row shortcut-row shortcut-enable-row">
+            <div class="setting-info">
+              <span class="setting-name">启用统一捕获快捷键</span>
+              <span class="setting-desc">关掉只是暂时停用，按键组合保留，随时可重新打开</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="store.state.config.shortcut_capture_enabled"
+              :class="{ on: store.state.config.shortcut_capture_enabled }"
+              :disabled="shortcutBusy === 'capture'"
+              @click="toggleShortcutEnabled('capture', !store.state.config.shortcut_capture_enabled)"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
         </section>
 </template>

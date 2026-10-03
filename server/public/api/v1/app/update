@@ -6,8 +6,8 @@
   "platforms": {
     "macos-aarch64": {
       "url": "https://m-hub-server.pages.dev/downloads/0.7.3/m-hub_0.7.3_aarch64.dmg",
-      "sha256": "c39baca6d75a910c3a1ceedb65b0bcaed40051d58f78d2991fa3f6b4e53e157d",
-      "size": 6049077
+      "sha256": "af906b5b0e128341d5bcd52ffd96ce7ba02bb36497d018401f7e27decb59f960",
+      "size": 6088018
     }
   }
 }

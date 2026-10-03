@@ -150,6 +150,14 @@ const state = reactive<StoreState>({
     update_snooze_until_ms: 0,
     floating_ball_enabled: true,
     floating_ball_auto_hide: true,
+    // 全局快捷键启用开关：默认全开（升级不该让用户的快捷键「突然没了」）
+    shortcut_toggle_enabled: true,
+    shortcut_clipboard_enabled: true,
+    shortcut_search_enabled: true,
+    shortcut_chat_enabled: true,
+    shortcut_capture_enabled: true,
+    // 扩展中心点一行：默认看详情（点开最易误触，而「看权限」最该顺手做到）
+    extension_row_click: 'detail',
     floating_ball_with_main: false,
     floating_ball_buttons: [
       'view:dashboard',
@@ -327,6 +335,33 @@ export function useStore() {
   async function removeResource(id: number) {
     await tauriApi.deleteResource(id)
     state.resources = state.resources.filter((x) => x.id !== id)
+  }
+
+  /**
+   * 批量删除速达资源（2026-10-03）。
+   *
+   * ⚠️ **逐条串行、每条各自成败**，不是 `Promise.all`：
+   *   并发删时若中途某条失败，`Promise.all` 会整体 reject，而**已经删掉的那几条
+   *   回滚不了** —— 调用方收到一个异常，却不知道到底删了几条，界面状态与磁盘不一致。
+   *   串行 + 逐条回报成功/失败，调用方能把「删了 3 条、这 1 条失败原因如下」
+   *   如实显示出来，而不是一句「批量删除失败」。
+   *
+   * ⚠️ 本地状态只移除**确实删掉**的那些：失败的留在列表里，
+   *   用户能立刻看到哪条没删掉并重试。
+   */
+  async function removeResources(ids: number[]): Promise<{ ok: number[]; failed: { id: number; error: string }[] }> {
+    const ok: number[] = []
+    const failed: { id: number; error: string }[] = []
+    for (const id of ids) {
+      try {
+        await tauriApi.deleteResource(id)
+        state.resources = state.resources.filter((x) => x.id !== id)
+        ok.push(id)
+      } catch (e) {
+        failed.push({ id, error: String(e) })
+      }
+    }
+    return { ok, failed }
   }
 
   /** 拖拽排序：整表按传入 id 顺序写 sort_order（ids[i] → i），本地乐观更新 + 后端持久化 */
@@ -1117,6 +1152,37 @@ export function useStore() {
     await tauriApi.setWindowAlwaysOnTop(value)
   }
 
+  /**
+   * 启停一个全局快捷键（2026-10-03）。
+   *
+   * ⚠️ **失败要把开关弹回去**：命令返回 Err 时（比如那个键已被别的软件注册、
+   *   注册失败）配置一个字都没改，而本地 state 若已经乐观改成 false，
+   *   界面就显示「已关闭」而实际仍在生效 —— 又一句与事实相反的话。
+   * 所以先记下旧值，失败时还原。
+   */
+  async function setShortcutEnabled(key: string, enabled: boolean) {
+    const FIELD = {
+      toggle: 'shortcut_toggle_enabled',
+      clipboard: 'shortcut_clipboard_enabled',
+      search: 'shortcut_search_enabled',
+      chat: 'shortcut_chat_enabled',
+      capture: 'shortcut_capture_enabled',
+    } as const
+    const field = FIELD[key as keyof typeof FIELD]
+    if (!field) throw new Error(`未知的快捷键标识：${key}`)
+    const before = state.config[field]
+    state.config[field] = enabled
+    if (!isTauri()) return enabled
+    try {
+      const saved = await tauriApi.setShortcutEnabled(key, enabled)
+      state.config[field] = saved
+      return saved
+    } catch (e) {
+      state.config[field] = before
+      throw e
+    }
+  }
+
   async function setGlobalShortcut(value: string) {
     state.config.global_shortcut = value
     if (!isTauri()) return value
@@ -1348,6 +1414,24 @@ export function useStore() {
       state.config.floating_ball_buttons,
       state.config.floating_ball_idle_spin,
     )
+  }
+
+  /**
+   * 扩展中心「点一行」的行为（2026-10-03）。
+   *
+   * ⚠️ 失败要**回滚**：写盘失败时配置未变，而本地 state 已乐观改成 'open'，
+   *   于是界面显示「点行直接打开」而实际下次还是看详情 —— 又一句与事实相反的话。
+   */
+  async function setExtensionRowClick(value: 'detail' | 'open') {
+    const prev = state.config.extension_row_click
+    state.config.extension_row_click = value
+    if (!isTauri()) return
+    try {
+      await tauriApi.saveConfig(state.config)
+    } catch (e) {
+      state.config.extension_row_click = prev
+      throw e
+    }
   }
 
   async function setFloatingBallAutoHide(value: boolean) {
@@ -1594,6 +1678,7 @@ export function useStore() {
     addResource,
     editResource,
     removeResource,
+    removeResources,
     reorderResources,
     launchResource,
     launchResourceAsAdmin,
@@ -1666,6 +1751,7 @@ export function useStore() {
     setSidebarToggle,
     setAlwaysOnTop,
     setGlobalShortcut,
+    setShortcutEnabled,
     setSearchShortcut,
     setChatShortcut,
     setCaptureShortcut,
@@ -1690,6 +1776,7 @@ export function useStore() {
     setExtensionLinkMode,
     setRunAtStartup,
     setFloatingBallEnabled,
+    setExtensionRowClick,
     setFloatingBallAutoHide,
     setFloatingBallWithMain,
     setFloatingBallButtons,

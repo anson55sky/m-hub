@@ -26,6 +26,52 @@ export interface SudaCustomModuleConfig {
 }
 
 /** 本机已安装浏览器（list_installed_browsers，注册表 StartMenuInternet 枚举） */
+/**
+ * 桌面上的一条（2026-10-03）。
+ *
+ * ⚠️ `removable` **只对快捷方式为 true**（`.alias` / `.webloc` / 软链接）。
+ * 普通文件、文件夹、`.app` 都是 false —— 即便界面上「加入后清理桌面」
+ * 那个勾被选上，它们也只会被保留。这是「不删用户文件」这条底线，
+ * 后端 `remove_desktop_shortcut` 会**独立再判一次**，不靠界面。
+ */
+export interface DesktopEntry {
+  id: string
+  /** 显示名（已去掉 .alias / .webloc 后缀） */
+  name: string
+  /** 绝对路径 */
+  path: string
+  kind: 'app' | 'folder' | 'file' | 'alias' | 'webloc'
+  /** 可否作为速达条目加入 */
+  addable: boolean
+  /** 可否在加入后从桌面删掉（只有快捷方式） */
+  removable: boolean
+}
+
+/**
+ * 书签节点（2026-10-03）。文件夹与书签条目**同一个类型**，靠 `url` 区分。
+ *
+ * ⚠️ `category` 是文件夹的**全路径**（`书签栏/工作`），不是末级名。
+ *   落进速达时只取末级（用户想看到「工作」），全路径用于去重 ——
+ *   否则「书签栏/工作」与「其他书签/工作」里的同一个网址会导入两次。
+ */
+export interface BookmarkNode {
+  id: string
+  name: string
+  /** 条目才有；文件夹为 undefined */
+  url?: string
+  children: BookmarkNode[]
+  /** 文件夹才有；条目为空 */
+  category?: string
+  /** 目录里（递归）的书签条数 */
+  urlCount: number
+}
+
+export interface BrowserBookmarks {
+  browser: string
+  profile: string
+  roots: BookmarkNode[]
+}
+
 export interface InstalledBrowser {
   /** 显示名（如 Google Chrome / Microsoft Edge） */
   name: string
@@ -285,6 +331,22 @@ export interface AppConfig {
   chat_window_pinned: boolean
   /** 剪贴板历史全局呼出快捷键 */
   clipboard_shortcut: string
+  /**
+   * 五个全局快捷键的启用开关（2026-10-03 补）。
+   *
+   * ⚠️ 「关掉」= 暂时停用，**按键组合原样保留**（见 config.rs 的注释）。
+   * 全部默认 true —— 升级不该让用户的快捷键「突然没了」。
+   */
+  /**
+   * 扩展中心「点一行」的行为：`'detail'`（默认，看详情）/ `'open'`（直接打开）。
+   * 设置 → 扩展 里可改（2026-10-03 补）。
+   */
+  extension_row_click: 'detail' | 'open'
+  shortcut_toggle_enabled: boolean
+  shortcut_clipboard_enabled: boolean
+  shortcut_search_enabled: boolean
+  shortcut_chat_enabled: boolean
+  shortcut_capture_enabled: boolean
   /** 全局搜索呼出快捷键（默认 Ctrl+K） */
   search_shortcut: string
   /** AI 对话呼出快捷键（默认 Ctrl+Shift+K） */
@@ -1004,6 +1066,31 @@ export const tauriApi = {
     icon: payload.icon ?? null,
     args: payload.args ?? null,
   }),
+  /**
+   * 抓取网站 favicon 并落盘到数据根，返回**本地绝对路径**（抓不到返回 null）。
+   *
+   * ⚠️ 必须返回本地路径而不是外站 URL：速达图标经 convertFileSrc 读，
+   *   外站 URL 会被资产协议白名单拒掉 → 图标永远显示不出来。
+   * ⚠️ 抓不到不是错误（返回 null）：多数站点 favicon 不在根路径。
+   */
+  /** 读取本机 Chromium 系浏览器的书签（Chrome / Edge / Brave / Chromium / Vivaldi / Arc） */
+  readBrowserBookmarks: () => invoke<BrowserBookmarks[]>('read_browser_bookmarks'),
+
+  /** 扫描桌面（快捷方式 / 文件 / 文件夹 / .app） */
+  scanDesktop: () => invoke<DesktopEntry[]>('scan_desktop'),
+
+  /**
+   * 删除桌面上的一个快捷方式。
+   *
+   * ⚠️ 后端会**独立再判一次**是不是快捷方式 —— 界面上的复选框不是防线。
+   * 传普通文件路径进去会被拒（返回 Err），文件一个都不会少。
+   */
+  removeDesktopShortcut: (path: string) =>
+    invoke<boolean>('remove_desktop_shortcut', { path }),
+
+  fetchWebFavicon: (url: string) =>
+    invoke<string | null>('fetch_web_favicon', { url }),
+
   deleteResource: (id: number) => invoke<void>('delete_resource', { id }),
   reorderResources: (ids: number[]) => invoke<void>('reorder_resources', { ids }),
   launchResource: (id: number) => invoke<void>('launch_resource', { id }),
@@ -1175,6 +1262,16 @@ export const tauriApi = {
   setAlwaysOnTopConfig: (value: boolean) =>
     invoke<void>('set_always_on_top_config', { value }),
   getGlobalShortcut: () => invoke<string>('get_global_shortcut'),
+  /**
+   * 启停一个全局快捷键。`key` ∈ toggle / clipboard / search / chat / capture。
+   *
+   * ⚠️ 返回**最终状态**而不是 void：注册可能失败（键被别的软件占了），
+   *   失败时命令返回 Err、配置不变，界面据此把开关弹回去 ——
+   *   否则会显示「已关闭」而实际还在生效。
+   */
+  setShortcutEnabled: (key: string, enabled: boolean) =>
+    invoke<boolean>('set_shortcut_enabled', { key, enabled }),
+
   setGlobalShortcut: (value: string) => invoke<string>('set_global_shortcut', { value }),
   setSearchShortcut: (value: string) => invoke<string>('set_search_shortcut', { value }),
   setChatShortcut: (value: string) => invoke<string>('set_chat_shortcut', { value }),

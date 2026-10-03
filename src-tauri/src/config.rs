@@ -209,6 +209,21 @@ pub struct AppConfig {
     /// AI 对话独立窗口是否置顶（自制标题栏的图钉按钮切换）
     #[serde(default)]
     pub chat_window_pinned: bool,
+
+    /// 扩展中心「点一行」的行为（2026-10-03 补）。
+    ///
+    /// · `detail`（默认）：点行打开扩展详情（信息 / 权限 / 打开方式）
+    /// · `open`：点行直接打开扩展，详情走右侧的「详情」按钮
+    ///
+    /// ⚠️ 默认是 `detail` 而不是 `open`：点一行是最容易误触的动作，
+    ///   而「看一眼这个扩展要什么权限」恰好是最该顺手做到的事。
+    ///   想改的人去设置里换即可，两种都随时能切回来。
+    ///
+    /// ⚠️ 用 String 而不是 Rust 枚举：老配置里**没有这个字段**，
+    ///   serde default 拿不到枚举值（枚举没有 Default），而 String 的
+    ///   `default` 只是一个字符串，写错了还能在前端回落。
+    #[serde(default = "default_extension_row_click")]
+    pub extension_row_click: String,
     /// 剪贴板历史全局呼出快捷键（默认 Ctrl+Alt+V，可配置）
     pub clipboard_shortcut: String,
     /// 全局搜索呼出快捷键（默认 Ctrl+K，可配置，全局注册）
@@ -220,6 +235,30 @@ pub struct AppConfig {
     /// 统一捕获快捷键（2026-09-29 新增）。默认 ⇧⌘U / Ctrl+Shift+U。
     /// 用来从任何地方一行记下东西，自动路由到速记/待办/提示词/倒计时/速达。
     pub capture_shortcut: String,
+
+    // ---- 全局快捷键的启用开关（2026-10-03 补）----
+    //
+    // ⚠️ 「关掉」= **暂时停用**，按键组合**原样保留**。这是刻意的：
+    //   与「改绑」分开是两种需求 —— 想换键的人用改绑，想让某个键别再抢
+    //   （比如 Ctrl+K 已被别的软件占了）的人用开关。关掉之后原来的组合
+    //   还在配置里，随时能打开，**不需要重新录一遍**。
+    //
+    //   若把「关掉」实现成「清空快捷键字符串」，用户再打开就得重录 ——
+    //   而且空字符串会让 `register_toggle_shortcut` 拿着空键去注册，
+    //   那是注册失败还可能被吞成 warn，看起来像「开关坏了」。
+    //
+    // 五个（不是发布说明写的「四个」）：统一捕获 ⇧⌘U 与其余四个同样是
+    // 全局注册的快捷键，只给它四个开关会让它在列表里成为唯一的例外。
+    #[serde(default = "default_true")]
+    pub shortcut_toggle_enabled: bool,
+    #[serde(default = "default_true")]
+    pub shortcut_clipboard_enabled: bool,
+    #[serde(default = "default_true")]
+    pub shortcut_search_enabled: bool,
+    #[serde(default = "default_true")]
+    pub shortcut_chat_enabled: bool,
+    #[serde(default = "default_true")]
+    pub shortcut_capture_enabled: bool,
     /// 剪贴板历史最大条数（含置顶；置顶豁免自动清理但计入上限）
     pub clipboard_max_items: i64,
     /// 非置顶记录的保留天数
@@ -386,6 +425,10 @@ fn default_chat_panel_opacity() -> f64 {
 
 fn default_chat_panel_side() -> String {
     "right".to_string()
+}
+
+fn default_extension_row_click() -> String {
+    "detail".to_string()
 }
 
 fn default_true() -> bool {
@@ -600,10 +643,17 @@ impl Default for AppConfig {
             chat_window_x: None,
             chat_window_y: None,
             chat_window_pinned: false,
+            extension_row_click: default_extension_row_click(),
             clipboard_shortcut: crate::shortcut::DEFAULT_CLIPBOARD_SHORTCUT.to_string(),
             search_shortcut: crate::shortcut::DEFAULT_SEARCH_SHORTCUT.to_string(),
             chat_shortcut: crate::shortcut::DEFAULT_CHAT_SHORTCUT.to_string(),
             capture_shortcut: crate::shortcut::DEFAULT_CAPTURE_SHORTCUT.to_string(),
+            // 全部默认开 —— 升级已有配置的用户不该发现自己的快捷键「突然没了」
+            shortcut_toggle_enabled: true,
+            shortcut_clipboard_enabled: true,
+            shortcut_search_enabled: true,
+            shortcut_chat_enabled: true,
+            shortcut_capture_enabled: true,
             clipboard_max_items: 500,
             clipboard_ttl_days: 7,
             clipboard_paused: false,

@@ -44,6 +44,9 @@ mod todo_reminder;
 mod todo_recurrence;
 mod tray;
 pub mod updater;
+pub mod bookmarks;
+pub mod desktop;
+pub mod webicon;
 mod webview_mem;
 mod win_taskbar;
 mod window_resize;
@@ -950,6 +953,11 @@ pub fn run() {
             commands::set_always_on_top_config,
             commands::get_global_shortcut,
             commands::set_global_shortcut,
+            commands::set_shortcut_enabled,
+            bookmarks::read_browser_bookmarks,
+            desktop::remove_desktop_shortcut,
+            desktop::scan_desktop,
+            webicon::fetch_web_favicon,
             commands::set_search_shortcut,
             commands::set_chat_shortcut,
             commands::get_capture_shortcut,

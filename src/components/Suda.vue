@@ -11,7 +11,12 @@ import {
   Star,
   Trash2,
   Wrench,
+  Bookmark,
+  Check,
+  CheckCheck,
+  Monitor,
 } from 'lucide-vue-next'
+import type { DesktopEntry } from '../api/tauri'
 import { isTauri, tauriApi, type InstalledAppInfo, type InstalledBrowser, type Resource } from '../api/tauri'
 import { categorize } from '../utils/categories'
 import { useStore } from '../stores/workbench'
@@ -22,9 +27,171 @@ import { useSudaDrag } from '../composables/useSudaDrag'
 import { ADMIN_LAUNCH_TERM } from '../utils/platform'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 import SudaFormDialog from './SudaFormDialog.vue'
+import SudaBookmarkDialog from './SudaBookmarkDialog.vue'
+import SudaDesktopDialog from './SudaDesktopDialog.vue'
 import SudaScanDialog from './SudaScanDialog.vue'
 
 const store = useStore()
+// ---- 批量管理（2026-10-03）----
+//
+// 多选态与浏览态**互斥**：进入多选后单击不再是「打开」而是「勾选」。
+// ⚠️ 选中的 id 存 `Set` 而不是数组：勾选/取消是高频操作，几百条时数组的
+//   `includes` 会明显卡；而「配合分类筛选全选」要的正是「并进来」，Set 更直白。
+const selectMode = ref(false)
+const selected = ref(new Set<number>())
+
+function toggleSelect(id: number) {
+  const next = new Set(selected.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selected.value = next
+}
+
+/** 全选/取消只作用于**当前可见**的那些（跟着分类筛选走） */
+function toggleSelectAllVisible() {
+  const ids = visibleResources.value.map((r) => r.id)
+  const allOn = ids.length > 0 && ids.every((id) => selected.value.has(id))
+  const next = new Set(selected.value)
+  for (const id of ids) {
+    if (allOn) next.delete(id)
+    else next.add(id)
+  }
+  selected.value = next
+}
+
+const allVisibleSelected = computed(
+  () => visibleResources.value.length > 0 && visibleResources.value.every((r) => selected.value.has(r.id)),
+)
+
+function exitSelectMode() {
+  selectMode.value = false
+  selected.value = new Set()
+}
+
+/**
+ * 批量删除：逐条删、**如实回报**成功与失败。
+ *
+ * ⚠️ 失败的那些**不静默**：只提示「已删除 N 条」的话，用户会以为全删干净了，
+ *   而没删掉的条目还在列表里 —— 又一句与事实相反的话。故失败项留在选中态里，
+ *   用户能立刻看到是哪几条。
+ *
+ * ⚠️ `removeResources` 内部是**串行**逐条删而不是 Promise.all：并发时中途失败
+ *   会让已删的那些回滚不了，而调用方只收到一个异常、不知道删了几条。
+ */
+const batchBusy = ref(false)
+async function batchRemove() {
+  const ids = [...selected.value]
+  if (!ids.length) return
+  const label = ids.length === 1 ? '这一条' : `这 ${ids.length} 条`
+  const ok = window.confirm(
+    `删除${label}速达？\n\n只删速达里的这些记录，指向的应用 / 文件 / 文件夹本身不受影响。`,
+  )
+  if (!ok) return
+  batchBusy.value = true
+  try {
+    const { ok: done, failed } = await store.removeResources(ids)
+    if (!failed.length) {
+      showToast(`已删除 ${done.length} 条`)
+      exitSelectMode()
+    } else {
+      selected.value = new Set(failed.map((f) => f.id))
+      showToast(`已删除 ${done.length} 条，${failed.length} 条失败：${failed[0]?.error ?? ''}`)
+    }
+  } finally {
+    batchBusy.value = false
+  }
+}
+
+// ---- 浏览器书签导入（2026-10-03）----
+const bookmarkVisible = ref(false)
+
+/**
+ * 把选中的书签加入速达。
+ *
+ * ⚠️ 逐条处理并**如实回报失败**：几百条里某条加不进去（重名/路径失效）不能让
+ *   整批看起来失败，也不能悄悄跳过 —— 用户不知道少了什么。
+ * ⚠️ 分类直接用浏览器文件夹的**末级**名（后端给的是全路径，只用于去重）。
+ *   速达分类名不存在时会落到「未归类」，功能上可用，只是没分到一起 ——
+ *   比在这里自作主张新建分类更安全。
+ */
+async function addBookmarks(
+  items: { name: string; url: string; category: string }[],
+) {
+  let added = 0
+  const failed: string[] = []
+  for (const it of items) {
+    try {
+      await store.addResource({
+        kind: 'web',
+        name: it.name,
+        target: it.url,
+        category: it.category || null,
+      })
+      added++
+    } catch (err) {
+      failed.push(`${it.name}：${String(err)}`)
+    }
+  }
+  bookmarkVisible.value = false
+  const parts = [`已导入 ${added} 条书签`]
+  if (failed.length) parts.push(`${failed.length} 条失败：${failed[0]}`)
+  showToast(parts.join(' · '))
+}
+
+// ---- 扫描桌面（2026-10-03）----
+const desktopVisible = ref(false)
+
+/** 桌面项 → 速达 kind。速达只有 app / web / file 三类：
+ *  .app 与快捷方式都算「app」（都是可执行/可双击的东西），文件夹走 file。 */
+function sudaKindFor(e: DesktopEntry): 'app' | 'file' {
+  return e.kind === 'folder' ? 'file' : 'app'
+}
+
+/**
+ * 把选中的桌面项加入速达。
+ *
+ * ⚠️ 逐条处理并**如实回报失败**：某条加不进去不能悄悄跳过 —— 用户不知道
+ *   自己以为加了什么。
+ *
+ * ⚠️ 「清理桌面」在**全部加入之后**才执行，且只对 `removable` 为真的条目。
+ *   反过来的话中途失败就两头都没了（约定 72）。即便如此，后端
+ *   `remove_desktop_shortcut` 仍会**独立再判一次**是不是快捷方式 ——
+ *   界面上的勾不是防线。
+ */
+async function addDesktopEntries(list: DesktopEntry[], removeShortcuts: boolean) {
+  let added = 0
+  const failed: string[] = []
+  const removable: string[] = []
+
+  for (const e of list) {
+    try {
+      await store.addResource({ kind: sudaKindFor(e), name: e.name, target: e.path })
+      added++
+      if (removeShortcuts && e.removable) removable.push(e.path)
+    } catch (err) {
+      failed.push(`${e.name}：${String(err)}`)
+    }
+  }
+
+  let cleaned = 0
+  const cleanFailed: string[] = []
+  for (const path of removable) {
+    try {
+      await tauriApi.removeDesktopShortcut(path)
+      cleaned++
+    } catch (err) {
+      cleanFailed.push(String(err))
+    }
+  }
+
+  desktopVisible.value = false
+  const parts = [`已加入 ${added} 条`]
+  if (cleaned) parts.push(`清理了 ${cleaned} 个桌面快捷方式`)
+  if (failed.length) parts.push(`${failed.length} 条失败：${failed[0]}`)
+  if (cleanFailed.length) parts.push(`${cleanFailed.length} 个没清掉：${cleanFailed[0]}`)
+  showToast(parts.join(' · '))
+}
+
 const showToast = inject<(msg: string, action?: { label: string; onClick: () => void }) => void>(
   'showToast',
   () => {},
@@ -501,6 +668,33 @@ function cardAccentStyle(r: Resource) {
         <button
           v-if="isTauri()"
           class="icon-btn scan"
+          title="从浏览器导入书签"
+          aria-label="从浏览器导入书签"
+          @click="bookmarkVisible = true"
+        >
+          <Bookmark :size="15" :stroke-width="2.2" />
+        </button>
+        <button
+          class="icon-btn batch"
+          :class="{ on: selectMode }"
+          :title="selectMode ? '退出批量管理' : '批量管理（勾选一批删除）'"
+          aria-label="批量管理"
+          @click="selectMode ? exitSelectMode() : (selectMode = true)"
+        >
+          <CheckCheck :size="15" :stroke-width="2.2" />
+        </button>
+        <button
+          v-if="isTauri()"
+          class="icon-btn scan"
+          title="扫描桌面"
+          aria-label="扫描桌面"
+          @click="desktopVisible = true"
+        >
+          <Monitor :size="15" :stroke-width="2.2" />
+        </button>
+        <button
+          v-if="isTauri()"
+          class="icon-btn scan"
           title="扫描已安装应用"
           aria-label="扫描已安装应用"
           @click="scanVisible = true"
@@ -516,6 +710,23 @@ function cardAccentStyle(r: Resource) {
         </button>
       </div>
     </header>
+
+    <!-- 批量管理操作条：只在该模式下出现，且明写「删的是记录不是文件」 -->
+    <div v-if="selectMode" class="suda-batch-bar">
+      <button class="ghost-btn" type="button" @click="toggleSelectAllVisible">
+        {{ allVisibleSelected ? '取消全选' : `全选当前 ${visibleResources.length} 条` }}
+      </button>
+      <span class="suda-batch-count">已选 {{ selected.size }} 条</span>
+      <button
+        class="ghost-btn danger"
+        type="button"
+        :disabled="!selected.size || batchBusy"
+        @click="batchRemove"
+      >
+        {{ batchBusy ? '删除中…' : '删除所选' }}
+      </button>
+      <button class="ghost-btn" type="button" @click="exitSelectMode">退出</button>
+    </div>
 
     <!-- 分类 tabs -->
     <nav class="filter-tabs suda-tabs" aria-label="速达分类">
@@ -572,19 +783,22 @@ function cardAccentStyle(r: Resource) {
           <div v-if="dropBeforeId === r.id" class="suda-drop-slot" aria-hidden="true" />
         <div
           class="suda-card"
-          :class="{ 'is-dragging': draggingId === r.id }"
           :data-id="r.id"
           :title="r.target"
           role="button"
           tabindex="0"
+          :class="{ 'is-dragging': draggingId === r.id, 'is-selecting': selectMode, 'is-checked': selected.has(r.id) }"
           :style="[cardAccentStyle(r), dragStyleOf(r)]"
-          @click="onCardClick(r)"
+          @click="selectMode ? toggleSelect(r.id) : onCardClick(r)"
           @pointerdown="onCardPointerDown(r, $event)"
           @dragstart.prevent
           @keydown.enter="onOpen(r)"
           @keydown.space.prevent="onOpen(r)"
           @contextmenu="onResourceContext($event, r)"
         >
+          <span v-if="selectMode" class="suda-check" aria-hidden="true">
+            <Check v-if="selected.has(r.id)" :size="12" :stroke-width="3" />
+          </span>
           <span class="suda-kind" :class="r.kind">{{ kindLabel(r) }}</span>
           <div class="suda-actions">
             <button
@@ -682,6 +896,16 @@ function cardAccentStyle(r: Resource) {
       :prefill="prefill"
       @close="formVisible = false"
       @submit="onFormSubmit"
+    />
+    <SudaBookmarkDialog
+      :visible="bookmarkVisible"
+      @close="bookmarkVisible = false"
+      @picked="addBookmarks"
+    />
+    <SudaDesktopDialog
+      :visible="desktopVisible"
+      @close="desktopVisible = false"
+      @picked="addDesktopEntries"
     />
     <SudaScanDialog
       :visible="scanVisible"
@@ -1007,5 +1231,70 @@ function cardAccentStyle(r: Resource) {
   cursor: grabbing;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* ---------------- 批量管理（2026-10-03） ---------------- */
+
+/* 多选态下卡片不再「点开」，只勾选：光标与 hover 都要说清楚当前是哪种模式，
+   否则用户会以为点不动了（点一下什么都没发生是最容易被当成 bug 的交互）。 */
+.suda-card.is-selecting {
+  cursor: default;
+}
+.suda-card.is-selecting:hover {
+  transform: none;
+  box-shadow: none;
+}
+.suda-card.is-checked {
+  outline: 2px solid var(--brand-500);
+  outline-offset: -2px;
+}
+
+.suda-check {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  border: 1.5px solid var(--border-soft);
+  background: var(--bg-card-solid);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--brand-600);
+}
+.suda-card.is-checked .suda-check {
+  border-color: var(--brand-500);
+  background: var(--brand-500);
+  color: #fff;
+}
+
+.suda-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card-soft);
+}
+.suda-batch-count {
+  font-size: 12px;
+  color: var(--text-2);
+  margin-right: auto;
+}
+.suda-batch-bar .ghost-btn.danger {
+  color: var(--c-red);
+  border-color: var(--c-red);
+}
+.suda-batch-bar .ghost-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.icon-btn.batch.on {
+  color: var(--brand-600);
+  background: var(--brand-50);
 }
 </style>

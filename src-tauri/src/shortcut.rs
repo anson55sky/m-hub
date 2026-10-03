@@ -102,33 +102,67 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let config = crate::config::load();
-    // 注册默认快捷键，注册失败仅记录日志不阻塞启动
-    if let Err(e) = register_toggle_shortcut(&handle, &config.global_shortcut) {
-        log::warn!("[快捷键] 注册主窗口快捷键失败: {}", e);
-    } else {
-        log::info!("[快捷键] 已注册主窗口快捷键: {}", config.global_shortcut);
-    }
-    if let Err(e) = register_toggle_shortcut(&handle, &config.clipboard_shortcut) {
-        log::warn!("[快捷键] 注册剪贴板快捷键失败: {}", e);
-    } else {
-        log::info!("[快捷键] 已注册剪贴板快捷键: {}", config.clipboard_shortcut);
-    }
-    if let Err(e) = register_toggle_shortcut(&handle, &config.search_shortcut) {
-        log::warn!("[快捷键] 注册搜索快捷键失败: {}", e);
-    } else {
-        log::info!("[快捷键] 已注册搜索快捷键: {}", config.search_shortcut);
-    }
-    if let Err(e) = register_toggle_shortcut(&handle, &config.capture_shortcut) {
-        log::warn!("[快捷键] 注册统一捕获快捷键失败: {}", e);
-    } else {
-        log::info!("[快捷键] 已注册统一捕获快捷键: {}", config.capture_shortcut);
-    }
-    if let Err(e) = register_toggle_shortcut(&handle, &config.chat_shortcut) {
-        log::warn!("[快捷键] 注册 AI 对话快捷键失败: {}", e);
-    } else {
-        log::info!("[快捷键] 已注册 AI 对话快捷键: {}", config.chat_shortcut);
+    // ⚠️ 逐个按**启用开关**决定是否注册（2026-10-03）。
+    //   关掉 = 不注册，但配置里的组合原样保留 —— 用户随时能开回来，
+    //   不必重新录一遍。组合本身仍照常注册与冲突预检（那是「这个键归谁」的问题，
+    //   与「要不要启用」无关；分开看才能解释「关掉了为什么还提示冲突」）。
+    for (key, enabled) in enabled_pairs(&config) {
+        if !enabled {
+            log::info!("[快捷键] {} 已被用户停用，不注册（组合保留在配置里）", key);
+            continue;
+        }
+        if let Err(e) = register_toggle_shortcut(&handle, key) {
+            log::warn!("[快捷键] 注册{}失败: {}", key, e);
+        } else {
+            log::info!("[快捷键] 已注册{}: {}", key, key);
+        }
     }
     Ok(())
+}
+
+/// 五个全局快捷键的「开关 + 组合」对照表。
+///
+/// ⚠️ 这里**刻意枚举全部五个**，而不是「四个 + 捕获那个例外」——
+///   统一捕获 ⇧⌘U 同样是全局注册的快捷键，少给它一个开关会让它在
+///   设置列表里成为唯一的例外（而例外就会被当成 bug）。
+///
+/// 顺序固定（主窗/剪贴板/搜索/对话/捕获）：日志与测试都按这个顺序断言。
+pub fn enabled_pairs(cfg: &crate::config::AppConfig) -> Vec<(&'static str, bool)> {
+    vec![
+        ("全局快捷键", cfg.shortcut_toggle_enabled),
+        ("剪贴板快捷键", cfg.shortcut_clipboard_enabled),
+        ("搜索快捷键", cfg.shortcut_search_enabled),
+        ("AI 对话快捷键", cfg.shortcut_chat_enabled),
+        ("统一捕获快捷键", cfg.shortcut_capture_enabled),
+    ]
+}
+
+/// 按开关启停某一个全局快捷键。
+///
+/// 失败要**回滚**（约定 72 的形状：先落新 → 尝试 → 失败恢复）：
+/// 先反注册旧的，成功注册新的才算换；注册失败就把旧的注册回去。
+/// 否则「打开开关」失败会留下一个**既没开也没关**的中间态 ——
+/// 配置说开着、实际没注册，用户按半天没反应也看不出是哪一环坏了。
+pub fn set_enabled(app: &AppHandle, previous: &str, next: &str, enable: bool) -> Result<(), String> {
+    if enable {
+        if is_shortcut_registered(app, next) {
+            // 已经注册着（可能本来就是开的）—— 直接成功，别走反注册再注册
+            // 那条路：它会先把旧键摘掉，若紧接着注册失败就两头都没了
+            return Ok(());
+        }
+        register_toggle_shortcut(app, next).inspect_err(|_| {
+            let _ = register_toggle_shortcut(app, previous);
+        })
+    } else {
+        unregister_toggle_shortcut(app, previous).or_else(|e| {
+            // 「本来就没注册」不是错误：关掉一个已关闭的开关应当是幂等的
+            if is_conflict_error(&e) {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+    }
 }
 
 /// 把「旧快捷键 → 新快捷键」的改绑一次做完：冲突预检、反注册旧的、注册新的，

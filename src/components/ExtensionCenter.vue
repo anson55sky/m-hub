@@ -14,6 +14,7 @@ import {
   type MarketStatus,
   type ExtensionEntry,
 } from '../api/tauri'
+import { useStore } from '../stores/workbench'
 import { accentOf, iconSrc } from '../composables/useResourceIcon'
 import { loadExtensionModules } from '../composables/useDashboardLayout'
 import { useAdaptivePolling } from '../composables/useAdaptivePolling'
@@ -59,6 +60,8 @@ function onAction(e: ExtensionEntry, surface: string) {
 }
 
 /** 行点击守卫：不可用/禁用/缺依赖时给出原因提示，可打开时执行传入动作 */
+const store = useStore()
+
 function withRowGuard(e: ExtensionEntry, action: () => void) {
   if (e.invalid) {
     showToast(`「${e.name}」无法打开：${e.error ?? 'manifest 缺失或损坏'}`)
@@ -75,9 +78,30 @@ function withRowGuard(e: ExtensionEntry, action: () => void) {
   action()
 }
 
-/** 「已安装」行点击：默认打开**扩展详情**（信息 / 权限 / 打开方式 / 卸载），
- *  直接打开扩展走右侧 ▶ 按钮 */
+/**
+ * 「已安装」行点击：看详情还是直接打开，由设置决定（2026-10-03 补）。
+ *
+ * · `detail`（默认）：打开扩展详情（信息 / 权限 / 打开方式 / 卸载）
+ * · `open`：直接打开扩展，详情改走右侧的「详情」按钮
+ *
+ * ⚠️ 读的是 `store.state.config`，而它只在启动时快照一次、改设置要靠
+ *   `save_config` 回写。所以这里**不能**指望它自动刷新 —— 设置面板就在
+ *   应用内，用户改完回来点行必须立刻生效。做法是设置那一侧改完就写进
+ *   `state.config`，这里读的就是同一个响应式对象（见 ExtensionsPanel 的改法）。
+ *
+ * ⚠️ 未知值一律当 `detail`：配置是被手改过的 `app.json` 时最常见的输入。
+ *   静默当成 `open` 会让「点一下就装上了插件」变成默认行为 —— 而权限告知
+ *   恰好是点行最该给的东西。
+ */
+function rowClickOpens() {
+  return store.state.config.extension_row_click === 'open'
+}
+
 function onRowClick(e: ExtensionEntry) {
+  if (rowClickOpens()) {
+    withRowGuard(e, () => emit('open', e))
+    return
+  }
   withRowGuard(e, () => {
     settingsExt.value = e
   })
