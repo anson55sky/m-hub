@@ -22,6 +22,8 @@ function row(over: Partial<PublishedRow> = {}): PublishedRow {
     pkgSize: 7775,
     manifestJson: JSON.stringify({ id: 'local.calculator', name: '计算器', version: '0.1.6' }),
     username: 'anson55sky',
+    author: null,
+    shotsJson: null,
     ...over,
   }
 }
@@ -190,4 +192,126 @@ test('扩展按 id 排序，输出稳定（否则同一份数据两次构建字�
   // updatedAt 是时间戳，剥掉它再比字节
   const strip = (x: typeof a) => JSON.stringify({ ...x, updatedAt: '' })
   assert.equal(strip(a), strip(b), '同一份数据两次构建必须产生相同字节')
+})
+/**
+ * 作者署名：发布弹窗填的优先，manifest 里的兜底，两个都没有则不输出该字段。
+ *
+ * ⚠️ 之前 `buildRegistry` **压根没输出 author** —— 而客户端 `MarketExtension.author`
+ *   与详情页那一栏一直存在。于是市场详情页的「作者」永远是空的，而清单验签通过、
+ *   界面一切正常：这是一次「加了字段但没人填」的静默半成品。
+ */
+test('作者署名：提交填的优先，其次 manifest，再次不输出', () => {
+  const B = 'https://m-hub-server.pages.dev'
+  const mf = (extra: object) =>
+    JSON.stringify({ id: 'local.calculator', name: '计算器', version: '0.1.6', ...extra })
+
+  const fromSubmit = buildRegistry([row({ author: '张三', manifestJson: mf({ author: 'manifest 里的人' }) })], {
+    revoked: [],
+    baseUrl: B,
+  })
+  assert.equal(fromSubmit.extensions[0]!.author, '张三', '提交里填的应压过 manifest')
+
+  const fromManifest = buildRegistry([row({ author: null, manifestJson: mf({ author: 'manifest 里的人' }) })], {
+    revoked: [],
+    baseUrl: B,
+  })
+  assert.equal(fromManifest.extensions[0]!.author, 'manifest 里的人', '提交没填则回落 manifest')
+
+  const neither = buildRegistry([row({ author: '   ', manifestJson: mf({}) })], {
+    revoked: [],
+    baseUrl: B,
+  })
+  // ⚠️ 先取出来再 `in`：直接写 `neither.extensions[0]!` 在断言里会被 TS 判成
+  //   「断言的目标不是标识符」而报错（TS2776）—— 而它**明明**是。
+  const neitherEntry = neither.extensions[0]!
+  assert(
+    !('author' in neitherEntry),
+    '两处都没有时**不该**输出空字段 —— 空的署名比没有更像是出了错',
+  )
+})
+
+/**
+ * 截图：上传的优先于 manifest 里声明的；两者都没有就不输出该字段。
+ *
+ * ⚠️ 此前 `buildRegistry` 只读 `mf.screenshots` —— 而发布弹窗上传的字节
+ *   服务端收了就没了（只校验不落库）。于是「作者选了 5 张图」与服务端回的
+ *   `screenshots: 5` 都是真的，市场上却一直显示「作者未提供截图」。
+ *   这是「加了字段但没有一条路径能填上它」的静默半成品。
+ */
+test('截图：上传的排成绝对 URL，优先于 manifest 里写的地址', () => {
+  const B = 'https://m-hub-server.pages.dev'
+  const withUpload = buildRegistry(
+    [
+      row({
+        shotsJson: '[7,8]',
+        manifestJson: JSON.stringify({
+          id: 'local.calculator',
+          name: '计算器',
+          version: '0.1.6',
+          screenshots: ['https://elsewhere.example/a.png'],
+        }),
+      }),
+    ],
+    { revoked: [], baseUrl: B },
+  )
+  assert.deepEqual(
+    withUpload.extensions[0]!.screenshots,
+    [`${B}/api/v1/market/shot/7`, `${B}/api/v1/market/shot/8`],
+    '上传的截图应排成清单可直取的绝对地址，且顺序保留',
+  )
+
+  const noUpload = buildRegistry(
+    [
+      row({
+        shotsJson: null,
+        manifestJson: JSON.stringify({
+          id: 'local.calculator',
+          name: '计算器',
+          version: '0.1.6',
+          screenshots: ['https://elsewhere.example/a.png'],
+        }),
+      }),
+    ],
+    { revoked: [], baseUrl: B },
+  )
+  assert.deepEqual(
+    noUpload.extensions[0]!.screenshots,
+    ['https://elsewhere.example/a.png'],
+    '没有上传过才回落到 manifest（老扩展还有这条路径）',
+  )
+})
+
+test('⚠️ 变异：把「上传优先」换成「manifest 优先」必须变红', () => {
+  const B = 'https://m-hub-server.pages.dev'
+  const r = buildRegistry(
+    [
+      row({
+        shotsJson: '[7]',
+        manifestJson: JSON.stringify({
+          id: 'local.calculator',
+          name: '计算器',
+          version: '0.1.6',
+          screenshots: ['https://elsewhere.example/a.png'],
+        }),
+      }),
+    ],
+    { revoked: [], baseUrl: B },
+  )
+  assert.ok(
+    r.extensions[0]!.screenshots!.every((u) => u.includes('/api/v1/market/shot/')),
+    '自己托管的截图必须压过 manifest 里的外链',
+  )
+})
+
+test('截图字段缺失时整个字段不出现（空数组会被详情页当成「有 0 张图」）', () => {
+  const r = buildRegistry([row({ shotsJson: null })], {
+    revoked: [],
+    baseUrl: 'https://x.pages.dev',
+  })
+  const e = r.extensions[0]!
+  assert.equal(
+    e.screenshots,
+    undefined,
+    '客户端 serde default 已能把缺失当空数组，这里不该输出空数组',
+  )
 })

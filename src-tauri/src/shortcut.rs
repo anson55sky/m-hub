@@ -128,13 +128,7 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// 顺序固定（主窗/剪贴板/搜索/对话/捕获）：日志与测试都按这个顺序断言。
 pub fn enabled_pairs(cfg: &crate::config::AppConfig) -> Vec<(&'static str, bool)> {
-    vec![
-        ("全局快捷键", cfg.shortcut_toggle_enabled),
-        ("剪贴板快捷键", cfg.shortcut_clipboard_enabled),
-        ("搜索快捷键", cfg.shortcut_search_enabled),
-        ("AI 对话快捷键", cfg.shortcut_chat_enabled),
-        ("统一捕获快捷键", cfg.shortcut_capture_enabled),
-    ]
+    shortcut_items(cfg).into_iter().map(|(l, _, e)| (l, e)).collect()
 }
 
 /// 按开关启停某一个全局快捷键。
@@ -143,6 +137,22 @@ pub fn enabled_pairs(cfg: &crate::config::AppConfig) -> Vec<(&'static str, bool)
 /// 先反注册旧的，成功注册新的才算换；注册失败就把旧的注册回去。
 /// 否则「打开开关」失败会留下一个**既没开也没关**的中间态 ——
 /// 配置说开着、实际没注册，用户按半天没反应也看不出是哪一环坏了。
+/// 五个全局快捷键的「标签 / 热键 / 启用开关」三合一。
+///
+/// ⚠️ `enabled_pairs` 只给标签与开关，**给不出热键** —— 而冲突描述恰恰需要
+///   热键才能比对。第一版 `describe_conflict` 拿 `enabled_pairs` 的第二项当热键
+///   去比，类型直接对不上（bool vs &str）。两张表看着重复，故合并成这一张：
+///   `enabled_pairs` 改成它的薄封装，全工程只有这一处列全五个。
+pub fn shortcut_items(cfg: &crate::config::AppConfig) -> Vec<(&'static str, &str, bool)> {
+    vec![
+        ("全局快捷键", &cfg.global_shortcut, cfg.shortcut_toggle_enabled),
+        ("剪贴板快捷键", &cfg.clipboard_shortcut, cfg.shortcut_clipboard_enabled),
+        ("搜索快捷键", &cfg.search_shortcut, cfg.shortcut_search_enabled),
+        ("AI 对话快捷键", &cfg.chat_shortcut, cfg.shortcut_chat_enabled),
+        ("统一捕获快捷键", &cfg.capture_shortcut, cfg.shortcut_capture_enabled),
+    ]
+}
+
 pub fn set_enabled(app: &AppHandle, previous: &str, next: &str, enable: bool) -> Result<(), String> {
     if enable {
         if is_shortcut_registered(app, next) {
@@ -150,9 +160,26 @@ pub fn set_enabled(app: &AppHandle, previous: &str, next: &str, enable: bool) ->
             // 那条路：它会先把旧键摘掉，若紧接着注册失败就两头都没了
             return Ok(());
         }
-        register_toggle_shortcut(app, next).inspect_err(|_| {
-            let _ = register_toggle_shortcut(app, previous);
-        })
+        match register_toggle_shortcut(app, next) {
+            Ok(()) => Ok(()),
+            Err(e) if is_conflict_error(&e) => {
+                // ⚠️ macOS 上「关掉 → 立刻重开」会**误报冲突**（发布说明里那条修复）。
+                //   成因：反注册是异步的，OS 侧的系统级注册还没释放，
+                //   紧接着 register 就被回一个「HotKey already registered」。
+                //   而这个组合**完全合法**（用户只是把开关拧回去），
+                //   报「快捷键冲突」会让人以为这个键真的被别人占着，
+                //   于是去找根本不存在的「占用程序」。
+                //
+                //   修法：显式反注册一次（迫使 OS 释放）再注册。
+                //   反注册失败**不作为错误** —— 它本来就可能没注册着。
+                log::info!("[快捷键] {} 首次注册报冲突，先反注册再试一次", next);
+                let _ = unregister_toggle_shortcut(app, next);
+                register_toggle_shortcut(app, next).map_err(|e2| {
+                    describe_conflict(app, next, &format_shortcut_error(&e2))
+                })
+            }
+            Err(e) => Err(format_shortcut_error(&e)),
+        }
     } else {
         unregister_toggle_shortcut(app, previous).or_else(|e| {
             // 「本来就没注册」不是错误：关掉一个已关闭的开关应当是幂等的
@@ -170,7 +197,9 @@ pub fn set_enabled(app: &AppHandle, previous: &str, next: &str, enable: bool) ->
 /// set_*_shortcut 命令共用这一份逻辑，只是各自读写配置里自己的字段。
 pub fn rebind_shortcut(app: &AppHandle, previous: &str, next: &str) -> Result<(), String> {
     if crate::shortcut::is_shortcut_registered(app, next) {
-        return Err("快捷键冲突".into());
+        // 说清楚是「和我们自己的另一个撞了」还是「被别的软件占了」——
+        // 两者的下一步完全不同（换个键 / 去关那个软件）。
+        return Err(describe_conflict(app, next, "快捷键冲突"));
     }
     if let Err(e) = unregister_toggle_shortcut(app, previous) {
         if !is_conflict_error(&e) {
@@ -186,6 +215,32 @@ pub fn rebind_shortcut(app: &AppHandle, previous: &str, next: &str) -> Result<()
         return Err(mapped);
     }
     Ok(())
+}
+
+/// 冲突的**具体**说明（发布说明：真冲突时要说明是和哪个快捷键撞了，
+/// 还是被其它程序占用）。
+///
+/// ⚠️ 原来只有一句「快捷键冲突」，用户无从下手 —— 他既不知道撞的是自己
+///   的另一个快捷键（换个键就行），也不知道是别的软件占了（得去关那个软件），
+///   两种情况的**下一步完全不同**，而界面把它们说成了同一句话。
+///
+/// 判据：我们自己的五个快捷键都写在配置里，故可以逐一比对；
+/// **都不匹配**才归为「被其它程序占用」。
+pub fn describe_conflict(app: &AppHandle, hotkey: &str, fallback: &str) -> String {
+    let cfg = crate::config::load();
+    // ⚠️ 只拿**启用中**的来比：已关掉的快捷键不占键，拿它当冲突理由是误导
+    //   （用户会看到「和『搜索快捷键』撞了」，而去打开那个开关就又撞一次）。
+    for (label, own, enabled) in shortcut_items(&cfg) {
+        if enabled && same_hotkey(own, hotkey) {
+            return format!("{hotkey} 已经被「{label}」占用了");
+        }
+    }
+    let _ = app;
+    if is_conflict_error(fallback) {
+        format!("{hotkey} 被其它程序占用了（可在「系统设置 → 键盘」里看谁抢着它）")
+    } else {
+        fallback.to_string()
+    }
 }
 
 pub fn format_shortcut_error(err: &str) -> String {

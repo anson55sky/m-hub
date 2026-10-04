@@ -2,6 +2,7 @@
 import { computed, inject, onMounted, ref } from 'vue'
 import { ChevronDown, Copy, Eye, EyeOff, FlaskConical, ListPlus, Pencil, Plus, Trash2, X } from 'lucide-vue-next'
 import { PLATFORM_ENTRY_NAME, isPlatformModel, isTauri, tauriApi, type ChatModelConfig } from '../api/tauri'
+import { errorText } from '../utils/errorText'
 import { useStore } from '../stores/workbench'
 
 const showToast = inject<(msg: string) => void>('showToast', () => {})
@@ -162,7 +163,9 @@ async function enablePlatform() {
       platformUnavailable.value = raw.replace(/^PLATFORM_UNAVAILABLE:\s*/, '')
       showToast('平台 AI 未配置上游 Key，请改用自备供应商')
     } else {
-      showToast(`开启失败：${raw}`)
+      // ⚠️ 走 errorText 而不是 `${raw}`：发布说明那条「不再显示一串错误代码」
+      //   在这里就是 `QUOTA_EXHAUSTED:` 这种前缀顶在 toast 开头。
+      showToast(`开启失败：${errorText(e)}`)
     }
   } finally {
     platformBusy.value = false
@@ -183,7 +186,7 @@ async function disablePlatform() {
   } catch (e) {
     // 保存失败就把条目放回去，别让界面显示成「已关闭」而配置里其实还在
     platformModels.value = kept
-    showToast(`关闭失败：${e}`)
+    showToast(`关闭失败：${errorText(e)}`)
   } finally {
     platformBusy.value = false
   }
@@ -267,7 +270,7 @@ async function loadProviders(opts: { silent?: boolean } = {}) {
       }
     })
   } catch (e) {
-    showToast(`加载失败：${String(e)}`)
+    showToast(`加载失败：${errorText(e)}`)
   } finally {
     if (!opts.silent) loading.value = false
   }
@@ -460,7 +463,7 @@ async function testProvider(p: ProviderEdit) {
     await tauriApi.fetchChatProviderModels(baseUrl, p.apiKey.trim(), keyId)
     p.msg = '连通正常'
   } catch (e) {
-    p.msg = `连接失败：${String(e)}`
+    p.msg = `连接失败：${errorText(e)}`
   } finally {
     p.busy = false
   }

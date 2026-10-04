@@ -21,7 +21,7 @@ import { Router, fail, type Ctx, type Env } from './lib/http.ts'
 import { OPENAI_COMPAT } from './lib/paths.ts'
 import { devicePoll, deviceStart } from './routes/github.ts'
 import { deviceRevoke, deviceTokens, me, redeem } from './routes/me.ts'
-import { marketRegistry, marketRegistrySig } from './routes/market.ts'
+import { marketRegistry, marketRegistrySig, marketShot } from './routes/market.ts'
 import { extensionPackage } from './routes/pkg.ts'
 import { chatCompletions, models } from './routes/ai.ts'
 import { send, verify } from './routes/email.ts'
@@ -78,6 +78,8 @@ r.add('POST', '/api/v1/admin/dev-applications/:id/reject', (c) => rejectDevAppli
 r.add('GET', '/packages/:extId/:version/:file', (c) => extensionPackage(c, c.params))
 r.add('GET', '/api/v1/market/registry', (c) => marketRegistry(c))
 r.add('GET', '/api/v1/market/registry.sig', (c) => marketRegistrySig(c))
+// 截图：作者上传的展示图（2026-10-04）。按资产行 id 取，未上架的拿不到。
+r.add('GET', '/api/v1/market/shot/:id', (c) => marketShot(c, c.params.id ?? ''))
 
 r.add('POST', '/api/v1/admin/submissions/:id/publish', (c) => publishSubmission(c, c.params))
 r.add('POST', '/api/v1/admin/market/rebuild', (c) => rebuildMarket(c))

@@ -6,7 +6,7 @@ import { isTauri, tauriApi, type Resource } from '../api/tauri'
 import { categorize } from '../utils/categories'
 import { useFocusTrap } from '../composables/useFocusTrap'
 import { useStore } from '../stores/workbench'
-import { deriveFaviconUrl, normalizeWebUrl } from '../utils/web'
+import { deriveFaviconUrl, isNetworkAddress, normalizeWebUrl, webTargetHint } from '../utils/web'
 import { isMac } from '../utils/platform'
 
 const store = useStore()
@@ -56,8 +56,32 @@ useFocusTrap(toRef(props, 'visible'), cardRef, nameInputRef)
 
 const isEdit = computed(() => props.editing !== null)
 
-/** 当前大类的小类库名单（各大类一套、允许同名不同义） */
-const kindOptions = computed(() => store.subcategoriesOf(kind.value).map((s) => s.name))
+/**
+ * 当前大类的小类，摊平成**带缩进**的一行行（层级，2026-10-04）。
+ *
+ * ⚠️ 用后端给的**层级树**摊平，而不是把平表按 `/` 切开：树的构造规则只在
+ *   `repo::subcategory::tree` 一份，这里照抄就会出现「界面上缩进了、库里
+ *   挂的不是同一个父亲」这种错位。
+ *
+ * ⚠️ 值仍然是**全路径**（资源的 `category` 存的就是它），显示的是末级名 ——
+ *   同一个末级名在不同父级下可以重复，靠全路径才区分得开，所以两者都要。
+ */
+interface CatOption {
+  fullPath: string
+  label: string
+  depth: number
+}
+const kindOptions = computed<CatOption[]>(() => {
+  const out: CatOption[] = []
+  const walk = (nodes: ReturnType<typeof store.subcategoryTree>, depth: number) => {
+    for (const n of nodes) {
+      out.push({ fullPath: n.fullPath, label: n.name, depth })
+      walk(n.children, depth + 1)
+    }
+  }
+  walk(store.subcategoryTree(kind.value), 0)
+  return out
+})
 
 /** 新建/切换大类时的缺省小类 = 该大类默认小类（还没有小类库时为 null → 未归类） */
 function defaultCategoryFor(k: 'app' | 'web' | 'file'): string | null {
@@ -76,11 +100,14 @@ const targetPlaceholder = computed(() => {
   if (kind.value === 'app') {
     return isMac ? '如：/Applications/Safari.app（直接拖进来也可以）' : '如：C:\\Program Files\\...\\code.exe'
   }
-  return '如：github.com 或 https://github.com'
+  return webTargetHint()
 })
 
 const iconPlaceholder = computed(() => {
-  if (kind.value === 'web') return '留空则自动取网站图标，取不到用名称首字母'
+  if (kind.value === 'web')
+    return isNetworkAddress(normalizeWebUrl(target.value))
+      ? '网络地址没有图标，留空即可'
+      : '留空则自动取网站图标，取不到用名称首字母'
   return 'Emoji 或留空自动生成'
 })
 
@@ -262,6 +289,8 @@ const iconFetching = ref(false)
 
 async function fetchFavicon() {
   if (kind.value !== 'web' || !target.value.trim() || iconFetching.value) return
+  // 网络地址（NAS / FTP）没有 favicon，也不该去试 —— 白等一个超时
+  if (isNetworkAddress(normalizeWebUrl(target.value))) return
   iconFetching.value = true
   try {
     const url = normalizeWebUrl(target.value)
@@ -446,12 +475,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               </button>
               <button
                 v-for="c in kindOptions"
-                :key="c"
+                :key="c.fullPath"
                 class="cat-pill"
-                :class="{ active: category === c }"
-                @click="category = c"
+                :class="{ active: category === c.fullPath }"
+                :style="{ '--cat-depth': c.depth }"
+                :title="c.fullPath"
+                @click="category = c.fullPath"
               >
-                {{ c }}
+                {{ c.depth > 0 ? '·'.repeat(c.depth) + ' ' : '' }}{{ c.label }}
               </button>
             </div>
           </template>
@@ -651,4 +682,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   opacity: 0.55;
   cursor: progress;
 }
+
+/* ---- 小类层级缩进（2026-10-04） ---- */
+.cat-pill {
+  /* 每层 12px 缩进；上面用 '·' 重复只是文本提示，视觉上靠这段缩进 */
+  padding-left: calc(9px + var(--cat-depth, 0) * 12px);
+}
+
 </style>

@@ -23,6 +23,7 @@ import { canApplyDeveloper } from '../lib/developerGate.ts'
 // 2026-10-01：包体原来**只算 sha256 就丢掉**（注释说推到 GitHub Releases，
 // 那个脚本从来不存在）→ 审核通过了也发布不出去。详见 submit() 里那段注释。
 import { putBlob } from '../lib/pkgStore.ts'
+import { parseShotIds } from '../lib/shotIds.ts'
 import { listZipEntries } from '../lib/zipdir.ts'
 import { readZipEntry } from '../lib/zipread.ts'
 import { runGate } from '../lib/gate.ts'
@@ -44,6 +45,24 @@ const MAX_PACKAGE_BYTES = 64 * 1024 * 1024
  * 两者恰好取同一个数，**改一个不会自动改另一个** —— 故都在注释里点明。
  */
 const MAX_MANIFEST_BYTES = 256 * 1024
+
+// ---- 截图：按**文件头**判类型（不信扩展名、不信浏览器给的 Content-Type）----
+//
+// ⚠️ 这道校验以前没有，因为字节压根没被存下来 —— 也就没人担心它们被当图片发出去。
+//   现在要存要发了，就得补上：Content-Type 由上传方声明，`multipart` 的
+//   `File.type` 说它是 `image/png` 时字节完全可能是 HTML/JS。
+//   一张 `text/html` 被原样回给浏览器，就是一个存储型 XSS。
+const SHOT_TYPES: { ext: string; mime: string; test: (b: Uint8Array) => boolean }[] = [
+  { ext: 'png', mime: 'image/png', test: (b) => b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 },
+  { ext: 'jpg', mime: 'image/jpeg', test: (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { ext: 'webp', mime: 'image/webp', test: (b) => b.length > 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50 },
+]
+
+/** 按文件头判截图类型；认不出返回 null（**不猜**：猜错就是把任意字节当图片发出去） */
+export function sniffShot(bytes: Uint8Array): { ext: string; mime: string } | null {
+  for (const t of SHOT_TYPES) if (t.test(bytes)) return { ext: t.ext, mime: t.mime }
+  return null
+}
 
 /** 未走完流程的提交状态。必须与客户端可撤回白名单一致。 */
 const OPEN_STATUSES = ['uploaded', 'pending_review', 'gate_failed'] as const
@@ -139,6 +158,11 @@ export async function submit(ctx: Ctx) {
 
   const extId = String(form.get('ext_id') ?? '').trim()
   const version = String(form.get('version') ?? '').trim()
+  /** 作者署名（2026-10-04）：显示在市场卡片与详情页。空 = 不署名 */
+  const author = String(form.get('author') ?? '')
+    .trim()
+    // 上限 64 字：它在市场卡片上是一行，更长必然被截断，而截断的署名没人认得出
+    .slice(0, 64)
   if (!extId || !version) return fail(400, 'bad_request', '缺少 ext_id 或 version')
   if (!/^[a-z0-9][a-z0-9.-]*$/i.test(extId)) {
     return fail(400, 'bad_request', '扩展 id 格式不合法')
@@ -232,8 +256,8 @@ export async function submit(ctx: Ctx) {
   const note = gate.ok ? null : gate.problems.slice(0, 5).join('；')
 
   const ins = await ctx.env.DB.prepare(
-    `INSERT INTO submissions (user_id, ext_id, version, status, review_note, pkg_sha256, pkg_size, pkg_files)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+    `INSERT INTO submissions (user_id, ext_id, version, status, review_note, author, pkg_sha256, pkg_size, pkg_files)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
   )
     .bind(
       user.id,
@@ -241,6 +265,7 @@ export async function submit(ctx: Ctx) {
       version,
       status,
       note,
+      author,
       sha256,
       bytes.byteLength,
       pkgFiles ? JSON.stringify(pkgFiles) : null,
@@ -255,18 +280,6 @@ export async function submit(ctx: Ctx) {
     .bind(subId, pkg.name || `${extId}-${version}.xhpack`, bytes.byteLength, sha256,
          `pending/${user.id}/${extId}/${version}`)
     .run()
-
-  // 截图：同名多值必须收成数组（见上方 ⚠️）
-  // ⚠️ 必须收成**数组**：同名多值只取最后一个是 FormData 的经典坑（约定 51）。
-  // workers-types 的 `FormData.getAll` 只声明了返回 `string[]`（File 建模不全），
-  // 故这里显式取 unknown 再筛，避免断言刷类型。
-  const shots = (form.getAll('screenshots[]') as unknown[]).filter(
-    (v): v is File => v instanceof File,
-  )
-  if (shots.length > 5) return fail(400, 'bad_request', '截图最多 5 张')
-  for (const s of shots) {
-    if (s.size > 2 * 1024 * 1024) return fail(400, 'screenshot_too_large', '单张截图超过 2MB')
-  }
 
   // ⚠️ `gate` 字段**不是可选的**：客户端 `publisher.rs` 读
 //    `gate.passed` 决定显示「已提交，等待人工审核」还是「机器关卡未通过」。
@@ -283,6 +296,120 @@ const gateItems = gate.problems.map((p, i) => ({
   ok: false,
   detail: '',
 }))
+  const shots = (form.getAll('screenshots[]') as unknown[]).filter(
+    (v): v is File => v instanceof File,
+  )
+  if (shots.length > 5) return fail(400, 'bad_request', '截图最多 5 张')
+  for (const s of shots) {
+    if (s.size > 2 * 1024 * 1024) return fail(400, 'screenshot_too_large', '单张截图超过 2MB')
+  }
+
+  // 「引用上一版的截图」（2026-10-04）：沿用上一版已上传的那几张。
+  //
+  // ⚠️ 存的是**资产行 id 列表**，不是重新上传字节 —— 截图按内容寻址存在
+  //   `pkg_blobs` 里，同一张图沿用时**不占新空间、不重新上传**，
+  //   所以「界面没改就不必重新选图」这句话是真的（而不是让用户重传一遍）。
+  //
+  // ⚠️ 两头都给了就报错、不静默取其一：界面同时显示「引用了 v0.1.7」和 3 张新图，
+  //   说不上是哪几张在用 —— 这时候界面在说谎，比报错难查得多。
+  const inheritFrom = String(form.get('inherit_shots_from') ?? '').trim()
+  if (inheritFrom && shots.length) {
+    return fail(
+      400,
+      'shots_conflict',
+      '既上传了新截图又要求引用上一版，请二选一',
+    )
+  }
+  if (inheritFrom && !/^\d+\.\d+\.\d+$/.test(inheritFrom)) {
+    return fail(400, 'bad_request', '引用来源版本号必须是 x.y.z 三段纯数字')
+  }
+
+
+  // ---- 截图落库 ----
+  //
+  // ⚠️ 这是整条截图链路**第一次**真的把字节留下来。此前只校验不存，
+  //   作者选的图没有任何归宿（见 schema.sql 的 shots_json 注释）。
+  // 一行一张：资产行的 id 就是清单里的公开 URL 里的那个号。
+  const shotIds: number[] = []
+  if (shots.length) {
+    for (const [i, shot] of shots.entries()) {
+      const bytes = new Uint8Array(await shot.arrayBuffer())
+      // ⚠️ 先读字节再判类型：不能靠 `File.type`，也不能靠文件名后缀
+      const sniffed = sniffShot(bytes)
+      if (!sniffed) {
+        return fail(400, 'shot_not_image', `第 ${i + 1} 张截图不是 png/jpg/webp`)
+      }
+      const sha = await putBlob(ctx.env.DB, bytes)
+      const ext = sniffed.ext
+      const ins = await ctx.env.DB.prepare(
+        `INSERT INTO submission_assets
+           (submission_id, asset_kind, filename, size, sha256, storage_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+      )
+        .bind(
+          subId,
+          'shot',
+          `shot-${i + 1}.${ext}`,
+          bytes.byteLength,
+          sha,
+          `shots/${sha}`,
+        )
+        .run()
+      shotIds.push(Number(ins.meta.last_row_id))
+    }
+  } else if (inheritFrom) {
+    // ⚠️ 只能沿用**自己名下**同一扩展的那一版，否则就变成「猜一个 sha
+    //   就能看到别人未上架的提交」。ext_id + user_id 一起限定。
+    const src = await ctx.env.DB.prepare(
+      `SELECT id, shots_json AS shotsJson FROM submissions
+       WHERE user_id = ?1 AND ext_id = ?2 AND version = ?3`,
+    )
+      .bind(user.id, extId, inheritFrom)
+      .first<{ id: number; shotsJson: string | null }>()
+    const srcIds = parseShotIds(src?.shotsJson ?? null)
+    if (srcIds.length === 0) {
+      // 说清是「那版没有截图」而不是含糊的失败 —— 否则用户会以为功能坏了
+      return fail(
+        400,
+        'inherit_source_empty',
+        `v${inheritFrom} 没有可引用的截图，请自己选一次`,
+      )
+    }
+    for (const sid of srcIds) {
+      // 逐行复制资产记录，storage_key 与 sha 都指同一份字节（零新增存储）。
+      // ⚠️ 只复制**属于那个提交**的行（带 sub_id 限定），不能只凭 id 取 ——
+      //   否则可以用别人的资产 id 挂到自己的提交上。
+      const ins = await ctx.env.DB.prepare(
+        `INSERT INTO submission_assets
+           (submission_id, asset_kind, filename, size, sha256, storage_key)
+         SELECT ?1, asset_kind, filename, size, sha256, storage_key
+           FROM submission_assets WHERE id = ?2 AND submission_id = ?3`,
+      )
+        .bind(subId, sid, src!.id)
+        .run()
+      // 行没插进去（源资产已被删）→ 借来的清单里有空洞，明确报错
+      if (!ins.meta.changes) {
+        return fail(
+          400,
+          'inherit_source_missing',
+          `v${inheritFrom} 的截图已不存在，请自己选一次`,
+        )
+      }
+      shotIds.push(Number(ins.meta.last_row_id))
+    }
+  }
+
+  if (shotIds.length) {
+    await ctx.env.DB.prepare(`UPDATE submissions SET shots_json = ?1 WHERE id = ?2`)
+      .bind(JSON.stringify(shotIds), subId)
+      .run()
+  }
+
+  // 截图：同名多值必须收成数组（见上方 ⚠️）
+  // ⚠️ 必须收成**数组**：同名多值只取最后一个是 FormData 的经典坑（约定 51）。
+  // workers-types 的 `FormData.getAll` 只声明了返回 `string[]`（File 建模不全），
+  // 故这里显式取 unknown 再筛，避免断言刷类型。
+
 return json({
   ok: true,
   id: subId,
@@ -291,7 +418,7 @@ return json({
   review_note: note,
   // ↓ 通过时也要给 items（可以为空数组）——前端 v-for 依赖它存在
   gate: { passed: gate.ok, items: gateItems },
-  screenshots: shots.length,
+  screenshots: shotIds.length,
 })
 }
 

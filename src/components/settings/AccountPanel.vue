@@ -6,6 +6,7 @@
 //
 // 从 SettingsView.vue 拆出（见该文件顶部说明）：设置页按大类按需加载，
 // 首次打开只需外壳 + 当前大类的代码，切大类时才加载对应面板。
+import { errorText } from '../../utils/errorText'
 import { inject, onBeforeUnmount, onMounted, ref } from 'vue';
 import { Copy } from 'lucide-vue-next';
 import { isTauri, tauriApi } from '../../api/tauri';
@@ -639,7 +640,9 @@ async function doRedeem() {
     redeemInput.value = ''
     showToast('兑换成功，权益已到账')
   } catch (e) {
-    showToast(`兑换失败：${e}`)
+    // 发布说明那条「不再显示一串错误代码」：`${e}` 会把
+    // `INVALID_CODE: 兑换码无效` 原样顶在 toast 上
+    showToast(`兑换失败：${errorText(e)}`)
   } finally {
     accountBusy.value = false
   }

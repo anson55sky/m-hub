@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorText } from '../utils/errorText'
 import NewDevExtensionDialog from './NewDevExtensionDialog.vue'
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
@@ -193,7 +194,7 @@ async function openDir(e: ExtensionEntry) {
   try {
     await tauriApi.openExtensionDir(e.id)
   } catch (err) {
-    showToast(`打开目录失败：${String(err)}`)
+    showToast(`打开目录失败：${errorText(err)}`)
   }
 }
 
@@ -236,7 +237,7 @@ async function load() {
     // 扩展列表变化（装/卸/更新）时通知宿主刷新侧栏固定扩展，让已卸载的图标立即消失
     emit('changed')
   } catch (e) {
-    showToast(`加载扩展列表失败：${String(e)}`)
+    showToast(`加载扩展列表失败：${errorText(e)}`)
   } finally {
     loading.value = false
   }
@@ -400,7 +401,7 @@ async function pickDevDir() {
     showToast('已添加到「我的扩展」并立即加载，改代码即自动重载')
     await load()
   } catch (e) {
-    showToast(String(e))
+    showToast(errorText(e))
   } finally {
     devBusy.value = false
   }
@@ -413,7 +414,7 @@ async function removeDevDir(path: string) {
     showToast('已从「我的扩展」移除')
     await load()
   } catch (e) {
-    showToast(String(e))
+    showToast(errorText(e))
   }
 }
 
@@ -434,7 +435,7 @@ async function uninstallConflicting(d: DevExtensionInfo) {
     await load()
     devMode.value = await tauriApi.getDevModeStatus()
   } catch (e) {
-    showToast(`卸载失败：${String(e)}`)
+    showToast(`卸载失败：${errorText(e)}`)
   } finally {
     devBusy.value = false
   }
@@ -521,7 +522,7 @@ async function loadMarket() {
     marketStatus.value = status
     appVersion.value = info.version
   } catch (e) {
-    showToast(`加载市场失败：${String(e)}`)
+    showToast(`加载市场失败：${errorText(e)}`)
   } finally {
     marketLoading.value = false
   }
@@ -587,7 +588,7 @@ async function installFromMarket(m: MarketExtension) {
     showToast(`已安装「${id}」`)
     await load()
   } catch (e) {
-    showToast(`安装失败：${String(e)}`)
+    showToast(`安装失败：${errorText(e)}`)
   } finally {
     unlistenProgress?.()
     unlistenProgress = null
@@ -634,7 +635,7 @@ async function updateFromMarket(m: MarketExtension) {
     showToast(`已更新「${id}」至 v${m.version}`)
     await load()
   } catch (e) {
-    showToast(`更新失败：${String(e)}`)
+    showToast(`更新失败：${errorText(e)}`)
   } finally {
     unlistenUpdate?.()
     unlistenUpdate = null
@@ -712,7 +713,7 @@ async function onLocalFileInstall() {
     showToast(`已安装「${id}」`)
     await load()
   } catch (e) {
-    showToast(`安装失败：${String(e)}`)
+    showToast(`安装失败：${errorText(e)}`)
   }
 }
 
@@ -1187,8 +1188,12 @@ function onMore(e: ExtensionEntry) {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
-  padding: var(--space-5);
+  /* ⚠️ 留白收紧一档（发布说明：「扩展页面的留白更紧凑，内容更满」）。
+     改的是**外层 padding 与两条竖向 gap**，不是行内 padding —— 行内 padding
+     决定的是「每行有多高」，把它一起压会让行挤成一坨、图标贴边。
+     外层留白是纯浪费：一屏本来就能多列出一行扩展。 */
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) var(--space-3);
   overflow: hidden;
 }
 .ec-header {
@@ -1287,7 +1292,8 @@ function onMore(e: ExtensionEntry) {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  /* 行间距 8→6：一屏能多列出约一行，且仍看得出是「一列一列的条目」而不是一片 */
+  gap: 6px;
   padding: 2px;
 }
 .ec-row {

@@ -34,6 +34,25 @@ pub struct ResourceSubcategory {
     pub is_default: bool,
 }
 
+/// 速达小类树的嵌套节点（ 的产物）。
+///
+/// ⚠️  是**末级**名（界面上显示的那个）， 是全路径
+///   （判定、级联、资源挂载都用它）。两者必须同时给：只给 name 的话
+///   前端拼不出父子关系，只给 full_path 的话界面上会出现「开发/前端」这种
+///   没人想看的长串。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubcategoryNode {
+    pub id: i64,
+    /// 末级名（显示用）
+    pub name: String,
+    /// 全路径（判定用）
+    pub full_path: String,
+    /// 层级，顶层为 0
+    pub depth: usize,
+    pub is_default: bool,
+    pub children: Vec<SubcategoryNode>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Note {
     pub id: i64,

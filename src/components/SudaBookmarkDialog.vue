@@ -142,8 +142,11 @@ const picked = computed(() => {
         out.push({
           name: l.node.name,
           url: l.node.url,
-          // 只取末级：用户想看到的是「工作」而不是「书签栏/工作」
-          category: l.category.split('/').pop() ?? l.category,
+          // ⚠️ 给**全路径**（层级，2026-10-04）：导入端要按它逐段建小类，
+          //   只给末级的话「开发/前端」与「生活/前端」会混成一个「前端」，
+          //   发布说明里「文件夹的层级会原样保留」就落空了。
+          //   显示那侧（树里的这一行）会自己取末级名，用户看到的仍是「前端」。
+          category: l.category,
         })
       }
     }
@@ -151,7 +154,7 @@ const picked = computed(() => {
   return out
 })
 
-/** 同一次导入里「同 URL + 同末级分类」只留一条 */
+/** 同一次导入里「同 URL + 同层级」只留一条 */
 const uniquePicked = computed(() => {
   const seen = new Set<string>()
   const out: { name: string; url: string; category: string }[] = []

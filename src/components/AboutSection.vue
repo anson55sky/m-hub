@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorText } from '../utils/errorText'
 import { inject, onMounted, ref } from 'vue'
 import { ExternalLink, RefreshCw } from 'lucide-vue-next'
 import { isTauri, tauriApi } from '../api/tauri'
@@ -43,7 +44,7 @@ async function onCheckUpdate() {
       showToast(`已是最新版本（v${info.current}）`)
     }
   } catch (e) {
-    showToast(`检查更新失败：${String(e)}`)
+    showToast(`检查更新失败：${errorText(e)}`)
   } finally {
     checking.value = false
   }

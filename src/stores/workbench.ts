@@ -1,3 +1,5 @@
+import { subcategoryContains as subcategoryContainsPath } from '../utils/subcategoryPath'
+import { isNetworkAddress } from '../utils/web'
 import { reactive, readonly } from 'vue'
 import { normalizeNoteEditorMode } from '../utils/noteEditorMode'
 import { DEFAULT_SHORTCUTS } from '../utils/platform'
@@ -14,6 +16,7 @@ import {
   type Quote,
   type Resource,
   type ResourceSubcategory,
+  type SubcategoryNode,
   type SudaCustomModuleConfig,
   type Snippet,
   type SearchResult,
@@ -54,6 +57,14 @@ interface StoreState {
   todoTagLinks: TodoTagLink[]
   /** 速达小类定义（ADR 0012：各大类一套、单归属；category 为 null = 未归类） */
   resourceSubcategories: ResourceSubcategory[]
+  /**
+   * 各大类的**层级**小类树（2026-10-04）。
+   *
+   * ⚠️ 与 `resourceSubcategories` 并存而不是取代它：后者是「有哪些小类」的平表，
+   *   前者是「怎么排」的树。真源仍是 Rust 侧，两张都由同一次刷新拉回，
+   *   任何一张过期都会表现为「树里有的分类筛不出来」——所以别单独改其中一张。
+   */
+  subcategoryTrees: Record<'app' | 'web' | 'file', SubcategoryNode[]>
   config: AppConfig
   systemInfo: SystemInfo | null
   online: boolean
@@ -74,6 +85,7 @@ const state = reactive<StoreState>({
   todoTags: [],
   todoTagLinks: [],
   resourceSubcategories: [],
+  subcategoryTrees: { app: [], web: [], file: [] },
   config: {
     theme_mode: 'light',
     theme_preset: 'indigo',
@@ -384,6 +396,15 @@ export function useStore() {
   async function launchResource(id: number) {
     const r = state.resources.find((x) => x.id === id)
     if (r && r.kind === 'web' && isTauri()) {
+      // ⚠️ **网络地址（NAS / FTP / …）只能交给系统**（2026-10-04）：
+      //   应用内浏览器只认 http/https，喂给它 smb:// 得到的是一个空白页 ——
+      //   症状是「点开什么都没有」，而用户存的时候看不出这个地址不是网址。
+      //   故这里在分流**之前**先拦一次，别让 `suda_web_open_mode` 决定它的去向。
+      if (isNetworkAddress(r.target)) {
+        await tauriApi.openExternal(r.target)
+        r.last_launched_at = new Date().toISOString()
+        return
+      }
       if (state.config.suda_web_open_mode === 'window') {
         await tauriApi.sudaBrowserOpen(id)
         r.last_launched_at = new Date().toISOString()
@@ -418,11 +439,38 @@ export function useStore() {
   // ---- 速达小类（ADR 0012）----
   async function refreshSubcategories() {
     if (!isTauri()) return
-    state.resourceSubcategories = await tauriApi.listSubcategories()
+    // ⚠️ 树与平表**一起**拉：只拉一张就会出现「树里有的分类筛不出来」
+    const [flat, app, web, file] = await Promise.all([
+      tauriApi.listSubcategories(),
+      tauriApi.listSubcategoryTree('app'),
+      tauriApi.listSubcategoryTree('web'),
+      tauriApi.listSubcategoryTree('file'),
+    ])
+    state.resourceSubcategories = flat
+    state.subcategoryTrees = { app, web, file }
   }
 
   function subcategoriesOf(kind: 'app' | 'web' | 'file'): ResourceSubcategory[] {
     return state.resourceSubcategories.filter((s) => s.kind === kind)
+  }
+
+  /** 某个大类的小类树（层级，2026-10-04） */
+  function subcategoryTree(kind: 'app' | 'web' | 'file'): SubcategoryNode[] {
+    return state.subcategoryTrees[kind] ?? []
+  }
+
+  /**
+   * 资源是否落在某个小类之下——**含其所有后代**（层级，2026-10-04）。
+   *
+   * ⚠️ 这是层级带来的**唯一语义变化**：以前筛「开发」就是 `category === '开发'`，
+   *   资源挂在「开发/前端」时会从筛选结果里消失。现在点「开发」看到的是
+   *   「开发下所有网页」，与发布说明一致（「选中某一层就展示它下面所有网页」）。
+   *
+   * ⚠️ 实现放在 `utils/subcategoryPath`：那里有对应的用例，且与 Rust 的
+   *   `subcategory::is_within` 一一对应 —— 判定散在 store 里就没法单独测。
+   */
+  function subcategoryContains(category: string | null, filter: string): boolean {
+    return subcategoryContainsPath(category, filter)
   }
 
   /** 大类的默认小类名：is_default 优先，否则排序最前；该大类还没有小类时 null（未归类） */
@@ -438,31 +486,112 @@ export function useStore() {
     return sub
   }
 
-  /** 改名级联：后端单事务同步资源条目，本地按同口径推演 */
+  /**
+   * 在某个小类下新建一级（层级，2026-10-04）。
+   *
+   * ⚠️ 建完**重拉整份小类数据**：新行的 `name` 是「父路径/名字」，
+   *   本地拼的话路径规则就有两份了。与其猜，不如让 Rust 那份算完再整体拿回来。
+   */
+  async function addSubcategoryChild(
+    kind: 'app' | 'web' | 'file',
+    name: string,
+    parentId?: number,
+  ) {
+    const made = await tauriApi.createSubcategoryChild(kind, name, parentId)
+    // 书签导入时逐段建层级，每建一段都重拉整份会变成 O(n) 次全量往返。
+    // 这里就地插入（name 是后端算好的全路径），末尾由调用方按需统一重拉。
+    state.resourceSubcategories.push(made)
+    return made
+  }
+
+  /** 改名级联：后端单事务同步资源条目**与其全部后代**（层级，2026-10-04） */
   async function editSubcategory(id: number, name: string) {
     await tauriApi.renameSubcategory(id, name)
     const sub = state.resourceSubcategories.find((s) => s.id === id)
     if (!sub) return
-    const old = sub.name
-    sub.name = name
+    const oldPath = sub.name
+    // ⚠️ 层级下改名会牵动整棵子树，且新路径由 Rust 算（`reparent`）——
+    //   前端复刻这个映射一旦和 repo 不一致，界面上的分类就与库里对不上。
+    //   所以改完直接重拉：改名不是高频操作，多这一次往返换口径唯一，划算。
+    await refreshSubcategories()
+    // 用后端给的新路径推演资源改挂（新路径由 Rust 的 reparent 算出）
+    const renamed = state.resourceSubcategories.find((x) => x.id === id)
+    if (!renamed) return
+    const newPath = renamed.name
     for (const r of state.resources) {
-      if (r.kind === sub.kind && r.category === old) r.category = name
+      if (r.kind !== sub.kind) continue
+      if (r.category === oldPath) r.category = newPath
+      else if (
+        r.category &&
+        r.category.length > oldPath.length &&
+        r.category.startsWith(oldPath) &&
+        r.category.charAt(oldPath.length) === '/'
+      ) {
+        r.category = newPath + r.category.slice(oldPath.length)
+      }
     }
   }
 
   /** 删除小类：条目改挂默认小类（删默认时按排序最前晋升，与后端口径一致）；删空回未归类 */
-  async function removeSubcategory(id: number) {
+  /**
+   * 本地侧的「小类已删」收尾：从列表移除，并把挂在它下面的条目**改挂到默认小类**。
+   *
+   * ⚠️ 改挂不是可选项（ADR 0012）：后端删除时会在单事务里把条目改挂默认，
+   *   前端不做同样的事，界面上就会出现「资源指向一个已经不存在的分类」——
+   *   而筛选是按 `category` 名匹配的，于是这些条目**从所有视图里消失**。
+   *
+   * ⚠️ 必须在**列表里移除之前**算好 fallback：那之后就找不到被删的是哪个了。
+   */
+  function dropSubcategoryLocal(id: number) {
     const sub = state.resourceSubcategories.find((s) => s.id === id)
-    await tauriApi.deleteSubcategory(id)
-    state.resourceSubcategories = state.resourceSubcategories.filter((s) => s.id !== id)
     if (!sub) return
     const subs = subcategoriesOf(sub.kind)
     const fallback = subs.find((s) => s.is_default) ?? subs[0] ?? null
+    const within = (c: string | null) =>
+      c === sub.name ||
+      (!!c && c.length > sub.name.length && c.startsWith(sub.name) && c.charAt(sub.name.length) === '/')
     for (const r of state.resources) {
-      if (r.kind === sub.kind && r.category === sub.name) {
+      // ⚠️ **含子树**（层级，2026-10-04）：后端 delete 连子树一起删，
+      //   前端只改挂自己那条的话，子级里的资源就会指向一个已经不存在的小类 ——
+      //   而筛选按名匹配，于是它们从所有视图里消失。
+      if (r.kind === sub.kind && within(r.category)) {
         r.category = fallback ? fallback.name : null
       }
     }
+    state.resourceSubcategories = state.resourceSubcategories.filter((s) => s.id !== id)
+  }
+
+  async function removeSubcategory(id: number) {
+    await tauriApi.deleteSubcategory(id)
+    dropSubcategoryLocal(id)
+  }
+
+  /**
+   * 批量删除小类（2026-10-04）。
+   *
+   * ⚠️ **逐条串行、逐条回报**：删除会把条目改挂到默认小类，后端是单事务的。
+   *   并发删时中间某条失败，已删的无法回滚，而调用方只收到一个异常 ——
+   *   界面与库就不一致了。故与速达批量删除同款处理。
+   *
+   * ⚠️ 失败的那些**不静默**：小类删不掉（正被什么引用）时留在列表里，
+   *   用户能看到是哪几个没删掉。
+   */
+  async function removeSubcategories(
+    ids: number[],
+  ): Promise<{ ok: number[]; failed: { id: number; error: string }[] }> {
+    const ok: number[] = []
+    const failed: { id: number; error: string }[] = []
+    for (const id of ids) {
+      try {
+        await tauriApi.deleteSubcategory(id)
+        // ⚠️ 必须走共用收尾：漏掉「条目改挂默认」会让这些条目从所有视图消失
+        dropSubcategoryLocal(id)
+        ok.push(id)
+      } catch (e) {
+        failed.push({ id, error: String(e) })
+      }
+    }
+    return { ok, failed }
   }
 
   async function reorderSubcategories(kind: 'app' | 'web' | 'file', ids: number[]) {
@@ -1685,10 +1814,14 @@ export function useStore() {
     openResourceInBrowser,
     refreshSubcategories,
     subcategoriesOf,
+    subcategoryTree,
+    subcategoryContains,
     defaultSubcategoryName,
     addSubcategory,
+    addSubcategoryChild,
     editSubcategory,
     removeSubcategory,
+    removeSubcategories,
     reorderSubcategories,
     setDefaultSubcategory,
     setSudaWebOpenMode,

@@ -27,6 +27,7 @@
 // Node 22 的 WebCrypto **还没有** Ed25519（Node 24 才加），所以单测覆盖不了
 // 它，别假装能覆盖。
 import type { Ctx } from './http.ts'
+import { parseShotIds } from './shotIds.ts'
 
 export interface RegistryEntry {
   id: string
@@ -34,6 +35,8 @@ export interface RegistryEntry {
   version: string
   description?: string
   homepage?: string
+  /** 作者署名（发布弹窗填的，或 manifest 里的） */
+  author?: string
   permissions?: string[]
   screenshots?: string[]
   downloadUrl: string
@@ -58,6 +61,10 @@ export interface PublishedRow {
   pkgSize: number | null
   manifestJson: string | null
   username: string | null
+  /** 作者署名（2026-10-04）。来自发布弹窗，优先于 manifest 里的 author */
+  author: string | null
+  /** 作者在发布弹窗上传的截图（资产行 id 数组的 JSON），2026-10-04 */
+  shotsJson: string | null
 }
 
 // ---------------------------------------------------------------- 纯逻辑
@@ -140,8 +147,25 @@ export function buildRegistry(
     if (home) entry.homepage = home
     const perms = strArray(mf.permissions)
     if (perms) entry.permissions = perms
-    const shots = strArray(mf.screenshots)
+    // 截图：**上传的优先于 manifest 里声明的**。
+    //
+    // ⚠️ 此前这里只读 `mf.screenshots` —— 而 manifest 里那个字段是作者手写的
+    //   URL 数组，从发布弹窗选图选出来的字节**压根没进过清单**（服务端收了
+    //   就丢）。于是作者精心选了 5 张图，市场上仍然显示「作者未提供截图」。
+    //
+    //   回落顺序也是刻意的：上传的字节由我们自己判过文件头、存在自己的库里，
+    //   manifest 里写的地址可能指向已经死掉的外链 —— 前者优先。
+    const uploaded = parseShotIds(r.shotsJson).map(
+      (sid) => `${opts.baseUrl}/api/v1/market/shot/${sid}`,
+    )
+    const shots = uploaded.length ? uploaded : strArray(mf.screenshots)
     if (shots) entry.screenshots = shots
+    // 作者署名：发布弹窗填的优先（那是作者**这次**署名给人看的），
+    // 没填则回落到 manifest 里的 `author`（老扩展也有）。
+    // ⚠️ 之前压根没输出 author —— 客户端 `MarketExtension.author` 与详情页那一栏
+    //   是**一直存在**的，只是运行期清单里永远没有它，于是那一栏永远不显示。
+    const author = (r.author ?? '').trim() || str(mf.author)
+    if (author) entry.author = author
     if (r.username) entry.publisherId = r.username
     // 只追加字段、不抬 schemaVersion（约定 46）：老客户端对未知字段宽容，
     // 抬版本号会让所有老客户端的市场直接变空
@@ -234,7 +258,7 @@ export function publicBase(ctx: Ctx): string {
 export async function rebuildRegistry(ctx: Ctx): Promise<{ extensions: number; bytes: number }> {
   const rows = await ctx.env.DB.prepare(
     `SELECT s.ext_id AS extId, s.version, s.pkg_sha256 AS pkgSha256, s.pkg_size AS pkgSize,
-            s.manifest_json AS manifestJson, u.username
+            s.manifest_json AS manifestJson, s.author, u.username
        FROM submissions s
        LEFT JOIN users u ON u.id = s.user_id
       WHERE s.status = 'published'`,

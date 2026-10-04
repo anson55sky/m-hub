@@ -1040,6 +1040,8 @@ pub fn run() {
             suda_browser::suda_panel_reload,
             commands::list_subcategories,
             commands::create_subcategory,
+            commands::create_subcategory_child,
+            commands::list_subcategory_tree,
             commands::rename_subcategory,
             commands::delete_subcategory,
             commands::reorder_subcategories,

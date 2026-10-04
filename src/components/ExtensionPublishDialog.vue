@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorText as humanError } from '../utils/errorText'
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
 import { ImagePlus, Info, X } from 'lucide-vue-next'
@@ -352,6 +353,73 @@ async function runPrecheck() {
 // ---- 截图（展示物料）：让用户一眼看出扩展是干嘛的 ----
 // 数量在这里限制（最多 5 张）；**大小与真实类型由服务端把关**（按文件头判，不信扩展名）。
 const MAX_SHOTS = 5
+// ---- 作者署名与「引用上一版」（2026-10-04）----
+/** 作者署名：显示在市场卡片与详情页。空 = 服务端回落到 manifest 里的 author */
+const author = ref('')
+/** 正在沿用的版本号（非空 = 这一版不传新截图，沿用它的） */
+const inheritedFrom = ref('')
+const inheriting = ref(false)
+
+/**
+ * 一键沿用上一版已上传的截图。
+ *
+ * ⚠️ 这里只置一个**版本号**，不下载也不上传字节：服务端按「复制资产行」处理，
+ *   同一张图不占新空间。所以「界面没改就不必重新选图」是真的省事，不是省带宽
+ *   的表象。
+ *
+ * ⚠️ 沿用会**清掉**已选的图，并把它们从预览里移除——两套来源同时显示的话，
+ *   用户看到的顺序与实际入库的顺序会不一致（沿用的是已入库的图，不是新选的）。
+ */
+function inheritShots() {
+  if (inheriting.value || screenshots.value.length >= MAX_SHOTS) return
+  const src = latestPublishedVersion.value
+  if (!src) {
+    showToast('没有已上架的版本可以引用')
+    return
+  }
+  inheriting.value = true
+  try {
+    // ⚠️ 不预先查「那一版到底有没有截图」——那要新增一条接口，而服务端在
+    //   提交时就会用 `inherit_source_empty` 明确回「v0.1.7 没有可引用的截图」。
+    //   提前查只是把同一个答案换到更早说，还得为它多写一条接口与一份鉴权。
+    screenshots.value = []
+    shotPreviews.value = {}
+    inheritedFrom.value = src.version
+  } finally {
+    inheriting.value = false
+  }
+}
+
+function cancelInherit() {
+  inheritedFrom.value = ''
+  screenshots.value = []
+  shotPreviews.value = {}
+}
+
+/** 最近一个已上架的提交（引用来源）；没有就 undefined */
+const latestPublishedVersion = computed(() => {
+  const extId = props.extension?.id
+  if (!extId) return undefined
+  // ⚠️ 按版本号取最大，不按数组顺序：`/dev/submissions` 是按时间倒序的，
+  //   而「上一版」说的是**版本**，不是「最近那条」。作者连撤回再重发的话，
+  //   两条记录会同时在列，按时间取会挑到一个更老的版本。
+  let best: { version: string; submissionId: number } | undefined
+  for (const r of submissions.value) {
+    if (r.extId !== extId || r.status !== 'published') continue
+    const p = parseXyz(r.version)
+    if (!p) continue
+    if (!best) {
+      best = { version: r.version, submissionId: r.id }
+      continue
+    }
+    const b = parseXyz(best.version)
+    if (b && (p[0] > b[0] || (p[0] === b[0] && p[1] > b[1]) || (p[0] === b[0] && p[1] === b[1] && p[2] > b[2]))) {
+      best = { version: r.version, submissionId: r.id }
+    }
+  }
+  return best
+})
+
 const screenshots = ref<string[]>([])
 /** path → data URL（作者选的图不在资产白名单目录，只能读成 base64 预览） */
 const shotPreviews = ref<Record<string, string>>({})
@@ -366,6 +434,14 @@ async function pickScreenshots() {
     })
     const paths = Array.isArray(picked) ? picked : typeof picked === 'string' ? [picked] : []
     if (!paths.length) return
+    // ⚠️ 手动选图 = **放弃「沿用上一版」**：两头都给服务端会回 400（说不上以哪套为准），
+    //   而静默优先某一边的话，界面上「已沿用 v0.1.7」这句话就是在撒谎。
+    //   沿用态下 screenshots 里装的是「占位路径」而非真实文件，故连预览一起清。
+    if (inheritedFrom.value) {
+      inheritedFrom.value = ''
+      screenshots.value = []
+      shotPreviews.value = {}
+    }
     const room = MAX_SHOTS - screenshots.value.length
     if (room <= 0) {
       showToast(`最多 ${MAX_SHOTS} 张截图`)
@@ -414,6 +490,8 @@ async function submit() {
       minAppVersion.value.trim(),
       homepage.value.trim(),
       screenshots.value,
+      author.value,
+      inheritedFrom.value || undefined,
       newVersion.value.trim() || undefined,
     )
     quota.value = result.value.quota ?? quota.value
@@ -423,9 +501,12 @@ async function submit() {
     const next = suggestNextVersion(result.value.version)
     if (next) newVersion.value = next
     // 提交后刷新：新记录要立刻出现在列表里（它现在也是一条「待处理」）
+    // 提交成功后沿用态即失效：这一版的截图已经入库，再点「引用上一版」
+    // 也不该继续沿用**刚刚提交的这一版**（它就是最新版，而「上一版」是更早的）
+    inheritedFrom.value = ''
     await loadAllSubmissions()
   } catch (e) {
-    errorText.value = String(e)
+    errorText.value = humanError(e)
   } finally {
     submitting.value = false
   }
@@ -437,7 +518,7 @@ async function withdraw(row: DevSubmissionRow) {
     // 撤回后刷新列表与配额：按钮的置灰状态要立刻跟着放开
     await loadAllSubmissions()
   } catch (e) {
-    errorText.value = String(e)
+    errorText.value = humanError(e)
   }
 }
 
@@ -469,7 +550,7 @@ async function toggleDetail(row: DevSubmissionRow) {
       ? [{ id: `note-${row.id}`, label: note, ok: false, detail: '' }]
       : []
   } catch (e) {
-    errorText.value = String(e)
+    errorText.value = humanError(e)
   } finally {
     detailLoading.value = false
   }
@@ -583,10 +664,44 @@ onBeforeUnmount(() => {
               <span>项目主页</span>
               <input v-model="homepage" placeholder="https://…" />
             </label>
+            <label class="pub-field pub-field-sm">
+              <span>作者署名</span>
+              <input v-model="author" maxlength="64" placeholder="留空则用 manifest 里的 author" />
+            </label>
           </div>
 
           <div class="pub-field">
-            <span>截图（可选，最多 {{ MAX_SHOTS }} 张 · 单张 ≤ 2MB）</span>
+            <div class="pub-shots-head">
+              <span>截图（可选，最多 {{ MAX_SHOTS }} 张 · 单张 ≤ 2MB）</span>
+              <!-- ⚠️ 「引用上一版」只发一个**版本号**，不发字节：截图存在服务端，
+                   作者本机并没有那些文件；服务端按「复制资产行」处理，
+                   同一张图不重传也不占新空间。 -->
+              <button
+                v-if="!inheritedFrom"
+                class="ghost-btn sm"
+                type="button"
+                :disabled="!latestPublishedVersion || screenshots.length >= MAX_SHOTS"
+                :title="
+                  latestPublishedVersion
+                    ? screenshots.length
+                      ? '把已选截图清掉，改用 v' + latestPublishedVersion.version + ' 那几张'
+                      : '沿用 v' + latestPublishedVersion.version + ' 发布时的截图'
+                    : '还没有已上架的版本，没有可引用的截图'
+                "
+                @click="inheritShots"
+              >
+                {{ inheriting ? '引用中…' : '引用上一版的截图' }}
+              </button>
+              <button v-else class="ghost-btn sm" type="button" @click="cancelInherit">
+                取消沿用，自己选
+              </button>
+            </div>
+            <!-- ⚠️ 不写张数：客户端没有那条记录的图片清单（多一次接口只为
+                 显示一个数字不值），而「已沿用 v0.1.7」这句话本身是真的。
+                 张数写错就是又一次「界面说了一句与事实相反的话」。 -->
+            <p v-if="inheritedFrom" class="pub-hint pub-inherit-note">
+              已沿用 v{{ inheritedFrom }} 发布的截图（界面没改就不必重选）
+            </p>
             <div class="pub-shots">
               <div v-for="p in screenshots" :key="p" class="pub-shot">
                 <img v-if="shotPreviews[p]" :src="shotPreviews[p]" :alt="p" />
@@ -1314,5 +1429,22 @@ onBeforeUnmount(() => {
   background: var(--brand-50);
   box-shadow: inset 0 0 0 1px var(--brand-500);
 }
+/* ---- 截图区：标题行 + 沿用提示（2026-10-04） ---- */
+.pub-shots-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.pub-shots-head > span {
+  color: var(--text-2);
+  font-size: 12px;
+}
+.pub-inherit-note {
+  margin: 0 0 6px;
+  color: var(--brand-600);
+  font-size: 12px;
+}
+
 </style>
 

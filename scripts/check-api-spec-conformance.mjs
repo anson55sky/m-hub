@@ -357,6 +357,13 @@ const SERVER_SHAPED_PREFIXES = [
     prefix: '/packages/',
     why: '扩展包分发：地址来自已签名清单里的 downloadUrl，客户端只取该值、不拼路径。',
   },
+  {
+    // 截图与扩展包同一性质：**地址由已签名清单给出**（buildRegistry 按资产行 id
+    // 拼成 `${baseUrl}/api/v1/market/shot/<id>`），客户端只在详情页把它塞进
+    // `<img src>`，不自己拼这个路径。所以它也属于「客户端不该硬编码」。
+    prefix: '/api/v1/market/shot/',
+    why: '截图分发：地址同样来自已签名清单里的 screenshots[]，客户端只取该值。',
+  },
 ]
 
 for (const r of registered) {

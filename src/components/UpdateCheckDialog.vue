@@ -1,4 +1,15 @@
 <script setup lang="ts">
+// 版本说明的结构化解析（2026-10-04）。
+//
+// ⚠️ 原来是把整段 notes 当**纯文本**塞进 `white-space: pre-wrap` 的容器，
+//   于是 `## 新增` / `- 条目` / `**重点**` 的标记原样显示 —— 标题、列表、
+//   「重点」全都不分明。改成按行拆块 + Vue 模板渲染。
+// ⚠️ 全程**没有 v-html**：notes 来自远端更新清单，是不可信输入。
+const noteBlocks = computed(() => parseNotes(info.value?.notes || ''))
+const hasNotes = computed(() => noteBlocks.value.length > 0)
+
+import { computed } from 'vue'
+import { parseInline, parseNotes } from '../utils/notesParse'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Download, RotateCcw, X } from 'lucide-vue-next'
@@ -133,7 +144,37 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()))
               <span v-if="info?.portable" class="ud-portable">便携版</span>
               <span v-if="info?.size" class="ud-size">{{ fmtMB(info.size) }}</span>
             </div>
-            <div class="ud-notes">{{ info?.notes || '暂无更新说明' }}</div>
+            <div class="ud-notes">
+              <!-- 结构化渲染（标题/列表/加粗），不再是一坨纯文本 -->
+              <template v-if="hasNotes">
+                <template v-for="(b, i) in noteBlocks" :key="i">
+                  <p v-if="b.kind === 'h'" class="ud-n-h" :class="`is-l${b.level}`">
+                    <template v-for="(seg, j) in parseInline(b.text)" :key="j">
+                      <strong v-if="seg.bold">{{ seg.text }}</strong
+                      ><template v-else>{{ seg.text }}</template>
+                    </template>
+                  </p>
+                  <p
+                    v-else-if="b.kind === 'li'"
+                    class="ud-n-li"
+                    :class="`is-l${b.level}`"
+                  >
+                    <span class="ud-n-bullet" aria-hidden="true">{{ b.level > 0 ? '◦' : '·' }}</span>
+                    <template v-for="(seg, j) in parseInline(b.text)" :key="j">
+                      <strong v-if="seg.bold">{{ seg.text }}</strong
+                      ><template v-else>{{ seg.text }}</template>
+                    </template>
+                  </p>
+                  <p v-else class="ud-n-p">
+                    <template v-for="(seg, j) in parseInline(b.text)" :key="j">
+                      <strong v-if="seg.bold">{{ seg.text }}</strong
+                      ><template v-else>{{ seg.text }}</template>
+                    </template>
+                  </p>
+                </template>
+              </template>
+              <p v-else class="ud-n-p">暂无更新说明</p>
+            </div>
             <div v-if="error" class="ud-error">{{ error }}</div>
             <footer class="ud-footer">
               <button class="ghost-btn" type="button" @click="onSkipVersion">跳过此版本</button>
@@ -237,7 +278,9 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()))
   font-size: 0.8125rem;
   line-height: 1.7;
   color: var(--text-2);
-  white-space: pre-wrap;
+  /* 结构化渲染后不再需要 pre-wrap —— 换行由块结构决定；
+     留着它会把块之间的 margin 也算进空白，视觉上多出一截 */
+  white-space: normal;
   word-break: break-word;
   /* 完整展示版本说明：空间不够时区域内上下滚动，不截断文字 */
   max-height: min(44vh, 420px);
@@ -246,7 +289,54 @@ onBeforeUnmount(() => unlisteners.forEach((u) => u()))
   background: var(--frost-surface);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
-  margin-bottom: 12px;
+}
+/* 标题：一档粗体大字号，二三档依次收小（发布说明的结构就是 # 版本 → ## 分类） */
+.ud-n-h {
+  margin: 10px 0 4px;
+  font-weight: 650;
+  color: var(--text-1);
+  line-height: 1.4;
+}
+.ud-n-h:first-child {
+  margin-top: 0;
+}
+.ud-n-h.is-l1 {
+  font-size: 0.9375rem;
+}
+.ud-n-h.is-l2 {
+  font-size: 0.875rem;
+}
+.ud-n-h.is-l3 {
+  font-size: 0.8125rem;
+  color: var(--text-2);
+}
+/* 列表项：靠左的圆点缩进，二级用 ◦ 再缩进一档 */
+.ud-n-li {
+  display: flex;
+  gap: 6px;
+  margin: 2px 0;
+  align-items: baseline;
+}
+.ud-n-li.is-l1 {
+  padding-left: 14px;
+}
+.ud-n-li.is-l2 {
+  padding-left: 28px;
+}
+.ud-n-bullet {
+  flex-shrink: 0;
+  width: 8px;
+  text-align: center;
+  color: var(--brand-500);
+}
+.ud-n-p {
+  margin: 2px 0;
+}
+.ud-n-p strong,
+.ud-n-li strong,
+.ud-n-h strong {
+  font-weight: 650;
+  color: var(--text-1);
 }
 .ud-error {
   font-size: 0.75rem;

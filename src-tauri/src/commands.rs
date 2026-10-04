@@ -5,7 +5,7 @@ use crate::config::AppConfig;
 use crate::mac;
 use crate::models::{
     ChatMessage, ChatModelConfig, ChatSession, ClipboardItem, Countdown, DetachedSticky, Note,
-    RepeatRule, Resource, ResourceKind, ResourceSubcategory, SearchResult, Snippet, Sticky, Tag,
+    RepeatRule, Resource, ResourceKind, ResourceSubcategory, SubcategoryNode, SearchResult, Snippet, Sticky, Tag,
     Todo, TodoOccurrence, TodoTag, TodoTagLink,
 };
 use crate::process;
@@ -262,10 +262,11 @@ fn validate_subcategory_input(kind: &str, name: &str) -> Result<(), String> {
     if !subcategory::VALID_KINDS.contains(&kind) {
         return Err("无效的大类".into());
     }
-    if name.is_empty() || name.chars().count() > 20 {
-        return Err("小类名称需为 1–20 个字符".into());
-    }
-    Ok(())
+    // ⚠️ 交给 repo 的 `validate_segment`：它除了长度还拦**分隔符**。
+    //   这里原先只查长度，于是「A/B」能从一个只该收单段的输入框进来，
+    //   路径当场歧义化（是「A 的子 B」还是「名叫 A/B 的顶层项」），
+    //   之后改名/删除会静默算错子树 —— 症状是「删了 A，B 下面的条目也跑了」。
+    subcategory::validate_segment(name)
 }
 
 #[tauri::command]
@@ -293,12 +294,60 @@ pub fn create_subcategory(
     Ok(sub)
 }
 
+/// 层级小类树（2026-10-04）。前端用它渲染缩进与展开，
+/// **判定一律以这份树为准** —— 前端那份「按 `/` 切路径」的只做展示。
+#[tauri::command]
+pub fn list_subcategory_tree(
+    state: State<'_, DbState>,
+    kind: String,
+) -> Result<Vec<SubcategoryNode>, String> {
+    if !subcategory::VALID_KINDS.contains(&kind.as_str()) {
+        return Err("无效的大类".into());
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    subcategory::tree(&conn, &kind).map_err(err_str)
+}
+
+/// 在某个小类下面新建一级（2026-10-04）。`parent_id` 为空 = 建顶层。
+///
+/// ⚠️ 传 `parentId` 而不是让调用方自己拼 `父路径/名字`：拼路径这件事在前端
+///   做等于把路径规则抄了第二份，而它一旦与 repo 不一致就是「新建出来的小类
+///   挂到了不存在的地方」——树上根本看不到它，用户也删不掉。
+#[tauri::command]
+pub fn create_subcategory_child(
+    state: State<'_, DbState>,
+    kind: String,
+    parent_id: Option<i64>,
+    name: String,
+) -> Result<ResourceSubcategory, String> {
+    let kind = kind.trim().to_string();
+    let name = name.trim().to_string();
+    validate_subcategory_input(&kind, &name)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let parent_path = match parent_id {
+        None => String::new(),
+        Some(pid) => conn
+            .query_row(
+                "SELECT name FROM resource_subcategories WHERE id = ?1 AND kind = ?2",
+                rusqlite::params![pid, kind],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(|_| format!("NOT_FOUND: 父小类 {pid} 不存在"))?,
+    };
+    let full = subcategory::join_path(&parent_path, &name);
+    let free = subcategory::is_name_free(&conn, &kind, &full, None).map_err(err_str)?;
+    if !free {
+        return Err(format!("DUP:「{full}」已存在"));
+    }
+    let sub = subcategory::create(&conn, &kind, &full).map_err(err_str)?;
+    log::info!("新建速达小类: {} / {}", kind, full);
+    Ok(sub)
+}
+
 #[tauri::command]
 pub fn rename_subcategory(state: State<'_, DbState>, id: i64, name: String) -> Result<(), String> {
     let name = name.trim().to_string();
-    if name.is_empty() || name.chars().count() > 20 {
-        return Err("小类名称需为 1–20 个字符".into());
-    }
+    validate_subcategory_input("", &name)?;
     let mut conn = state.0.lock().map_err(|e| e.to_string())?;
     subcategory::rename(&mut conn, id, &name)
 }

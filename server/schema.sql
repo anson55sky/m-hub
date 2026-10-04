@@ -146,6 +146,10 @@ CREATE TABLE IF NOT EXISTS submissions (
   status       TEXT NOT NULL DEFAULT 'pending_review',
   -- 审核备注；gate 失败原因也放这里（客户端 `.get("review_note")`）
   review_note  TEXT,
+  -- 作者署名（2026-10-04）。显示在市场卡片与详情页。
+  -- ⚠️ 存在**提交**上而不是扩展 manifest 里：署名是「这次发布署名给谁看」的
+  --   决定，同一个扩展换人维护时可以改；放进 manifest 就得改代码重发才能改。
+  author       TEXT,
   -- 包体在 `pkg_blobs` 里的键（内容寻址，见该表注释）与总大小。
   -- ⚠️ 这两列是**能上架的前提**：没有包体，审核通过了也发布不出去
   --    （清单里的 downloadUrl 指向一个不存在的字节）。2026-10-01 补。
@@ -208,6 +212,23 @@ CREATE TABLE IF NOT EXISTS market_registry (
 -- ⚠️ 只在「上架」那一刻写。approved 的提交**没有**这一列内容，
 --   rebuild 会跳过它们（`status='published'` 才进清单）。
 ALTER TABLE submissions ADD COLUMN manifest_json TEXT;
+
+-- 这次提交用到的截图（JSON 数组，元素是 submission_assets.id，按展示顺序）。
+--
+-- ⚠️ 此前上传的截图**只被校验、从未落库**（`submissions.ts` 收到 multipart 就丢掉字节），
+--   市场清单里的 `screenshots` 一直读的是 manifest 里作者手写的 URL ——
+--   于是「作者在发布弹窗选了 3 张图」与服务端回 `screenshots: 3` 都是真的，
+--   但那 3 个字节从来没被存下、也没有任何地方能读到它们。
+--   这是「加了下半截」而不是「加了功能」：发布弹窗的截图区从上线起就是装饰品。
+ALTER TABLE submissions ADD COLUMN shots_json TEXT;
+
+-- 区分同一张表里的包与截图：
+--   'pkg'  = 扩展包（原有全部行）
+--   'shot' = 发布弹窗上传的截图
+--
+-- ⚠️ 这一列是「发布」判定与「公开地址」判定的依据：截图 URL 只对
+--   已上架提交的行开放（约定 51：上架前不能有公开地址）。
+ALTER TABLE submission_assets ADD COLUMN asset_kind TEXT NOT NULL DEFAULT 'pkg';
 
 CREATE TABLE IF NOT EXISTS ai_quota (
   user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

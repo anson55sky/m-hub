@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import {
   FilePlus,
@@ -15,6 +15,8 @@ import {
   Check,
   CheckCheck,
   Monitor,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-vue-next'
 import type { DesktopEntry } from '../api/tauri'
 import { isTauri, tauriApi, type InstalledAppInfo, type InstalledBrowser, type Resource } from '../api/tauri'
@@ -102,30 +104,104 @@ async function batchRemove() {
   }
 }
 
+/**
+ * 「添加」的入口：在**当前正看着的那个分类**里点，就把新资源归入该分类（2026-10-04）。
+ *
+ * ⚠️ 三种视图要分清，不能一律预填：
+ * · `activeSub` 是具体小类名 → 预填它（大类 `activeFilter` 也一并预填，
+ *   否则会加出一个 kind 与所看大类不符的条目）；
+ * · `activeSub === 'none'`（未归类）→ **不预填**：`category` 为 null 本身就是
+ *   未归类，预填等于什么都不做；而预填一个大类里的默认小类反而会把它挪走；
+ * · `activeSub === 'all'`（全部）→ **不预填**：那时替用户选一个分类是
+ *   「自作主张」，用户可能就想放到未归类。
+ */
+function startAdd() {
+  editing.value = null
+  const kind = KIND_BY_FILTER[activeFilter.value]
+  if (activeSub.value !== 'all' && activeSub.value !== 'none') {
+    prefill.value = { category: activeSub.value, kind }
+  } else {
+    prefill.value = kind ? { kind } : null
+  }
+  formVisible.value = true
+}
+
+const KIND_BY_FILTER: Record<FilterKey, 'app' | 'web' | 'file' | undefined> = {
+  全部: undefined,
+  常用: undefined,
+  应用: 'app',
+  网页: 'web',
+  文件: 'file',
+}
+
 // ---- 浏览器书签导入（2026-10-03）----
 const bookmarkVisible = ref(false)
 
 /**
- * 把选中的书签加入速达。
+ * 浏览器书签导入：按**文件夹层级**建速达小类（2026-10-04）。
  *
- * ⚠️ 逐条处理并**如实回报失败**：几百条里某条加不进去（重名/路径失效）不能让
- *   整批看起来失败，也不能悄悄跳过 —— 用户不知道少了什么。
- * ⚠️ 分类直接用浏览器文件夹的**末级**名（后端给的是全路径，只用于去重）。
- *   速达分类名不存在时会落到「未归类」，功能上可用，只是没分到一起 ——
- *   比在这里自作主张新建分类更安全。
+ * ⚠️ 层级原样保留（发布说明：「从浏览器导入书签时，文件夹的层级会原样保留
+ *   (比如「开发前端」)」）。旧实现只取末级名，于是「书签栏/开发/前端」里
+ *   的书签和「书签栏/生活/前端」里的混在同一个「前端」下。
+ *
+ * ⚠️ 逐条串行 + 中途建小类：建父级可能失败（重名/非法字符），那这一支的
+ *   条目就归不到分类里 —— 逐条建并如实回报，用户才知道哪几条没进去。
+ *   已存在的层级直接复用，不重复建。
  */
 async function addBookmarks(
   items: { name: string; url: string; category: string }[],
 ) {
   let added = 0
   const failed: string[] = []
+  const kind = 'web' as const
+
+  /** 全路径 → 小类 id。逐段建（缺哪段建哪段），已有的直接取 id */
+  async function ensurePath(browserPath: string): Promise<number | null> {
+    // ⚠️ **剥掉浏览器最外层**（「书签栏」/「其他书签」/Firefox 的根）。
+    //   那一层不是用户建的分类，留在速达里的话所有小类都被塞进一个
+    //   「书签栏」底下，等于凭空多一级、还得先进它才能看到自己的分类。
+    //   直接摊在书签栏根下的书签剥完为空 → 归「未归类」，与它们的实际位置一致。
+    const segs = browserPath.split('/').filter(Boolean).slice(1)
+    if (!segs.length) return null
+    let parentId: number | undefined
+    let acc = ''
+    for (const seg of segs) {
+      acc = acc ? `${acc}/${seg}` : seg
+      const existing = store
+        .subcategoriesOf(kind)
+        .find((s) => s.name === acc)
+      if (existing) {
+        parentId = existing.id
+        continue
+      }
+      try {
+        // ⚠️ 用 `createSubcategoryChild(父 id, 段名)`：全路径由 Rust 那边拼。
+        //   在前端自己拼「父路径/名字」的话，路径规则就有两份实现，
+        //   一旦对不上就会生成挂在不存在节点下的孤儿小类（树上看不见、也删不掉）。
+        const made = await store.addSubcategoryChild(kind, seg, parentId)
+        parentId = made.id
+      } catch {
+        // 建不出来（非法字符等）：这一支的条目就交给用户自己归，
+        // 不静默吞掉 —— 少分到一起比悄悄挪到别处好
+        return null
+      }
+    }
+    return parentId ?? null
+  }
+
   for (const it of items) {
     try {
+      let category: string | null = null
+      if (it.category) {
+        const id = await ensurePath(it.category)
+        const sub = id ? store.subcategoriesOf(kind).find((s) => s.id === id) : undefined
+        category = sub?.name ?? null
+      }
       await store.addResource({
-        kind: 'web',
+        kind,
         name: it.name,
         target: it.url,
-        category: it.category || null,
+        category,
       })
       added++
     } catch (err) {
@@ -133,6 +209,7 @@ async function addBookmarks(
     }
   }
   bookmarkVisible.value = false
+  await store.refreshSubcategories()
   const parts = [`已导入 ${added} 条书签`]
   if (failed.length) parts.push(`${failed.length} 条失败：${failed[0]}`)
   showToast(parts.join(' · '))
@@ -377,21 +454,135 @@ const SUB_KIND: Partial<Record<FilterKey, 'app' | 'web' | 'file'>> = {
   文件: 'file',
 }
 
-const subTabs = computed(() => {
-  const kind = SUB_KIND[activeFilter.value]
-  if (!kind) return []
-  return store.subcategoriesOf(kind)
+const subKind = computed(() => SUB_KIND[activeFilter.value])
+
+/** 该大类的小类树（层级，2026-10-04） */
+const subTabs = computed(() => (subKind.value ? store.subcategoryTree(subKind.value) : []))
+
+/** 展开了哪些层级（存全路径，切大类时不必清 —— 路径自带大类语义之外的唯一性） */
+const expandedSubs = ref<Set<string>>(new Set())
+
+/** 树摊平成一行 chip：带层级、标出有子级且展开的父节点 */
+interface SubChip {
+  id: number
+  fullPath: string
+  label: string
+  depth: number
+  isDefault: boolean
+  /** 有子级且当前收起 → 显示一个可点的展开箭头 */
+  collapsible: boolean
+  expanded: boolean
+}
+
+const subChips = computed<SubChip[]>(() => {
+  const out: SubChip[] = []
+  const walk = (nodes: ReturnType<typeof store.subcategoryTree>, depth: number) => {
+    for (const n of nodes) {
+      const hasKids = n.children.length > 0
+      out.push({
+        id: n.id,
+        fullPath: n.fullPath,
+        label: n.name,
+        depth,
+        isDefault: n.isDefault,
+        collapsible: hasKids,
+        expanded: hasKids && expandedSubs.value.has(n.fullPath),
+      })
+      if (hasKids && expandedSubs.value.has(n.fullPath)) walk(n.children, depth + 1)
+    }
+  }
+  walk(subTabs.value, 0)
+  return out
 })
+
+function toggleExpand(path: string) {
+  const next = new Set(expandedSubs.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  expandedSubs.value = next
+}
+
+// ---- 横向滚动：两端箭头 + 滚轮（发布说明：小类太多时一行的两端会出现箭头按钮，也能用滚轮左右滚动）----
+const subBar = ref<HTMLElement | null>(null)
+/** 两端箭头只在**真的溢出**时出现 —— 否则行内凭空两个按不动的按钮 */
+const canScrollLeft = ref(false)
+const canScrollRight = ref(false)
+
+function measureScroll() {
+  const el = subBar.value
+  if (!el) {
+    canScrollLeft.value = canScrollRight.value = false
+    return
+  }
+  canScrollLeft.value = el.scrollLeft > 1
+  canScrollRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 1
+}
+
+function scrollSubs(dir: 1 | -1) {
+  const el = subBar.value
+  if (!el) return
+  el.scrollBy({ left: dir * Math.max(120, el.clientWidth * 0.6), behavior: 'smooth' })
+}
+
+/**
+ * 滚轮横向滚动。
+ *
+ * ⚠️ 只在**纵向溢出为零**（也就是这一行本身不需要上下滚）时才拦竖向滚轮：
+ *   小类多到需要换行时，用户的竖向滚动是「往下看内容」的正常意图，
+ *   抢走它会让人以为页面卡住。
+ */
+function onSubBarWheel(e: WheelEvent) {
+  const el = subBar.value
+  if (!el) return
+  measureScroll()
+  if (!canScrollRight.value && !canScrollLeft.value) return
+  const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+  if (delta === 0) return
+  const max = el.scrollWidth - el.clientWidth
+  const atLeft = el.scrollLeft <= 0
+  const atRight = el.scrollLeft >= max - 1
+  // 已经滚到头还继续往回滚 → 交还给外层（页面滚动），别把用户困在这一行里
+  if ((delta < 0 && atLeft) || (delta > 0 && atRight)) return
+  el.scrollLeft += delta
+  e.preventDefault()
+  measureScroll()
+}
+
+/** 滚到选中项：层级展开后选中的那一项可能在很右边 */
+function scrollActiveIntoView() {
+  nextTick(() => {
+    measureScroll()
+    const el = subBar.value
+    if (!el) return
+    const node = el.querySelector<HTMLElement>('.is-active')
+    if (node) node.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  })
+}
+
+onMounted(() => {
+  measureScroll()
+  window.addEventListener('resize', measureScroll)
+})
+onBeforeUnmount(() => window.removeEventListener('resize', measureScroll))
+watch(() => subChips.value.length, () => nextTick(measureScroll))
+watch(activeSub, scrollActiveIntoView)
 
 // 切大类时重置小类筛选：同名不同义，跨大类沿用旧名会筛出错误集合
 watch(activeFilter, () => {
   activeSub.value = 'all'
 })
 
+/**
+ * 小类筛选：选中某一层 → 展示**它下面所有**网页（层级，2026-10-04）。
+ *
+ * ⚠️ 这里从 `===` 变成「含后代」（`store.subcategoryContains`）：
+ *   资源挂在「开发/前端」时，点「开发」要能看见它 —— 这正是发布说明那句
+ *   「选中某一层就展示它下面所有网页」。按段比较，筛「开发」不会带出「开发者」。
+ */
 function matchSub(r: Resource): boolean {
   if (activeSub.value === 'all') return true
   if (activeSub.value === 'none') return r.category == null
-  return r.category === activeSub.value
+  return store.subcategoryContains(r.category, activeSub.value)
 }
 
 const visibleResources = computed<Resource[]>(() => {
@@ -704,7 +895,7 @@ function cardAccentStyle(r: Resource) {
         <button
           class="icon-btn add"
           title="添加"
-          @click="editing = null; prefill = null; formVisible = true"
+          @click="startAdd()"
         >
           <Plus :size="15" :stroke-width="2.2" />
         </button>
@@ -742,39 +933,92 @@ function cardAccentStyle(r: Resource) {
     </nav>
 
 <!-- 大类小类筛选（ADR 0012）：应用/网页/文件各有小类库；未归类=category 为空 -->
-<nav v-if="SUB_KIND[activeFilter]" class="filter-tabs suda-cat-tabs" aria-label="小类筛选">
+<!--
+  小类筛选（层级，2026-10-04）。
+
+  ⚠️ 结构上把「滚动容器」和「两端箭头」**拆成三个兄弟**：箭头在容器外，
+     才能在溢出时压在两端而不被内容顶走；容器自己负责 overflow-x 与滚轮。
+
+  ⚠️ 容器上的 `min-width: 0` 不能省（见样式段）：它是 flex/grid 子项默认
+     `min-width:auto` 的唯一解法 —— 少了它这一行永远「不溢出」，横向滚动
+     与两端箭头就都不会出现，症状是「小类多了以后全挤在一行还滚不动」。
+-->
+<div v-if="subKind" class="suda-sub-wrap">
   <button
-    class="filter-tab filter-tab--tag"
-    :class="{ active: activeSub === 'all' }"
-    @click="activeSub = 'all'"
+    v-if="canScrollLeft"
+    class="suda-sub-arrow is-left"
+    type="button"
+    aria-label="小类列表向左滚动"
+    @click="scrollSubs(-1)"
   >
-    全部{{ activeFilter }}
+    <ChevronLeft :size="14" :stroke-width="2.2" aria-hidden="true" />
   </button>
+
+  <nav ref="subBar" class="filter-tabs suda-cat-tabs" aria-label="小类筛选" @wheel="onSubBarWheel">
+    <button
+      class="filter-tab filter-tab--tag"
+      :class="{ active: activeSub === 'all' }"
+      @click="activeSub = 'all'"
+    >
+      全部{{ activeFilter }}
+    </button>
+    <button
+      class="filter-tab filter-tab--tag"
+      :class="{ active: activeSub === 'none' }"
+      @click="activeSub = 'none'"
+    >
+      未归类
+    </button>
+    <!--
+      层级小类：有子级时名字左边多一个展开/收起箭头（点它只折叠、不改筛选），
+      chip 本身按 depth 缩进，点它则筛出**整棵子树**。
+    -->
+    <span
+      v-for="c in subChips"
+      :key="c.id"
+      class="sub-chip"
+      :style="{ '--sub-depth': c.depth }"
+    >
+      <button
+        v-if="c.collapsible"
+        class="sub-chip-twisty"
+        type="button"
+        :aria-label="(c.expanded ? '收起 ' : '展开 ') + c.label"
+        :aria-expanded="c.expanded"
+        @click.stop="toggleExpand(c.fullPath)"
+      >
+        <ChevronRight :size="11" :stroke-width="2.4" :class="{ 'is-open': c.expanded }" aria-hidden="true" />
+      </button>
+      <span v-else class="sub-chip-twisty is-spacer" aria-hidden="true" />
+      <button
+        class="filter-tab filter-tab--tag"
+        :class="{ 'is-active': activeSub === c.fullPath }"
+        :title="c.fullPath === c.label ? c.label : `「${c.label}」及其下级`"
+        @click="activeSub = c.fullPath"
+      >
+        <Star
+          v-if="c.isDefault"
+          class="sub-default-star"
+          :size="10"
+          :stroke-width="2.4"
+          title="默认小类：新增资源未指定小类时自动归入；删除小类时条目也改挂到这里（在 设置 → 功能 → 小类管理 更换）"
+          aria-hidden="true"
+        />
+        {{ c.label }}
+      </button>
+    </span>
+  </nav>
+
   <button
-    class="filter-tab filter-tab--tag"
-    :class="{ active: activeSub === 'none' }"
-    @click="activeSub = 'none'"
+    v-if="canScrollRight"
+    class="suda-sub-arrow is-right"
+    type="button"
+    aria-label="小类列表向右滚动"
+    @click="scrollSubs(1)"
   >
-    未归类
+    <ChevronRight :size="14" :stroke-width="2.2" aria-hidden="true" />
   </button>
-  <button
-    v-for="s in subTabs"
-    :key="s.id"
-    class="filter-tab filter-tab--tag"
-    :class="{ active: activeSub === s.name }"
-    @click="activeSub = s.name"
-  >
-    <Star
-      v-if="s.is_default"
-      class="sub-default-star"
-      :size="10"
-      :stroke-width="2.4"
-      title="默认小类：新增资源未指定小类时自动归入；删除小类时条目也改挂到这里（在 设置 → 功能 → 小类管理 更换）"
-      aria-hidden="true"
-    />
-    {{ s.name }}
-  </button>
-</nav>
+</div>
 
     <!-- 资源网格（5 列） -->
     <div class="suda-body">
@@ -1296,5 +1540,69 @@ function cardAccentStyle(r: Resource) {
 .icon-btn.batch.on {
   color: var(--brand-600);
   background: var(--brand-50);
+}
+
+/* ---- 小类筛选：层级 chip + 横向滚动（2026-10-04） ---- */
+.suda-sub-wrap {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  /* 关键：默认 min-width:auto 的 flex 子项永远不「溢出」，滚动与箭头就都不会出现 */
+  min-width: 0;
+}
+.suda-cat-tabs {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  /* 层级 chip 之间的横向 padding 由 flex gap 承担，这里去掉旧的横向内边距 */
+  padding-bottom: 2px;
+}
+.suda-cat-tabs::-webkit-scrollbar {
+  display: none;
+}
+.suda-sub-arrow {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-card-soft);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.suda-sub-arrow:hover {
+  color: var(--text-1);
+  background: var(--bg-card);
+}
+.sub-chip {
+  display: inline-flex;
+  align-items: center;
+  /* 层级缩进：每层 12px。顶到第三层也就是 24px，再多就该换「面包屑」而不是缩进了 */
+  padding-left: calc(var(--sub-depth, 0) * 12px);
+}
+.sub-chip-twisty {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.sub-chip-twisty.is-spacer {
+  cursor: default;
+}
+.sub-chip-twisty svg {
+  transition: transform 0.15s ease;
+}
+.sub-chip-twisty svg.is-open {
+  transform: rotate(90deg);
 }
 </style>

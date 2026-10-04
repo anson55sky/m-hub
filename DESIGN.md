@@ -1,6 +1,6 @@
 # m-hub Design System
 
-> 版本对齐：v0.6.7。本文档为当前实现的唯一设计基线，UI 改动以本文件 + `src/style.css` 为准。
+> 版本对齐：v0.7.4。本文档为当前实现的唯一设计基线，UI 改动以本文件 + `src/style.css` 为准。
 
 ## 1. Atmosphere & Identity
 

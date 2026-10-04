@@ -134,7 +134,13 @@ async fn upload(
     changelog: &str,
     min_app_version: &str,
     homepage: &str,
+    // 作者署名（2026-10-04）：显示在市场卡片与详情页。空 = 用 manifest 里的
     screenshots: &[String],
+    // 「引用上一版的截图」：给出版本号即沿用那一版已上传的截图（服务端只复制
+    // 资产行、不重传字节）。空 = 不引用。**与 screenshots 互斥**，两头都给由
+    // 服务端报错 —— 界面同时显示「引用了 v0.1.7」和 3 张新图时说不上是哪几张。
+    author: &str,
+    inherit_shots_from: &str,
 ) -> Result<Value, String> {
     let bytes = std::fs::read(pkg).map_err(|e| format!("IO_ERROR: 读取安装包失败 {e}"))?;
     let part = reqwest::multipart::Part::bytes(bytes)
@@ -153,6 +159,12 @@ async fn upload(
     }
     if !homepage.is_empty() {
         form = form.text("homepage", homepage.to_string());
+    }
+    if !author.is_empty() {
+        form = form.text("author", author.to_string());
+    }
+    if !inherit_shots_from.is_empty() {
+        form = form.text("inherit_shots_from", inherit_shots_from.to_string());
     }
     // 截图：字段名必须是 `screenshots[]` —— 服务端 Hono 的 parseBody **默认只保留同名键的最后一个值**，
     // 只有 `key[]` 形态才会被收集成数组（实测踩过：不带 [] 时传 6 张只到 1 张，且静默通过）。
@@ -205,6 +217,10 @@ pub async fn dev_submit(
     min_app_version: Option<String>,
     homepage: Option<String>,
     screenshots: Option<Vec<String>>,
+    // 作者署名：写进提交，作者可在市场卡片与详情页看到（2026-10-04）
+    author: Option<String>,
+    // 「引用上一版的截图」：给出版本号即沿用那一版（服务端复制资产行，不重传字节）
+    inherit_shots_from: Option<String>,
     // 发布弹窗「发布版本」：非空时先把该版本写回 manifest.json 再打包（须大于当前版本）——
     // 包内 manifest 带上新版本号，服务端的版本递增关卡才认。空 = 按 manifest 当前版本发布。
     new_version: Option<String>,
@@ -256,6 +272,8 @@ pub async fn dev_submit(
             min_app_version.clone().unwrap_or_default().trim(),
             homepage.clone().unwrap_or_default().trim(),
             &shots,
+            author.clone().unwrap_or_default().trim(),
+            inherit_shots_from.clone().unwrap_or_default().trim(),
         )
         .await;
         // 无论成败都清掉临时包（源码目录从不被写入）
@@ -521,6 +539,8 @@ mod tests {
             "0.5.5",
             "https://example.com/x",
             &[],
+            "",
+            "",
         )
         .await
         .expect("上传应当成功");
@@ -583,7 +603,7 @@ mod tests {
         let pkg = dir.path().join("p.xhpack");
         std::fs::write(&pkg, b"PK\x03\x04x").unwrap();
 
-        upload(&base, "t", &pkg, "com.example.x", "1.0.0", "", "", "", &[])
+        upload(&base, "t", &pkg, "com.example.x", "1.0.0", "", "", "", &[], "", "")
             .await
             .expect("上传应当成功");
         let raw = rx.recv_timeout(Duration::from_secs(5)).expect("mock 未收到请求");
@@ -605,7 +625,7 @@ mod tests {
 
         // mock 一律返回 200，这里只验「错误码能被解析出来」的路径；
         // 4xx 分支由服务端 smoke 覆盖（服务端返回的是同样的 JSON 形状）
-        let v = upload(&base, "t", &pkg, "com.example.x", "1.0.0", "", "", "", &[])
+        let v = upload(&base, "t", &pkg, "com.example.x", "1.0.0", "", "", "", &[], "", "")
             .await
             .expect("200 时应当成功解析");
         assert_eq!(
@@ -642,6 +662,8 @@ mod tests {
                 shot1.to_string_lossy().into_owned(),
                 shot2.to_string_lossy().into_owned(),
             ],
+            "",
+            "",
         )
         .await
         .expect("上传应当成功");
@@ -661,6 +683,67 @@ mod tests {
             raw.contains("filename=\"shot1.png\"") && raw.contains("filename=\"shot2.png\""),
             "截图文件名应随请求发出"
         );
+    }
+
+    /// 「作者署名」与「引用上一版的截图」必须真的出现在 multipart 里。
+    ///
+    /// ⚠️ 这两个字段是**只加不加就静默失效**的典型：不发的话服务端收不到，
+    ///   作者署名永远为空、市场截图永远是「作者未提供」，而服务端与界面
+    ///   全程无报错（正是本工程反复出现的那一类）。
+    #[tokio::test]
+    async fn upload_sends_author_and_inherit_shots_fields() {
+        let (base, rx) = spawn_mock(r#"{"id":11,"status":"pending_review","gate":{"passed":true,"items":[]}}"#);
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("p.xhpack");
+        std::fs::write(&pkg, b"PK\x03\x04x").unwrap();
+
+        upload(
+            &base,
+            "t",
+            &pkg,
+            "com.example.x",
+            "1.0.0",
+            "",
+            "",
+            "",
+            &[],
+            "张三",
+            "0.1.7",
+        )
+        .await
+        .expect("上传应当成功");
+
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("mock 未收到请求");
+        assert!(
+            raw.contains("name=\"author\""),
+            "作者署名必须发出去（否则市场卡片上永远是空署名）：{raw}"
+        );
+        assert!(
+            raw.contains("name=\"inherit_shots_from\""),
+            "引用上一版必须发出去（否则服务端无从知道该沿用哪一版）：{raw}"
+        );
+    }
+
+    /// 空值时**不发**这两个字段：服务端的「引用来源版本号必须是 x.y.z」
+    /// 与「既上传了新截图又要求引用上一版」两条校验都把空串当成非法输入，
+    /// 每次正常发布都撞一次 400 —— 那是「加了必填校验却忘了允许省略」。
+    #[tokio::test]
+    async fn upload_omits_author_and_inherit_when_blank() {
+        let (base, rx) = spawn_mock(r#"{"id":12,"status":"pending_review","gate":{"passed":true,"items":[]}}"#);
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("p.xhpack");
+        std::fs::write(&pkg, b"PK\x03\x04x").unwrap();
+
+        upload(&base, "t", &pkg, "com.example.x", "1.0.0", "", "", "", &[], "", "")
+            .await
+            .expect("上传应当成功");
+        let raw = rx.recv_timeout(Duration::from_secs(5)).expect("mock 未收到请求");
+        for field in ["author", "inherit_shots_from"] {
+            assert!(
+                !raw.contains(&format!("name=\"{field}\"")),
+                "空的可选字段不应发送：{field}（服务端会拒空串）"
+            );
+        }
     }
 
     /// 最小 manifest：键序故意非字母序，且嵌套对象里放一个同名 version 键——

@@ -667,6 +667,25 @@ export interface DevSubmissionRow {
 }
 
 /**
+ * 速达小类树的嵌套节点（`repo::subcategory::tree` 的产物）。
+ *
+ * ⚠️ `name` 是**末级**名（界面上显示的那个），`fullPath` 是全路径
+ *   （判定、级联、资源挂载都用它）。两个都要：只给 name 拼不出父子关系，
+ *   只给 fullPath 界面上就会出现「开发/前端」这种没人想看的长串。
+ */
+export interface SubcategoryNode {
+  id: number
+  /** 末级名（显示用） */
+  name: string
+  /** 全路径（判定用，如「开发/前端」） */
+  fullPath: string
+  /** 层级，顶层为 0 */
+  depth: number
+  isDefault: boolean
+  children: SubcategoryNode[]
+}
+
+/**
  * 提交详情 = **同一条记录**（服务端 `submissionDetail` 就是把行原样 `json(row)`）。
  *
  * 原类型凭空声明了 `market` / `permissions` / `gate_report` 三样服务端**根本没返回**
@@ -1102,6 +1121,22 @@ export const tauriApi = {
   listSubcategories: () => invoke<ResourceSubcategory[]>('list_subcategories'),
   createSubcategory: (kind: 'app' | 'web' | 'file', name: string) =>
     invoke<ResourceSubcategory>('create_subcategory', { kind, name }),
+  /**
+   * 在某个小类下新建一级（层级，2026-10-04）。 省略 = 建顶层。
+   *
+   * ⚠️ 传 id 而不是让调用方拼「父路径/名字」：路径规则只有 Rust 那一份
+   *   （），前端拼错了会得到一个挂在
+   *   不存在节点下的孤儿小类 —— 树上根本看不到，也删不掉。
+   */
+  createSubcategoryChild: (kind: 'app' | 'web' | 'file', name: string, parentId?: number) =>
+    invoke<ResourceSubcategory>('create_subcategory_child', {
+      kind,
+      name,
+      parentId: parentId ?? null,
+    }),
+  /** 层级小类树。**判定以这份为准**，前端那份路径切分只做展示 */
+  listSubcategoryTree: (kind: 'app' | 'web' | 'file') =>
+    invoke<SubcategoryNode[]>('list_subcategory_tree', { kind }),
   renameSubcategory: (id: number, name: string) =>
     invoke<void>('rename_subcategory', { id, name }),
   deleteSubcategory: (id: number) => invoke<void>('delete_subcategory', { id }),
@@ -1537,6 +1572,14 @@ export const tauriApi = {
     minAppVersion?: string,
     homepage?: string,
     screenshots?: string[],
+    /** 作者署名（2026-10-04）：显示在市场卡片与详情页；空 = 用 manifest 里的 */
+    author?: string,
+    /**
+     * 「引用上一版的截图」：给出版本号即沿用那一版已上传的截图。
+     * 与 `screenshots` **互斥**（两头都给服务端回 400 `shots_conflict`）。
+     * 传字节的方式是「复制资产行」—— 不重传、不占新空间。
+     */
+    inheritShotsFrom?: string,
     newVersion?: string,
   ) =>
     invoke<SubmitResult>('dev_submit', {
@@ -1545,6 +1588,8 @@ export const tauriApi = {
       minAppVersion: minAppVersion ?? null,
       homepage: homepage ?? null,
       screenshots: screenshots && screenshots.length ? screenshots : null,
+      author: author?.trim() ? author.trim() : null,
+      inheritShotsFrom: inheritShotsFrom?.trim() ? inheritShotsFrom.trim() : null,
       newVersion: newVersion ?? null,
     }),
   /** 读本地图片为 data URL（发布弹窗的截图缩略图预览用；作者选的图不在资产白名单目录里） */

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { errorText } from '../utils/errorText'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { marked, Renderer } from 'marked'
 import DOMPurify from 'dompurify'
@@ -372,7 +373,10 @@ async function send() {
     })
   } catch (err) {
     cancelStreamRender()
-    streamError.value = String(err)
+    // ⚠️ 走 errorText：平台额度用完 / 邀请码没兑换时 Rust 回的是
+    //   `QUOTA_EXHAUSTED: 今日平台额度已用完，明天再来`，
+    //   直接 `String(err)` 会让「一串错误代码」顶在对话里。
+    streamError.value = errorText(err)
     sending.value = false
   }
 }

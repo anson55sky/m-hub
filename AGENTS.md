@@ -1,6 +1,6 @@
 # m-hub (个人效率工作台) — macOS
 
-**生成:** 2026-08-29 | **分支:** master | **版本:** 0.7.3
+**生成:** 2026-08-29 | **分支:** master | **版本:** 0.7.4
 **平台:** macOS（本仓库是上游 [x-hub](https://github.com/dckxx/x-hub) 的 macOS 移植版）
 
 ## 概述
@@ -19,7 +19,7 @@ m-hub/
 │   ├── api/tauri.ts            # 所有 Tauri invoke 调用封装（219 个命令）+ 模型/配置类型
 │   ├── stores/workbench.ts     # 响应式状态管理（reactive + readonly，无 Pinia；工作台/便签/待办/倒计时/提示词/AI 对话/扩展/更新）
 │   ├── composables/            # useResourceIcon（资源图标）/ useFocusTrap（焦点陷阱）/ useTheme + themeTokens（三轴主题，后者广播给扩展 iframe）/ useDashboardLayout（工作台网格布局 + 形态注册表）/ useDashPreviewData（布局编辑器预览的共享派生数据，口径逐张照抄真卡）/ useExtensionFrame（扩展 webview 桥接）/ useShortcutRecorder（快捷键录制）
-│   ├── utils/                  # categories（文件分类）/ time / web / error-report / chime（提示音）/ weather（Open-Meteo 天气码映射）/ quotes（本地名言兜底语料）/ todoParse（序号列表拆多条待办）/ lunar（农历转换）/ sudaCustom（工作台自定义速达槽位的内容口径，真卡与编辑器缩印共用）
+│   ├── utils/                  # categories（文件分类）/ time / web / errorText（错误码→人话）/ subcategoryPath（小类路径规则）/ notesParse（更新说明结构化）/ error-report / chime（提示音）/ weather（Open-Meteo 天气码映射）/ quotes（本地名言兜底语料）/ todoParse（序号列表拆多条待办）/ lunar（农历转换）/ sudaCustom（工作台自定义速达槽位的内容口径，真卡与编辑器缩印共用）
 │   └── components/
 │       ├── TitleBar.vue        # 透明自制标题栏（startDragging 拖动 + 窗口控制 + AI 对话/搜索入口）
 │       ├── ClockCard.vue       # 时钟卡片（三形态：大时钟 HH:mm 日期天气语录 / 今日阴阳历 农历+干支生肖 / 极简时间；cq 响应式 + preview 模式）
@@ -42,8 +42,8 @@ m-hub/
 │       ├── ConfirmDialog.vue   # 通用确认弹窗（勾父带子 / 删标签 / 删除等二次确认；宿主层单实例）
 │       ├── TodoFloat.vue       # 待办整列表浮窗（todo-float label 专属渲染）
 │       ├── RecentBar.vue       # 最近使用通栏（按 last_launched_at 排序，前 10）
-│       ├── Suda.vue            # 速达资源管理（全部/常用/应用/网页/文件 + 大类小类筛选（ADR 0012）+ 拖拽导入 + 扫描安装应用 + 指定浏览器打开 + 网页应用内打开入口）
-│       ├── SudaFormDialog.vue  # 新增/编辑资源弹窗（app/web/file + 小类选择（各大类一套）+ 文件选择）
+│       ├── Suda.vue            # 速达资源管理（全部/常用/应用/网页/文件 + 大类小类筛选（ADR 0012，含层级展开与横向滚动箭头）+ 拖拽导入 + 扫描安装应用 + 指定浏览器打开 + 网页应用内打开入口）
+│       ├── SudaFormDialog.vue  # 新增/编辑资源弹窗（app/web/file + 小类选择（各大类一套，层级缩进）+ 文件选择，网络地址不取图标）
 │       ├── SudaWebPanel.vue    # 速达网页主窗内嵌面板（ADR 0011：自绘工具栏 + 内容区空白位，子 webview 由 Rust 预创建，见 suda_browser.rs）
 │       ├── BrowserChrome.vue   # 独立应用内浏览器顶栏（suda-web-{i}-chrome label 专属渲染：轻量 tab 条 + 地址栏 + 系统浏览器出口）
 │       ├── SudaScanDialog.vue  # 扫描已安装应用批量导入弹窗
@@ -161,7 +161,7 @@ m-hub/
 | 表 | 说明 |
 |----|------|
 | `resources` | 速达资源（app/web/file，category=所属大类的小类名（NULL=未归类）/icon/args/sort_order/last_launched_at） |
-| `resource_subcategories` | 速达小类（ADR 0012：kind/name/sort_order/is_default，UNIQUE(kind,name) 各大类一套；文件大类 7 内置值经建表种子并入） |
+| `resource_subcategories` | 速达小类（ADR 0012：kind/**name（全路径，层级见约定 76）**/sort_order/is_default，UNIQUE(kind,name) 各大类一套；文件大类 7 内置值经建表种子并入） |
 | `notes` | 速记笔记（title/content） |
 | `tags` / `note_tags` | 笔记标签（多对多） |
 | `todos` | 待办（done/priority/completed_at/due_at/remind_at/parent_id 子待办/sort_order 手动拖拽排序位/description 轻量 Markdown/pinned 置顶/repeat_* 周期规则 + repeat_done_count 累计次数） |
@@ -457,6 +457,46 @@ m-hub/
 
 
 ---
+
+76. **速达小类的「层级」是 `name` 里的全路径，不是 `parent_id` 列（2026-10-04）：**
+    `resource_subcategories.name` 直接存全路径（`开发`、`开发/前端`），段间用 `/`。
+    四个理由：① **零迁移**——老数据名里没有 `/`，天然是顶层；新增 `parent_id` 还得回填，
+    而回填错了表现为「条目挂到不存在的父级下」，比不改更糟。② `resources.category`
+    语义一个字没改（十几处读它的地方不必动，而改错任一处都是「条目从所有视图消失」）。
+    ③ `UNIQUE(kind, name)` 继续有效。④ 筛选/统计/扩展桥全不用改。
+    代价：**一个层级段里不能含 `/`**（`validate_segment` 拦），否则路径本身歧义化。
+    三条必须记住的语义：**筛选某层 = 含全部后代**（`subcategoryContains`，按段比不是
+    `startsWith`——`开发` 不是 `开发者` 的祖先）；改名只改自己那一段、整棵子树跟着换父
+    （新路径由 Rust 的 `reparent` 算，前端不拼）；删除连子树一起删、子树里的条目一并改挂
+    默认小类。判定真源是 `repo::subcategory::tree`，前端那份 `utils/subcategoryPath.ts`
+    只做展示，两边各有用例守着对应关系。
+    ⚠️ 子级**不给拖拽把手**：拖拽写的是全组顺序，让它跨父级就是「改挂」，那是独立功能。
+77. **`ERROR_CODE: 说明` 是给日志的形态，界面不显示代码（2026-10-04）：**
+    Rust 侧 `account.rs::api_error` 统一产出 `CODE: 说明`。界面上要让**人读**的那一句由
+    `utils/errorText.ts` 出（剥前缀 + 给已知码补「下一步」），原始串留给 `title` 备查。
+    已知码表**按服务端实际发出的全集**建（`grep "fail(<状态>, '<码>'"`），不要凭印象补。
+    两条容易写错的：① `Error` 实例必须取 `.message`（`String(e)` 会带出 `Error: ` 前缀，
+    与要消灭的错误代码是同一种毛病）；② 剥前缀的正则只认**全大写**（`^[A-Z][A-Z0-9_]*:`），
+    放宽成 `\w+:` 之后「注意：点这里」会被削成「点这里」，界面上凭空少一句。
+78. **「作者明明做了 X，界面上却像没做」要先问：那一环有没有把字节/值留下来（2026-10-04）：**
+    发布弹窗的截图区从上线起就是装饰品 —— 客户端 multipart 上传、服务端校验大小与数量、
+    **然后把字节丢掉**；市场清单里的 `screenshots` 一直读的是扩展 manifest 里作者手写的
+    URL。于是「作者选了 5 张图」与服务端回的 `screenshots: 5` **都是真的**，那 5 个字节却
+    从来没有被存下、也没有任何地方读得到它们。同形状的毛病还有两个：只加字段不填值
+    （运行期 `buildRegistry` 一开始压根没输出 `author`，而客户端类型与详情页那一栏一直存在）、
+    只有展示没有判定。
+    **判据：链路上每一环都要能回答「如果这一环不做，下游会显示什么假话」。**
+    修的连带项：字节一旦要存要发，就得补**按文件头判类型**（不信扩展名、不信 multipart 的
+    `File.type`，否则一张 `text/html` 被原样回给浏览器就是存储型 XSS）、公开地址
+    **只对已上架的提交开放**（`submission_assets.asset_kind='shot'` +
+    `submissions.status='published'`，否则就是「上架前有公开地址」）、空值不外发
+    （服务端把空串当非法输入，每次正常发布都撞 400）。
+79. **凡是「按行拆结构渲染远端文本」的都别用 v-html（2026-10-04）：**
+    更新说明来自远端更新清单，是**不可信输入**。工程里唯一的 Markdown 渲染是 Milkdown
+    （编辑器）那条链，为一段说明拉整套编辑器进更新弹窗不划算；而任何字符串→HTML 的第三方
+    渲染器都要另配消毒。故自建按行拆块（`utils/notesParse.ts`：标题/列表/段落 + 段内
+    `**加粗**`），用 Vue 模板渲染——**全文没有一个 v-html**。认不出的行按段落原样显示，
+    不猜它是标题还是列表：猜错会把一行字突然变成大字，比不排版更难读。
 
 ## 平台约定（macOS 移植，**先读这一节再改任何代码**）
 
