@@ -74,5 +74,12 @@ market_private*
 # m-hub-server（Cloudflare Workers）
 server/node_modules/
 server/.wrangler/          # wrangler 本地状态（含本地 D1 副本）
+
+# ⚠️ 上面那条规则**曾经被绕过**：2026-10-06 的提交用了 `git add -A`，
+#   把 server/.wrangler 下的本地 miniflare D1（.sqlite/.sqlite-shm/.sqlite-wal）
+#   带进了索引 —— .gitignore 只对**未跟踪**文件生效，已跟踪的它不管。
+#   教训：`git add -A` 前先跑一次 `git status --short` 看清楚要加什么，
+#   尤其是本机开发工具产生的状态目录。已用 `git rm --cached` 移出。
+# ⚠️ 本地 D1 里可能有真实数据（用户表 / 提交记录），绝不能进仓库。
 server/manifests/*.xhpack # 打包产物：由 seed-manifests.mjs 生成，不入库
 server/.deployed-url
