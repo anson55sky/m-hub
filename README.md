@@ -16,7 +16,7 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-6.x-3178c6?logo=typescript&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-1.77+-dea584?logo=rust&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-local-003b57?logo=sqlite&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.7.4-blue)
+![Version](https://img.shields.io/badge/version-0.7.5-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -296,3 +296,12 @@ WebKit 没有 MemoryUsageTargetLevel 的等价物；macOS 对内存压力是**�
 MIT
 
 本仓库是 [x-hub](https://github.com/dckxx/x-hub) 的 macOS 移植版，遵循其 MIT 许可证。
+
+### ⚠️ 自签名分发（v0.5.5 起）
+
+本应用**过不了 Mac Store 的静态分析**，因此走自签名分发（.app / .dmg），不走 App Store。
+根因是每个浮窗都是无边框透明圆角小窗，而去掉 WKWebView 的白底要靠私有 KVC 键
+`drawsBackground`（没有公开替代品），故 `tauri` 必须开 `macos-private-api`（见 AGENTS.md P2）。
+
+**首次打开**若提示「无法验证开发者」，请在「系统设置 → 隐私与安全性」中点「仍要打开」，
+或右键点 App →「打开」。
