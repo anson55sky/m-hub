@@ -33,6 +33,7 @@ export const SETTINGS_INDEX: SettingsIndexEntry[] = [
   { section: 'data', title: '保留份数' },
   { section: 'extensions', title: 'service 运行时策略' },
   { section: 'extensions', title: '点击扩展一行' },
+  { section: 'extensions', title: '自动信任带后台的扩展' },
   { section: 'extensions', title: '我的扩展' },
   { section: 'ai', title: '以独立窗口打开 AI 对话' },
   { section: 'ai', title: 'AI 对话面板透明度' },

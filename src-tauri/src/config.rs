@@ -306,6 +306,18 @@ pub struct AppConfig {
     /// service 扩展运行时策略：auto（自动检测，默认）/ builtin（始终内置）/ system（始终系统）
     #[serde(default = "default_runtime_strategy")]
     pub runtime_strategy: String,
+    /// 自动信任带 service 后台的扩展（2026-10-06）。
+    ///
+    /// 默认 **false**：service 扩展要跑本地后台程序，逐版本显式授权是唯一的
+    /// 安全闸门（`extension.rs::service_version_trusted` 要求
+    /// `service:version` 等于当前 manifest 版本 —— 版本一升就重新不信任）。
+    ///
+    /// ⚠️ 打开它意味着「扩展作者改一版就自动拿到执行权」，与扩展中心那句
+    ///   「需要你确认信任当前版本才会启动」正好相反。所以这里只在**用户自己
+    ///   明确点开**时才生效，且默认值保持关闭 —— 升级**不会**替用户打开它
+    ///   （`#[serde(default = "false")]` 就是这条保证）。
+    #[serde(default = "default_auto_trust_service")]
+    pub auto_trust_service: bool,
     /// 固定到左侧栏的扩展 id 列表（点击侧栏菜单即在主区打开对应扩展）
     #[serde(default)]
     pub sidebar_extensions: Vec<String>,
@@ -473,6 +485,10 @@ fn default_wallpaper_veil() -> f64 {
 
 fn default_quote_source() -> String {
     "online".to_string()
+}
+
+fn default_auto_trust_service() -> bool {
+    false
 }
 
 fn default_runtime_strategy() -> String {
@@ -670,6 +686,7 @@ impl Default for AppConfig {
             font_todo: 1.0,
             note_editor_mode: default_note_editor_mode(),
             runtime_strategy: "auto".to_string(),
+            auto_trust_service: false,
             sidebar_extensions: Vec::new(),
             extension_open_modes: std::collections::HashMap::new(),
             extension_link_modes: std::collections::HashMap::new(),

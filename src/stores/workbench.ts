@@ -152,6 +152,9 @@ const state = reactive<StoreState>({
     font_todo: 1,
     note_editor_mode: 'wysiwyg',
     runtime_strategy: 'auto',
+    // ⚠️ 默认 false：service 后台的逐版本授权是唯一安全闸门，
+    //   升级**不得**替用户打开它（Rust 侧 serde default 也是 false）
+    auto_trust_service: false,
     sidebar_extensions: [],
     extension_open_modes: {},
     extension_link_modes: {},
@@ -1563,6 +1566,25 @@ export function useStore() {
     }
   }
 
+  /**
+   * 自动信任 service 扩展开关（2026-10-06）。
+   *
+   * ⚠️ 保存失败要把值**改回去**：这是个安全开关，界面上显示「已开启」而
+   *   实际没落盘 = 用户以为已经信任了所有 service 扩展，实际每版都要确认，
+   *   而他下次就不会再仔细看了。
+   */
+  async function setAutoTrustService(value: boolean) {
+    const prev = state.config.auto_trust_service
+    state.config.auto_trust_service = value
+    if (!isTauri()) return
+    try {
+      await tauriApi.saveConfig(state.config)
+    } catch (e) {
+      state.config.auto_trust_service = prev
+      throw e
+    }
+  }
+
   async function setFloatingBallAutoHide(value: boolean) {
     state.config.floating_ball_auto_hide = value
     if (!isTauri()) return
@@ -1910,6 +1932,7 @@ export function useStore() {
     setRunAtStartup,
     setFloatingBallEnabled,
     setExtensionRowClick,
+    setAutoTrustService,
     setFloatingBallAutoHide,
     setFloatingBallWithMain,
     setFloatingBallButtons,

@@ -8,7 +8,8 @@
 //
 // 从 SettingsView.vue 拆出（见该文件顶部说明）：设置页按大类按需加载，
 // 首次打开只需外壳 + 当前大类的代码，切大类时才加载对应面板。
-import { inject, onMounted, ref } from 'vue';
+import { errorText } from '../../utils/errorText'
+import { computed, inject, onMounted, ref } from 'vue';
 import { Puzzle } from 'lucide-vue-next';
 import { isTauri, tauriApi } from '../../api/tauri';
 import type { DevModeStatus } from '../../api/tauri';
@@ -71,6 +72,23 @@ const ROW_CLICK_OPTIONS = [
 async function onRowClickChange(v: unknown) {
   await store.setExtensionRowClick(v === 'open' ? 'open' : 'detail')
 }
+
+// ---- 自动信任带后台的扩展（2026-10-06）----
+const autoTrustService = computed(() => !!store.state.config.auto_trust_service)
+const autoTrustBusy = ref(false)
+
+async function onToggleAutoTrust() {
+  if (autoTrustBusy.value) return
+  const next = !autoTrustService.value
+  autoTrustBusy.value = true
+  try {
+    await store.setAutoTrustService(next)
+  } catch (e) {
+    showToast(`保存失败：${errorText(e)}`)
+  } finally {
+    autoTrustBusy.value = false
+  }
+}
 </script>
 <template>
         <section id="sv-sec-extensions" class="sv-sec" aria-label="扩展">
@@ -107,6 +125,33 @@ async function onRowClickChange(v: unknown) {
           </div>
 
           <!-- 我的扩展的入口指路：目录增删都在扩展中心，这里只留一句话 + 一键跳过去 -->
+          <!--
+            自动信任 service 扩展（2026-10-06）。
+
+            ⚠️ 这是个**安全开关**，默认关闭，且文案必须说清代价：
+            「扩展作者改一版就自动拿到执行权」。只写「省去每次确认」的话
+            用户会以为只是省了点点击。
+          -->
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">自动信任带后台的扩展</span>
+              <span class="setting-desc">
+                关闭时，扩展的本地后台程序需要你逐版本确认信任才会启动（扩展一升级就要重新确认）；
+                开启后新版本自动获得执行权 —— 扩展作者改一版就能直接跑后台程序，不再问你
+              </span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="autoTrustService"
+              :class="{ on: autoTrustService }"
+              :disabled="autoTrustBusy"
+              aria-label="自动信任带后台的扩展"
+              @click="onToggleAutoTrust"
+            />
+          </div>
+
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-name">我的扩展</span>

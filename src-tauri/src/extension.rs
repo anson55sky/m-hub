@@ -1283,10 +1283,13 @@ fn write_permission_overrides(
 /// 某权限是否被授予：manifest 声明后默认授权，除非用户显式关闭。
 pub fn permission_granted(app: &tauri::AppHandle, ext_id: &str, perm: &str) -> bool {
     let overrides = read_permission_overrides(app, ext_id);
+    // ⚠️ 只在 service 分支里读配置：其它权限的判定与磁盘状态无关，
+    //   而每次读都要拿 config 锁 —— 权限表在桥 API 里被高频调用
+    let auto_trust = crate::config::load().auto_trust_service;
     if perm == "service:execute" {
         let version = crate::ext_protocol::resolve_ext_dir(app, ext_id).ok()
             .and_then(|dir| read_manifest(&dir).ok()).map(|m| m.version);
-        return service_version_trusted(&overrides, version.as_deref());
+        return service_version_trusted(&overrides, version.as_deref(), auto_trust);
     }
     overrides
         .get(perm)
@@ -1294,7 +1297,23 @@ pub fn permission_granted(app: &tauri::AppHandle, ext_id: &str, perm: &str) -> b
         .unwrap_or(true)
 }
 
-fn service_version_trusted(overrides: &Map<String, Value>, version: Option<&str>) -> bool {
+fn service_version_trusted(
+    overrides: &Map<String, Value>,
+    version: Option<&str>,
+    auto_trust: bool,
+) -> bool {
+    // ⚠️ **先看开关**：自动信任开启时直接放行，连版本都不要求。
+    //   放在后面写（`&&` 的最后一环）就是「开关打开也没用」—— 那是最容易
+    //   犯也最难发现的错：界面显示开关已开，行为却完全没变。
+    //
+    // ⚠️ `auto_trust` 是**参数**而不是内部读盘：否则这条用例的结论取决于
+    //   跑测试那台机器上的用户配置（用户在自己机器上一开开关，测试就红）。
+    //   与 `config::merge_disk_authoritative` 同一个理由：能纯函数就纯函数。
+    if auto_trust {
+        // 仍要求 manifest 里有版本号：那说明扩展确实声明了版本，
+        // 而不是「读不到 manifest 的坏扩展」被顺手信任了。
+        return version.is_some();
+    }
     version.is_some()
         && overrides.get("service:execute").and_then(Value::as_bool) == Some(true)
         && version == overrides.get("service:version").and_then(Value::as_str)
@@ -1359,15 +1378,37 @@ mod tests {
 
     #[test]
     fn security_service_requires_explicit_current_version_trust() {
-        assert!(!service_version_trusted(&Map::new(), Some("1.0.0")));
+        assert!(!service_version_trusted(&Map::new(), Some("1.0.0"), false));
         let mut permissions = Map::new();
         permissions.insert("service:execute".into(), Value::Bool(true));
-        assert!(!service_version_trusted(&permissions, None));
+        assert!(!service_version_trusted(&permissions, None, false));
         permissions.insert("service:version".into(), Value::String("1.0.0".into()));
-        assert!(service_version_trusted(&permissions, Some("1.0.0")));
-        assert!(!service_version_trusted(&permissions, Some("1.0.1")));
+        assert!(service_version_trusted(&permissions, Some("1.0.0"), false));
+        assert!(!service_version_trusted(&permissions, Some("1.0.1"), false));
         permissions.insert("service:execute".into(), Value::Bool(false));
-        assert!(!service_version_trusted(&permissions, Some("1.0.0")));
+        assert!(!service_version_trusted(&permissions, Some("1.0.0"), false));
+    }
+
+    /// 自动信任开关：开启后**任意版本**都放行，但**读不到版本仍然拒绝**。
+    ///
+    /// 两条边界都要钉住：① 开关必须真的生效 —— 写成 `&&` 的最后一环的话
+    ///   这条全绿，而界面显示「已开启」、行为没变；② 读不到 manifest 版本
+    ///   的坏扩展不能因为开了开关就自动获得执行权。
+    #[test]
+    fn auto_trust_short_circuits_version_gate_but_still_needs_a_version() {
+        let mut permissions = Map::new();
+        permissions.insert("service:execute".into(), Value::Bool(true));
+        permissions.insert("service:version".into(), Value::String("1.0.0".into()));
+
+        // 逐版本授权下这是拒绝的（版本对不上）
+        assert!(!service_version_trusted(&permissions, Some("1.0.1"), false));
+        // 开了自动信任：版本对不上也放行
+        assert!(service_version_trusted(&permissions, Some("1.0.1"), true));
+        // 连显式授权都没有也放行（开关的意义就是免掉逐次确认）
+        assert!(service_version_trusted(&Map::new(), Some("1.0.1"), true));
+        // ⚠️ 但读不到版本仍拒：那是「manifest 坏了」，不是「用户信任了它」
+        assert!(!service_version_trusted(&permissions, None, true));
+        assert!(!service_version_trusted(&Map::new(), None, true));
     }
 
     fn write_manifest(root: &Path, id: &str, manifest: serde_json::Value) {

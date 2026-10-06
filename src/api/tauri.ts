@@ -389,6 +389,14 @@ export interface AppConfig {
   note_editor_mode: string
   /** service 扩展运行时策略：auto / builtin / system */
   runtime_strategy: string
+  /**
+   * 自动信任带 service 后台的扩展（2026-10-06）。默认 false。
+   *
+   * 关闭时 service 后台**逐版本**显式授权（`service:version` 必须等于当前
+   * manifest 版本，版本一升就重新不信任）；打开后任意版本自动放行，
+   * 但读不到 manifest 版本的坏扩展仍然拒绝。
+   */
+  auto_trust_service: boolean
   /** 固定到左侧栏的扩展 id 列表（点击侧栏菜单即在主区打开对应扩展） */
   sidebar_extensions: string[]
   /** 扩展「默认打开方式」映射：extId → view / window / drawer（未设置时侧栏点击默认 view） */
