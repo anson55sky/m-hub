@@ -10,9 +10,10 @@ use crate::models::{
 };
 use crate::process;
 use crate::github_auth::GithubStatus;
+use crate::models::{FolderNode, NoteFolder};
 use crate::repo::{
-    chat, clipboard, countdown, detached_sticky, note, resource, snippet, sticky, subcategory,
-    tag, todo, todo_tag,
+    chat, clipboard, countdown, detached_sticky, note, note_folder, resource, snippet, sticky,
+    subcategory, tag, todo, todo_tag,
 };
 use crate::todo_recurrence;
 use rusqlite::Connection;
@@ -415,20 +416,176 @@ pub fn update_note(
     Ok(note)
 }
 
+/// 删除笔记 → **进回收站**（v0.8.0 起是软删）。
+///
+/// ⚠️ 这个命令的语义从「硬删」变成了「软删」，前端不需要改调用点就获得了
+/// 「可还原」。真正不可逆的是 `purge_note`（回收站里的「删除」）与
+/// `empty_note_trash`。保留 `delete_note` 这个名字是为了不破坏浮窗等既有调用点 ——
+/// 它们删完后主窗口刷新，回收站里的笔记自然不再出现。
 #[tauri::command]
 pub fn delete_note(state: State<'_, DbState>, id: i64) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    note::delete(&conn, id).map_err(err_str)?;
-    log::info!("删除笔记: id={}", id);
+    note::trash(&conn, id).map_err(err_str)?;
+    log::info!("删除笔记（进回收站）: id={}", id);
     Ok(())
 }
 
+/// 彻底删除单条笔记（回收站里的「删除」按钮）。**不可逆**，前端必须二次确认。
+#[tauri::command]
+pub fn purge_note(state: State<'_, DbState>, id: i64) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note::purge(&conn, id).map_err(err_str)?;
+    log::warn!("彻底删除笔记: id={}", id);
+    Ok(())
+}
+
+/// 从回收站还原。
+#[tauri::command]
+pub fn restore_note(state: State<'_, DbState>, id: i64) -> Result<Note, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let n = note::restore(&conn, id).map_err(err_str)?;
+    log::info!("还原笔记: id={}", id);
+    Ok(n)
+}
+
+/// 回收站列表（按删除时间倒序 —— 最近删的排最前，用户最可能想还原它）。
+#[tauri::command]
+pub fn list_trash_notes(state: State<'_, DbState>) -> Result<Vec<Note>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note::list_trash(&conn).map_err(err_str)
+}
+
+/// 清空回收站。**不可逆**，前端必须二次确认并报出条数。
+#[tauri::command]
+pub fn empty_note_trash(state: State<'_, DbState>) -> Result<usize, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let n = note::empty_trash(&conn).map_err(err_str)?;
+    log::warn!("清空回收站: {} 条", n);
+    Ok(n)
+}
+
+/// 清理超过保留天数的回收站条目。启动时调一次。
+///
+/// ⚠️ 返回**删掉的条数**，前端必须把它显示出来 —— 静默清理会让用户某天
+///   发现「我三个月前删的东西怎么找不回来了」，而他从未被告知过这件事。
+#[tauri::command]
+pub fn purge_expired_trash(state: State<'_, DbState>, keep_days: i64) -> Result<usize, String> {
+    if keep_days <= 0 {
+        // 0 或负数 = 永久保留。这是合法的用户选择，不该被当成错误、
+        // 更不该悄悄退化成「按 0 天清理」—— 那会在启动时把整个回收站清空。
+        return Ok(0);
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(keep_days);
+    let cutoff = cutoff.format("%Y-%m-%d %H:%M:%S%.6f").to_string();
+    let n = conn
+        .execute(
+            "DELETE FROM notes WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            rusqlite::params![cutoff],
+        )
+        .map_err(err_str)?;
+    if n > 0 {
+        log::info!("回收站自动清理: {} 条（保留 {} 天）", n, keep_days);
+    }
+    Ok(n)
+}
+
+/// 设置笔记的专属小图标。空串 = 恢复默认图标。
+#[tauri::command]
+pub fn set_note_icon(state: State<'_, DbState>, id: i64, icon: String) -> Result<Note, String> {
+    // 图标是 emoji 或短标识符，长度上限防的是「有人往里塞 1MB 文本」
+    if icon.chars().count() > 8 {
+        return Err("图标最多 8 个字符".into());
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note::set_icon(&conn, id, &icon).map_err(err_str)
+}
+
+/// 把笔记移到某个文件夹。`folder_id = None` = 未归类。
+#[tauri::command]
+pub fn move_note_to_folder(
+    state: State<'_, DbState>,
+    id: i64,
+    folder_id: Option<i64>,
+) -> Result<Note, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note::move_to_folder(&conn, id, folder_id).map_err(err_str)
+}
+
+/// 按文件夹筛选笔记列表。`folder_ids = None` → 全部；`Some([])` → 只要未归类；
+/// `Some([1,2])` → 这些文件夹（含各自全部后代，id 集合在前端算好传进来）。
+#[tauri::command]
+pub fn list_notes_by_folder(
+    state: State<'_, DbState>,
+    folder_ids: Option<Vec<i64>>,
+) -> Result<Vec<Note>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note::list_by_folder(&conn, folder_ids.as_deref()).map_err(err_str)
+}
+
 /// 笔记列表（仅元信息，不拉正文）：外部浮层保存速记后主窗口刷新列表用，
-/// 轻量于 get_initial_data 的全量加载
+/// 轻量于 get_initial_data 的全量加载。**排除回收站**。
 #[tauri::command]
 pub fn list_notes(state: State<'_, DbState>) -> Result<Vec<Note>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     note::list_meta(&conn).map_err(err_str)
+}
+
+// ---------- 速记文件夹（v0.8.0，发布说明 ①）----------
+
+/// 文件夹树（含每个节点「含后代」的笔记数）。
+#[tauri::command]
+pub fn list_note_folders(state: State<'_, DbState>) -> Result<Vec<FolderNode>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note_folder::tree(&conn).map_err(err_str)
+}
+
+/// 在 `parent` 下新建一级文件夹。`parent = ""` = 顶层。
+#[tauri::command]
+pub fn create_note_folder(
+    state: State<'_, DbState>,
+    parent: String,
+    name: String,
+) -> Result<NoteFolder, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let f = note_folder::create(&conn, &parent, &name)?;
+    log::info!("新建速记文件夹: {}", f.name);
+    Ok(f)
+}
+
+/// 改名（只改自己那一段，整棵子树跟着换父）。
+#[tauri::command]
+pub fn rename_note_folder(
+    state: State<'_, DbState>,
+    id: i64,
+    name: String,
+) -> Result<(), String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    note_folder::rename(&mut conn, id, &name)
+}
+
+/// 删除文件夹（连子树一起删；子树里的笔记改挂「未归类」而不是被删掉）。
+#[tauri::command]
+pub fn delete_note_folder(state: State<'_, DbState>, id: i64) -> Result<(), String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    note_folder::delete(&mut conn, id)
+}
+
+/// 文件夹重排（拖拽排序落点后写回）。
+#[tauri::command]
+pub fn reorder_note_folders(state: State<'_, DbState>, ids: Vec<i64>) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note_folder::reorder(&conn, &ids).map_err(err_str)
+}
+
+/// 某文件夹及其全部后代的 id 集合 —— 「筛选某层 = 含全部后代」。
+///
+/// 前端算渲染需要，但**判定真源在 Rust**（`subtree_ids`）：前端那份只做
+/// 展示用的裁剪，两边不一致时以这里为准（与速达小类同款约定）。
+#[tauri::command]
+pub fn note_folder_subtree_ids(state: State<'_, DbState>, id: i64) -> Result<Vec<i64>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note_folder::subtree_ids(&conn, id).map_err(err_str)
 }
 
 // ---------- 待办清单 ----------

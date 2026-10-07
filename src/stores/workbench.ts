@@ -664,7 +664,20 @@ export function useStore() {
   async function addNote(title: string) {
     const n = isTauri()
       ? await tauriApi.createNote(title)
-      : { id: Date.now(), title, content: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+      : {
+          id: Date.now(),
+          title,
+          content: '',
+          // ⚠️ 兜底对象必须与 `Note` 接口**逐字段对齐**。我第一版只写了
+          //   id/title/content/两个时间戳，加了 folder_id/deleted_at/icon
+          //   之后这里就类型不匹配 —— 而症状是「浏览器预览里新建的笔记
+          //   没有 folder_id」，不报错、只是行为诡异。
+          folder_id: null,
+          deleted_at: null,
+          icon: '',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }
     state.notes.unshift(n)
     return n
   }
@@ -672,7 +685,19 @@ export function useStore() {
   async function saveNote(id: number, title: string, content: string) {
     const n = isTauri()
       ? await tauriApi.updateNote(id, title, content)
-      : { id, title, content, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+      : {
+          id,
+          title,
+          content,
+          // ⚠️ 兜底时**保留原有** folder_id / icon / deleted_at：直接写
+          //   `folder_id: null` 会把一篇已归类的笔记「踢回未归类」，
+          //   而浏览器预览里不该发生任何数据变化。
+          folder_id: state.notes.find((x) => x.id === id)?.folder_id ?? null,
+          deleted_at: null,
+          icon: state.notes.find((x) => x.id === id)?.icon ?? '',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }
     const idx = state.notes.findIndex((x) => x.id === id)
     if (idx >= 0) state.notes[idx] = n
     return n

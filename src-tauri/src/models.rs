@@ -91,6 +91,11 @@ pub struct FolderNode {
     pub name: String,
     pub depth: usize,
     pub full_path: String,
+    /// 该文件夹**及其全部后代**里的笔记数。
+    ///
+    /// ⚠️ 是含后代的总数，不是「直属」。界面上父分类右边那个数字如果只算直属，
+    /// 用户点进去发现数量对不上，会以为筛选漏了东西。这与筛选口径
+    /// （`repo::note_folder::subtree_ids`）必须一致。
     pub note_count: i64,
     pub children: Vec<FolderNode>,
 }

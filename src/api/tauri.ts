@@ -114,8 +114,31 @@ export interface Note {
   id: number
   title: string
   content: string
+  /** 所属文件夹 id；`null` = 未归类（顶层）。 */
+  folder_id: number | null
+  /** 回收站：非空 = 已删除，时刻是该次删除的时间。 */
+  deleted_at: string | null
+  /** 专属小图标（emoji）；空串 = 用默认图标。 */
+  icon: string
   created_at: string
   updated_at: string
+}
+
+/** 速记文件夹（v0.8.0）。层级在 `name` 的全路径里（`工作`、`工作/会议`）。 */
+export interface NoteFolder {
+  id: number
+  name: string
+  sort_order: number
+}
+
+/** 文件夹树节点。`note_count` 含全部后代。 */
+export interface FolderNode {
+  id: number
+  name: string
+  depth: number
+  full_path: string
+  note_count: number
+  children: FolderNode[]
 }
 
 export interface Todo {
@@ -1187,7 +1210,31 @@ export const tauriApi = {
   createNote: (title: string) => invoke<Note>('create_note', { title }),
   updateNote: (id: number, title: string, content: string) =>
     invoke<Note>('update_note', { id, title, content }),
+  /** 删除笔记 → **进回收站**（软删，可还原）。彻底删除见 `purgeNote`。 */
   deleteNote: (id: number) => invoke<void>('delete_note', { id }),
+  purgeNote: (id: number) => invoke<void>('purge_note', { id }),
+  restoreNote: (id: number) => invoke<Note>('restore_note', { id }),
+  listTrashNotes: () => invoke<Note[]>('list_trash_notes'),
+  emptyNoteTrash: () => invoke<number>('empty_note_trash'),
+  /** 清理超过保留天数的回收站条目，返回条数（前端必须显示给用户）。 */
+  purgeExpiredTrash: (keepDays: number) => invoke<number>('purge_expired_trash', { keepDays }),
+  setNoteIcon: (id: number, icon: string) => invoke<Note>('set_note_icon', { id, icon }),
+  /** 移到某文件夹；`null` = 未归类。 */
+  moveNoteToFolder: (id: number, folderId: number | null) =>
+    invoke<Note>('move_note_to_folder', { id, folderId }),
+  /** `undefined` = 全部；`[]` = 只要未归类；`[1,2]` = 这些文件夹（含后代）。 */
+  listNotesByFolder: (folderIds?: number[]) =>
+    invoke<Note[]>('list_notes_by_folder', { folderIds }),
+  listNoteFolders: () => invoke<FolderNode[]>('list_note_folders'),
+  createNoteFolder: (parent: string, name: string) =>
+    invoke<NoteFolder>('create_note_folder', { parent, name }),
+  renameNoteFolder: (id: number, name: string) =>
+    invoke<void>('rename_note_folder', { id, name }),
+  /** 连子树一起删；子树里的笔记改挂「未归类」，不会被删掉。 */
+  deleteNoteFolder: (id: number) => invoke<void>('delete_note_folder', { id }),
+  reorderNoteFolders: (ids: number[]) => invoke<void>('reorder_note_folders', { ids }),
+  /** 某文件夹及其全部后代的 id —— 判定真源在 Rust。 */
+  noteFolderSubtreeIds: (id: number) => invoke<number[]>('note_folder_subtree_ids', { id }),
   listNotes: () => invoke<Note[]>('list_notes'),
   searchAll: (keyword: string) => invoke<SearchResult>('search_all', { keyword }),
   listTodos: () => invoke<Todo[]>('list_todos'),

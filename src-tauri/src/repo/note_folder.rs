@@ -19,28 +19,12 @@ use rusqlite::{params, Connection, Result};
 
 const COLS: &str = "id, name, sort_order";
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct NoteFolder {
-    pub id: i64,
-    pub name: String,
-    pub sort_order: i64,
-}
-
-/// 层级树节点。判定真源是 `repo::note_folder::tree`，前端那份只做展示。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct FolderNode {
-    pub id: i64,
-    pub name: String,
-    pub depth: usize,
-    pub full_path: String,
-    /// 该文件夹**及其全部后代**里的笔记数。
-    ///
-    /// ⚠️ 是含后代的总数，不是「直属」。界面上父分类右边那个数字如果只算直属，
-    /// 用户点进去发现数量对不上，会以为筛选漏了东西。
-    /// 这也是筛选的口径（`subtreeFilterSql`）—— 两处必须一致。
-    pub note_count: i64,
-    pub children: Vec<FolderNode>,
-}
+// ⚠️ `NoteFolder` 与 `FolderNode` **不在本文件定义**，它们在 `crate::models`。
+//   我第一版在这里各写了一份，于是 `commands.rs` 里 `models::NoteFolder` 与
+//   `note_folder::NoteFolder` 撞名、编译报「expected models::NoteFolder,
+//   found note_folder::NoteFolder」。同一个结构体两份定义 = 改一处忘另一处的
+//   起点（serde 属性、字段顺序都会漂）。
+pub use crate::models::{FolderNode, NoteFolder};
 
 fn row_to_folder(row: &rusqlite::Row) -> Result<NoteFolder> {
     Ok(NoteFolder {

@@ -128,7 +128,10 @@ const LEAD_MARK =
 function unifyListMarker(line: string): string {
   const m = line.match(/^(\s*)([-*+]|\d+[.)])([ \t]+)(.*)$/)
   if (!m) return line
-  const [, indent, marker, gap, rest] = m
+  // ⚠️ 只解构用到的：`gap` 那组是 `[ 	]+`，它的作用是**让正则跳过标记与
+  //   内容之间的空白**，而 `rest` 本身不需要空白。所以 `gap` 不能要 ——
+  //   `noUnusedLocals` 会报错（TS6133），这条提醒是对的。
+  const [, indent, marker, , rest] = m
   // ⚠️ 行首标记里的 `*` 在 Markdown 里可能是强调符号残留，但本函数只在
   //    「标记 + 空白 + 内容」形态下生效，所以不会误伤 `*斜体*`
   const bullet = /^\d/.test(marker) ? marker.replace(/[.)]$/, '.') : '-'
