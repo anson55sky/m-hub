@@ -93,6 +93,50 @@ if (!/\.read_timeout\(/.test(runtimeRs)) {
 }
 
 /**
+ * 规则 ③b：官方源必须**排在最后**。
+ *
+ * ⚠️ 这不是偏好问题：新版本发布时镜像会滞后（404），那一刻官方是唯一
+ *   有该版本的源。顺序反过来 = 新版本永远装不上，且症状是
+ *   「镜像说 404」而不是「顺序错了」，极难归因。
+ *
+ *   Rust 侧 `dist_urls_order_is_actually_asserted` 也守着同一条；两处都守
+ *   是有意的 —— 这条规则被违反过一次（变异测试第一版用 `.rev().chain()`
+ *   「反转」数组，结果没真换序，测试全绿），说明它值得两个独立断言。
+ */
+const urlBlock = runtimeRs.match(/fn dist_urls\(\)[\s\S]*?\n}/)
+if (!urlBlock) {
+  fail('src-tauri/src/runtime.rs：找不到 dist_urls —— 下载源的顺序规则无从检查')
+} else {
+  const block = urlBlock[0]
+  const official = block.indexOf('nodejs.org')
+  // ⚠️ 判据是「**存在任意镜像**」，不是「存在 npmmirror」——
+  //   第一版写死 npmmirror，结果「删掉 npmmirror、只留阿里云」这条变异
+  //   是绿的（规则退化成了查一个具体域名，域名换掉就失效）。
+  const mirrors = ['npmmirror.com', 'mirrors.aliyun.com', 'mirrors.huaweicloud.com',
+                   'mirrors.tencent.com', 'registry.npmmirror.com']
+  const firstMirror = Math.min(...mirrors.map((m) => {
+    const i = block.indexOf(m)
+    return i === -1 ? Number.MAX_SAFE_INTEGER : i
+  }))
+  if (official === -1) {
+    fail('dist_urls 里没有官方源 —— 镜像没有的版本就永远装不上')
+  } else if (firstMirror === Number.MAX_SAFE_INTEGER) {
+    fail(
+      'dist_urls 里一个镜像都没有。\n' +
+        '    实测（2026-10-06）官方 nodejs.org 在国内只有 0.34–1.28 MB/s，\n' +
+        '    48.8MB 的运行时要下 2.5 分钟起；而 cdn.npmmirror.com 是 16 MB/s（~3 秒）。\n' +
+        '    官方必须保留在**末尾**兜底，但排在它前面的镜像不能一个都没有。',
+    )
+  } else if (firstMirror > official) {
+    fail(
+      'dist_urls 里镜像排在官方**之后**。\n' +
+        '    新版本发布时镜像会滞后（404），那一刻官方是唯一有该版本的源。\n' +
+        '    顺序反过来 = 新版本永远装不上，而症状只显示「镜像 404」，极难归因。',
+    )
+  }
+}
+
+/**
  * 规则 ④：`ServiceState` 必须有独立的 `starting` 集合。
  *
  * ⚠️ 这是改成后台后**新引入**的洞：幂等检查读 `running`，而端口要等
