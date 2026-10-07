@@ -93,10 +93,29 @@ fn migrate(conn: &Connection) -> Result<()> {
           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
         );
 
+        -- 速记文件夹（v0.8.0）。层级是 `name` 里的**全路径**（`工作`、`工作/会议`），
+        -- 不是 parent_id 列 —— 理由与 `resource_subcategories` 同款，见约定 79：
+        -- 零迁移（老数据名里没有 `/`，天然是顶层）、notes.folder_id 语义一字不改、
+        -- UNIQUE(name) 继续有效。代价是段内不能含 `/`，由 validate_segment 拦。
+        -- ⚠️ 必须建在 notes **之前**：notes.folder_id 有 REFERENCES 指向它。
+        CREATE TABLE IF NOT EXISTS note_folders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+        );
+
         CREATE TABLE IF NOT EXISTS notes (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           title TEXT NOT NULL DEFAULT '',
           content TEXT NOT NULL DEFAULT '',
+          -- 速记文件夹（v0.8.0）：层级存在 note_folders.name 的全路径里，不在本表。
+          -- NULL = 未归类，存量笔记**不回填**（见约定 79）
+          folder_id INTEGER REFERENCES note_folders(id) ON DELETE SET NULL,
+          -- 回收站（v0.8.0）：NULL = 未删除。软删而非硬删，见约定 80
+          deleted_at TEXT,
+          -- 专属小图标（v0.8.0）：emoji 字符串；'' = 用默认图标
+          icon TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
         );
@@ -573,6 +592,57 @@ fn migrate(conn: &Connection) -> Result<()> {
     // （周期展开用 `repeat_mode <> 'once'`，SQLite 不走索引），它只让每次写 todos
     // 多维护一棵 B 树。老库在这里顺手删掉。
     conn.execute("DROP INDEX IF EXISTS idx_todos_repeat", [])?;
+
+    // ── 速记：文件夹 / 回收站 / 专属图标（v0.8.0，发布说明 ①③⑨）────────────
+    // 逐列补齐（ALTER TABLE ADD COLUMN 幂等）。**存量笔记一律不回填**：
+    // folder_id 保持 NULL（「未归类」是一等公民，不是待迁移的脏数据）。
+    let note_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(notes)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    for (col, def) in [
+        // ⚠️ folder_id 带 REFERENCES 时 SQLite 要求默认值为 NULL，恰好就是所需默认
+        ("folder_id", "INTEGER REFERENCES note_folders(id) ON DELETE SET NULL"),
+        ("deleted_at", "TEXT"),
+        ("icon", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !note_cols.iter().any(|c| c == col) {
+            conn.execute(&format!("ALTER TABLE notes ADD COLUMN {col} {def}"), [])?;
+        }
+    }
+    // 速达加密备注（v0.8.0，发布说明 ⑧）。密文是 base64 的密文串，NULL/'' = 无备注。
+    // secret_label 是**明文**的备注名（用户自己起的，列出来才知道哪条是哪个）——
+    // 刻意只加密正文不加密名字：全加密的话列表里只能看到一串密文，用户无法分辨。
+    let res_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(resources)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    for (col, def) in [
+        ("secret_note", "TEXT"),
+        ("secret_label", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !res_cols.iter().any(|c| c == col) {
+            conn.execute(&format!("ALTER TABLE resources ADD COLUMN {col} {def}"), [])?;
+        }
+    }
+
+    // 补列之后才建索引（老库此时才具备这些列）——
+    // 与上面 todos/clipboard 的索引同一处教训。
+    //
+    // ⚠️ 复合索引的列序按「等值列在前、范围/排序列在后」：
+    //   列表查询恒为 `WHERE deleted_at IS NULL [AND folder_id = ?] ORDER BY updated_at DESC`，
+    //   所以 deleted_at → folder_id → updated_at 这个顺序能让「未删除」这一条
+    //   （占绝大多数行）单独走索引前缀，而不是扫全表再排。
+    for sql in [
+        "CREATE INDEX IF NOT EXISTS idx_notes_live ON notes(deleted_at, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(deleted_at, folder_id, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_notes_trash ON notes(deleted_at DESC)",
+    ] {
+        conn.execute(sql, [])?;
+    }
+    // ⚠️ 老库上 `idx_notes_updated`（单列 updated_at）与新的复合索引前缀重复。
+    //   但**不删**：它是本文件 CREATE TABLE 段里建的，删了会让全新库的 schema
+    //   与老库不一致（两套 schema 漂移比多一棵 B 树贵得多）。留着。
 
     Ok(())
 }

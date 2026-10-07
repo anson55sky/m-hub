@@ -425,85 +425,17 @@ mod tests {
 //   那份只做展示、且刻意不参与判定 —— 真不一致时以这里为准。
 //   「同一规则写两遍」是这类改动的头号故障源，所以下面每条都配了负例。
 
-/// 层级段之间的分隔符。选 `/` 是因为：用户写不进小类名（见 `validate_segment`），
-/// 也不是文件系统字符，且比任何中文符号都更不容易和内容撞上。
-pub const SEP: char = '/';
-
-/// 段是否合法：非空、不超长、**不含分隔符**、不含首尾空白
-pub fn validate_segment(seg: &str) -> Result<(), String> {
-    let t = seg.trim();
-    if t.is_empty() {
-        return Err("小类名称不能为空".into());
-    }
-    if t.chars().count() > 20 {
-        return Err("小类名称需为 1–20 个字符".into());
-    }
-    if t.contains(SEP) {
-        // ⚠️ 必须拦：分隔符进了段名，「A/B」就有两种解释，路径本身歧义化，
-        //   而歧义会在改名/删除时静默算错子树（删「开发」把「开发/前端」也删了，
-        //   用户以为是两件独立的事）。
-        return Err(format!("小类名称不能包含「{SEP}」（那是层级分隔符）"));
-    }
-    if t != seg {
-        return Err("小类名称首尾不能有空格".into());
-    }
-    Ok(())
-}
-
-/// 拼子级全路径
-pub fn join_path(parent: &str, seg: &str) -> String {
-    if parent.is_empty() {
-        seg.to_string()
-    } else {
-        format!("{parent}{SEP}{seg}")
-    }
-}
-
-/// 全路径的最后一段（显示用）
-pub fn leaf_of(path: &str) -> &str {
-    path.rsplit(SEP).next().unwrap_or(path)
-}
-
-/// 全路径去掉最后一段（= 父路径）；顶层返回空串
-pub fn parent_path(path: &str) -> &str {
-    match path.rfind(SEP) {
-        Some(i) => &path[..i],
-        None => "",
-    }
-}
-
-/// 层级深度：顶层 0
-pub fn depth_of(path: &str) -> usize {
-    if path.is_empty() {
-        0
-    } else {
-        path.split(SEP).count() - 1
-    }
-}
-
-/// `path` 是否在 `ancestor` 之下（**含自身**）。
-///
-/// ⚠️ 必须是**按段**比，不是字符串前缀比：`开发` 不是 `开发者` 的祖先，
-///   而 `starts_with("开发")` 会说是 —— 于是「删掉『开发者』顺手带走了
-///   『开发』下所有条目」，而界面上这两行看着毫无关系。
-pub fn is_within(path: &str, ancestor: &str) -> bool {
-    if ancestor.is_empty() {
-        return true;
-    }
-    path == ancestor
-        || (path.len() > ancestor.len()
-            && path.starts_with(ancestor)
-            && path.as_bytes()[ancestor.len()] == SEP as u8)
-}
-
-/// 把一批全路径改挂到新父路径下（改名 / 删除级联用）
-pub fn reparent(from: &str, to: &str, path: &str) -> Option<String> {
-    if path == from {
-        return Some(to.to_string());
-    }
-    let rest = path.strip_prefix(from)?.strip_prefix(SEP)?;
-    Some(join_path(to, rest))
-}
+// 层级路径的纯函数已抽到 `repo::treepath.rs`：速记文件夹（`note_folders`）与速达小类
+// 是同构数据结构，共用一份实现。下面按原名 re-export，让本文件里所有既有调用点
+// （以及 `subcategory::join_path` 这样的外部引用）一个字都不用改。
+//
+// ⚠️ 抽取时把 `find_mut` 换成了**按 full_path 严格匹配**的版本。旧版额外接受
+//   `n.name == head`，那会命中**错误父级下的节点**：找 `A/B` 时若顶层没有 `A`
+//   却有 `X/A`，旧版会下钻到 `X/A` 并找到 `X/A/B`，而那不是要找的节点。
+//   严格版找不到就报「孤儿节点」，符合 `build_tree` 的契约。
+pub use crate::repo::treepath::{
+    build_tree, depth_of, is_within, join_path, leaf_of, parent_path, reparent, TreeNode,
+};
 
 /// 层级树的**唯一**构造处：按大类产出嵌套节点。
 ///
@@ -517,56 +449,41 @@ pub fn tree(conn: &Connection, kind: &str) -> rusqlite::Result<Vec<SubcategoryNo
     let rows = stmt.query_map(params![kind], row_to_sub)?;
     let subs: Vec<ResourceSubcategory> = rows.collect::<rusqlite::Result<_>>()?;
 
-    let mut roots: Vec<SubcategoryNode> = Vec::new();
-    // 自顶向下挂：每层先找到父节点再 push。
-    //
-    // ⚠️ 用 `sort_order` 升序遍历是有意的：父节点的 sort_order 一定早于
-    //   它的孩子吗？**不一定** —— 老数据全是 sort_order 0..n，后来新建的子级
-    //   拿到的 sort_order 更大，但用户可以把子级拖到父级之前（排序是全组的）。
-    //   所以真正的保证来自「建子级时它的 sort_order 一定 ≥ 当前最大值」，
-    //   而 delete 之后 `sort_order` 会有空洞 —— 空洞不影响单调性。
-    for s in subs {
-        let full_path = s.name.clone();
-        let node = SubcategoryNode {
-            id: s.id,
-            name: leaf_of(&full_path).to_string(),
-            depth: depth_of(&full_path),
-            full_path: full_path.clone(),
-            is_default: s.is_default,
-            children: Vec::new(),
-        };
-        let parent = parent_path(&full_path).to_string();
-        if parent.is_empty() {
-            roots.push(node);
-        } else {
-            let target = find_mut(&mut roots, &parent).ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "小类「{full_path}」的父级「{parent}」不存在（孤儿节点）"
-                ))
-            })?;
-            target.children.push(node);
-        }
-    }
-    Ok(roots)
+    // ⚠️ 排序是全组的：父节点的 sort_order 不一定早于它的孩子（老数据全是
+    //   sort_order 0..n，用户可以把子级拖到父级之前）。真正的保证来自
+    //   「建子级时它的 sort_order ≥ 当前最大值」，而 delete 之后会有空洞 ——
+    //   空洞不影响单调性。所以下面交给 `build_tree` 自顶向下反复找父。
+    let flat: Vec<(i64, String)> = subs.iter().map(|s| (s.id, s.name.clone())).collect();
+    let nodes = build_tree(&flat, "小类").map_err(rusqlite::Error::InvalidParameterName)?;
+
+    Ok(to_subcategory_nodes(nodes, &subs))
 }
 
-/// 在已建好的树里按**全路径**找节点（逐层下钻，故天然只命中真正的祖先）
-fn find_mut<'a>(nodes: &'a mut [SubcategoryNode], path: &str) -> Option<&'a mut SubcategoryNode> {
-    let (head, rest) = match path.find(SEP) {
-        Some(i) => (&path[..i], &path[i + 1..]),
-        None => (path, ""),
-    };
-    for n in nodes.iter_mut() {
-        if n.full_path != path && n.name != head {
-            continue;
-        }
-        return if rest.is_empty() {
-            Some(n)
-        } else {
-            find_mut(&mut n.children, rest)
-        };
-    }
-    None
+/// 通用骨架 → 速达小类节点（多一个 `is_default`）。
+fn to_subcategory_nodes(
+    nodes: Vec<TreeNode>,
+    subs: &[ResourceSubcategory],
+) -> Vec<SubcategoryNode> {
+    nodes
+        .into_iter()
+        .map(|n| SubcategoryNode {
+            id: n.id,
+            name: leaf_of(&n.full_path).to_string(),
+            depth: n.depth,
+            full_path: n.full_path,
+            is_default: subs
+                .iter()
+                .find(|s| s.id == n.id)
+                .is_some_and(|s| s.is_default),
+            children: to_subcategory_nodes(n.children, subs),
+        })
+        .collect()
+}
+
+/// 速达小类的段校验（业务名词 = 「小类」）。
+#[inline]
+pub fn validate_segment(seg: &str) -> Result<(), String> {
+    crate::repo::treepath::validate_segment(seg, "小类")
 }
 
 #[cfg(test)]
