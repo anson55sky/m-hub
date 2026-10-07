@@ -127,6 +127,31 @@ const chipsByDay = computed(() => {
   }
   return map
 })
+
+/** 某天的**完整**清单（不截断），用于格子的悬停提示。
+ *
+ * ⚠️ 必须另算一份而不是复用 `chipsByDay` —— 后者按 `MAX_CHIPS` 截断了，
+ * 拿它拼提示的话，悬停看到的永远是「前 N 条 +N」，那不是「当天完整清单」，
+ * 而用户悬停就是为了看被 +N 折叠掉的那几条。
+ *
+ * 返回空串而不是 undefined：`:title="undefined"` 在部分平台不渲染 title 属性，
+ * 悬停不出提示，而「没提示」与「这天没事项」在界面上长得一模一样。 */
+function dayFullList(key: string): string {
+  const real = realByDay.value.get(key) ?? []
+  const virtual = virtualByDay.value.get(key) ?? []
+  if (!real.length && !virtual.length) return ''
+  const lines: string[] = []
+  // 已完成的排在后面：悬停时先看到还没做的，与日历格子里 chip 的排序口径一致
+  const undone = real.filter((t) => !t.done)
+  const done = real.filter((t) => t.done)
+  for (const t of [...undone, ...done]) {
+    lines.push(`${t.done ? '✓ ' : '· '}${t.title}`)
+  }
+  for (const o of virtual) {
+    lines.push(`· ${titleOf.value.get(o.todo_id) ?? '周期待办'}（周期待办）`)
+  }
+  return lines.join('\n')
+}
 </script>
 
 <template>
@@ -154,21 +179,26 @@ const chipsByDay = computed(() => {
         :key="c.key"
         class="tc-cell"
         :class="{ out: c.out, today: c.today }"
+        :title="dayFullList(c.key)"
       >
+        <!-- 日期与事项**同一行**：格子再小也能同时看到「几号」和「有什么事」。
+             此前日期独占一行、事项在下一行，格子一矮日期就把事项挤没了。 -->
         <span class="tc-day">{{ c.day }}</span>
         <div class="tc-chips">
+          <!-- ⚠️ chip 上**刻意不给** `:title`：原生 title 取「最深层命中元素」的那个，
+               给 chip 加了 title，鼠标悬停在 chip 上就只会看到这一条，
+               永远看不到格子的「当天完整清单」—— 而悬停正是为了看被 +N 折叠掉的那几条。
+               「已完成」这个信息已由格子级提示里的 `✓` 前缀承担。 -->
           <span
             v-for="t in (chipsByDay.get(c.key)?.real ?? [])"
             :key="'r' + t.id"
             class="tc-chip real"
             :class="{ done: t.done, late: !t.done && dueBadge(t, today)?.kind === 'over' }"
-            :title="t.done ? `${t.title}（已完成）` : t.title"
           >{{ t.title }}</span>
           <span
             v-for="o in (chipsByDay.get(c.key)?.virtual ?? [])"
             :key="'v' + o.todo_id + o.at_ms"
             class="tc-chip virtual"
-            :title="`${titleOf.get(o.todo_id) ?? '周期待办'}（虚拟实例）`"
           >{{ titleOf.get(o.todo_id) ?? '周期待办' }}</span>
           <span v-if="(chipsByDay.get(c.key)?.more ?? 0) > 0" class="tc-more-cnt">
             +{{ chipsByDay.get(c.key)?.more }}
@@ -253,6 +283,10 @@ const chipsByDay = computed(() => {
   border-radius: 5px;
   background: var(--bg-card-soft);
   overflow: hidden;
+  /* 日期与事项同行（发布说明 ⑪）：日期占固定宽度，事项吃掉剩余横向空间。 */
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
 }
 .tc-cell.out {
   opacity: 0.4;
@@ -264,11 +298,21 @@ const chipsByDay = computed(() => {
   font-size: 0.5625rem;
   color: var(--text-4);
   font-variant-numeric: tabular-nums;
+  /* 不参与收缩：横向空间被事项挤掉时，保住的是日期而不是标题 ——
+     日期没了整格失去意义，标题被 `+N` 折叠掉还能靠悬停看全。 */
+  flex: 0 0 auto;
+  line-height: 1.5;
 }
 .tc-chips {
   display: flex;
   flex-direction: column;
   gap: 1px;
+  /* ⚠️ `min-width: 0` 不可省：flex 子项默认 `min-width: auto`，
+     chip 里的长标题会把这一列撑得比格子宽，把日期挤到格子外面去。
+     同行布局下这是最容易被忽略的一条。 */
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
 }
 .tc-chip {
   display: block;

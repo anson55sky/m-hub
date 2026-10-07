@@ -487,7 +487,9 @@ const kind = computed(() => {
         <div v-for="d in ['一', '二', '三', '四', '五', '六', '日']" :key="d" class="cal-dow">{{ d }}</div>
         <div v-for="c in calCells" :key="c.key" class="cal-cell" :class="{ out: c.out, today: c.today }">
           <span class="cal-day">{{ c.day }}</span>
-          <i v-if="calMarked.get(c.key)" class="cal-dot" :title="`${calMarked.get(c.key)} 条待办`"></i>
+          <div class="cal-body">
+            <i v-if="calMarked.get(c.key)" class="cal-dot" :title="`${calMarked.get(c.key)} 条待办`"></i>
+          </div>
         </div>
       </div>
     </template>
@@ -596,11 +598,12 @@ const kind = computed(() => {
   text-align: center;
 }
 .cal-cell {
+  /* 布局照抄真卡 `.tc-cell`（v0.7.x 起改为日期与事项**同行**）：预览与真卡
+     结构不一致时，用户会把它当成真卡的 bug（约定 27）。 */
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  gap: calc(1 * var(--u));
+  flex-direction: row;
+  align-items: flex-start;
+  gap: calc(2 * var(--u));
   /* 尺寸照抄真卡 .tc-cell（padding 2px 3px / 圆角 5px），只把 px 换成 var(--u) */
   padding: calc(2 * var(--u)) calc(3 * var(--u));
   border: 1px solid var(--border-soft);
@@ -618,6 +621,20 @@ const kind = computed(() => {
   font-size: calc(9 * var(--u));
   color: var(--text-4);
   font-variant-numeric: tabular-nums;
+  /* 与真卡 `.tc-day` 同口径：保日期、让标题被折叠 */
+  flex: 0 0 auto;
+  line-height: 1.5;
+}
+.cal-body {
+  /* 对应真卡的 `.tc-chips`。`min-width: 0` 同样不可省 —— flex 子项默认
+     `min-width: auto`，圆点本身不撑宽度，但省略它会让这条规则名不副实，
+     将来往里放文字时立刻踩到真卡那个坑。 */
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: calc(1 * var(--u));
 }
 .cal-dot {
   width: calc(4 * var(--u));
