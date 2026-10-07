@@ -4,6 +4,13 @@
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
     "types": ["vite/client"],
     "allowArbitraryExtensions": true,
+    /* 源文件之间的相对 import 带 `.ts` 扩展名。
+       起因：`npm run test:unit` 直接用 Node 的 --experimental-strip-types 加载
+       `src/utils/*.ts`，那是 ESM 解析器，不做扩展名补全 —— 写成 `./invisibleChars`
+       在 Vite 下正常、在测试里 ERR_MODULE_NOT_FOUND。
+       带扩展名则两边都成立，且「Node 能不能直接跑这个文件」从此可见
+       （少写一个扩展名时，测试会立刻红，而不是等将来某个脚本去加载它才炸）。 */
+    "allowImportingTsExtensions": true,
 
     /* Linting */
     "noUnusedLocals": true,

@@ -1,8 +1,21 @@
+import { stripInvisible } from './invisibleChars.ts'
+
 /**
  * Markdown 轻量纯文本化：用于笔记列表摘要、全局搜索片段、标题派生等纯展示场景（非渲染）。
+ *
+ * 中间那道 `stripInvisible` 是**必须的一步**，不是可有可无的加固：
+ * 粘贴进来的网页正文常夹带零宽空格（`U+200B`）、软连字符（`U+00AD`）这类
+ * `\s` 不认的字符 —— 摘要在页面上看不出异常，却会让 `GlobalSearch` 拿这段文本
+ * 做关键词高亮时位置对不上（前面凭空少几个字符）。
+ * 详见 `invisibleChars.ts` 顶上那份码位清单与分类规则。
  */
 export function markdownPlainText(md: string, maxLen = 60): string {
-  return md
+  // ⚠️ 先清不可见字符，**再**按 Markdown 语义拆结构 —— 顺序不能反。
+  //   网页复制出来的正文里，零宽字符会插进标签内部（`<br<U+200B>>`），
+  //   而 JS 的 `\s` 不含 `U+200B`，那种标签对 `/<br\s*\/?>/` 是不匹配的：
+  //   先清零宽字符才认得出它是换行标签，反过来摘要里会留下字面 `<br>`。
+  //   （`markdown.test.mjs` 里「清理在结构清理**之前**」那条守着这个顺序。）
+  return stripInvisible(md)
     .replace(/```[\s\S]*?(```|$)/g, ' ') // 围栏代码块（未闭合也算）
     .replace(/`([^`]*)`/g, '$1') // 行内代码保留内容
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ') // 图片整体剔除
