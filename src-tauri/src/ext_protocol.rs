@@ -1,6 +1,6 @@
 //! 扩展内容协议 `mhub-ext://`：扩展入口与其相对资源的**唯一来源**。
 //!
-//! 为什么不再让扩展走 asset 协议（见 `docs/adr/0008-extension-content-origin-isolation.md`）：
+//! 为什么不再让扩展走 asset 协议（见 AGENTS.md 约定 44）：
 //! asset 协议的作用域是**全局单例**，而扩展 iframe 一旦与用户数据同源，扩展里一行 `fetch`
 //! 就能取走数据根下的数据库（`mhub.db`）、`app.json` 与日志，**绕开桥 API 的权限系统**。
 //! 每个扩展使用独立 origin，且与宿主、asset 数据协议跨源。

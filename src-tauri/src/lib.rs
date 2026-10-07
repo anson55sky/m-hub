@@ -636,7 +636,7 @@ pub fn run() {
         })
         // 扩展内容协议：扩展入口与其相对资源的唯一来源。
         // origin = `mhub-ext.localhost`，与承载用户数据的 `asset.localhost` 跨源，
-        // 扩展因此无法直接读取数据根下的数据库 / 配置（见 docs/adr/0008）
+        // 扩展因此无法直接读取数据根下的数据库 / 配置（见 AGENTS.md 约定 44）
         .register_uri_scheme_protocol("mhub-ext", |ctx, request| {
             crate::ext_protocol::handle(ctx.app_handle(), request)
         })
@@ -646,7 +646,7 @@ pub fn run() {
             // 资产协议作用域：**只**放行必要的子目录（图标 / 壁纸 / 剪贴板图片 / 扩展），
             // 绝不放行整个数据根，也绝不写回 tauri.conf 的 `$APPDATA/**`。
             //
-            // 理由（见 docs/adr/0008-extension-content-origin-isolation.md）：资产协议作用域
+            // 理由（见 AGENTS.md 约定 44）：资产协议作用域
             // 是**全局单例**，而扩展 iframe 与资产资源同源 ⇒ 放行数据根等于任何扩展都能直接
             // fetch 到用户数据库（mhub.db）、app.json 与日志，从而绕开桥 API 的权限系统。
             // 数据目录可被改到 %APPDATA% 之外（自定义目录 / U 盘便携），故必须动态放行。

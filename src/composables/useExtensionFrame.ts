@@ -76,7 +76,7 @@ export function requestOpenExtensionSettings(extId: string) {
 /**
  * 扩展入口 URL 由后端 `read_extension_entry` 直接返回（`mhub-ext` 协议，逐段 percent 编码），
  * 前端不再自行拼 asset 协议地址：扩展 origin 因此与承载宿主数据的 `asset.localhost` 不同源，
- * 扩展无法直接读取数据根下的数据库与配置（见 docs/adr/0008-extension-content-origin-isolation.md）。
+ * 扩展无法直接读取数据根下的数据库与配置（见 AGENTS.md 约定 44）。
  */
 
 /**

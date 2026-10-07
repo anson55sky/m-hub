@@ -336,7 +336,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub market_endpoint: String,
     /// ⚠️ **已废弃、不再被读取**（v0.6.x）：曾经是「开发者模式」总开关，现在**登记即加载**——
-    /// 加进「我的扩展」的本机源码目录一律直挂（见 docs/adr/0005 的 v0.6.x 修订）。
+    /// 加进「我的扩展」的本机源码目录一律直挂（见 AGENTS.md 约定 45 的 v0.6.x 修订）。
     /// 字段保留只为兼容旧 `app.json` 里残留的 false，读到即忽略；不要再恢复读取。
     #[serde(default)]
     pub dev_mode_enabled: bool,
@@ -348,7 +348,7 @@ pub struct AppConfig {
     pub server_url: String,
     /// 「我的扩展」：本机扩展源码目录列表（绝对路径，目录须含 manifest.json）。
     /// 登记即加载（无需开关）；⚠️ 这些目录会被动态加入资产协议作用域，只暴露给扩展内容协议；
-    /// 不要添加敏感目录。见 docs/adr/0005-developer-mode-local-source-mount.md
+    /// 不要添加敏感目录。见 AGENTS.md 约定 45
     #[serde(default)]
     pub dev_extensions: Vec<String>,
     /// 扩展开发技能包（Skills）的自定义安装根目录（自动探测的助手目录之外的 skills 根）。

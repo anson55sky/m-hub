@@ -129,13 +129,32 @@ async fn download_builtin_node(app: &tauri::AppHandle) -> Result<PathBuf, String
     let Some(url) = dist_url() else {
         return Err("当前平台/架构没有官方预编译运行时，请安装 Node.js".into());
     };
-    let resp = reqwest::get(&url)
+    // ⚠️ **必须自己建 client 并设超时**，不能用 `reqwest::get`。
+    //
+    //   `reqwest::get` 用的是默认 client：**没有连接超时、没有读取超时**。
+    //   实测（2026-10-06，用户装 service 扩展后整窗卡死）：nodejs.org 在国内
+    //   可达但只有 ~340KB/s，48.8MB 的运行时要下 2.5 分钟；而连接一旦半死，
+    //   没有读取超时就是**永久挂起**。
+    //   口径与约定 35 的下载器同款：连接 15s、空闲读 30s，**不设总超时**
+    //   （慢链路下 30KB/s 传 48MB 需要几分钟，设了必误杀）。
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("下载器初始化失败: {e}"))?;
+    log::info!(
+        "开始下载内置 Node 运行时（{NODE_VERSION}，约 49MB，国内链路可能需要数分钟）：{url}"
+    );
+    let resp = client
+        .get(&url)
+        .send()
         .await
         .map_err(|e| format!("下载失败: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("下载失败: HTTP {}", resp.status()));
     }
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    log::info!("内置 Node 运行时下载完成：{} 字节", bytes.len());
 
     let dir = builtin_node_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

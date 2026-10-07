@@ -1,12 +1,12 @@
 {
   "name": "m-hub",
   "private": true,
-  "version": "0.7.4",
+  "version": "0.7.5",
   "type": "module",
   "scripts": {
     "test:security": "node --test tests/security.test.mjs",
     "dev": "vite",
-    "prebuild": "npm run test:unit && node scripts/gen-settings-index.mjs && node scripts/check-settings-css.mjs && node scripts/check-rounded-window.mjs && node scripts/check-css-comment-balance.mjs && node scripts/check-dash-preset.mjs && node scripts/check-notice-dnd-gate.mjs && node scripts/check-window-margin.mjs && node scripts/check-window-min-size.mjs && node scripts/check-default-shortcuts.mjs && node scripts/check-shortcut-text.mjs && node scripts/check-ext-frame-watchdog.mjs && node scripts/check-clipboard-anchor.mjs && node scripts/check-drag-loop-blocking.mjs && node scripts/check-response-keys.mjs",
+    "prebuild": "npm run test:unit && node scripts/gen-settings-index.mjs && node scripts/check-settings-css.mjs && node scripts/check-rounded-window.mjs && node scripts/check-css-comment-balance.mjs && node scripts/check-dash-preset.mjs && node scripts/check-notice-dnd-gate.mjs && node scripts/check-window-margin.mjs && node scripts/check-window-min-size.mjs && node scripts/check-default-shortcuts.mjs && node scripts/check-shortcut-text.mjs && node scripts/check-ext-frame-watchdog.mjs && node scripts/check-clipboard-anchor.mjs && node scripts/check-drag-loop-blocking.mjs && node scripts/check-response-keys.mjs && node scripts/check-service-startup.mjs && node scripts/check-doc-links.mjs",
     "check:settings-css": "node scripts/check-settings-css.mjs",
     "build": "vue-tsc -b && vite build",
     "gen:settings-index": "node scripts/gen-settings-index.mjs",
@@ -27,7 +27,9 @@
     "check:ext-frame-watchdog": "node scripts/check-ext-frame-watchdog.mjs",
     "verify:ext-cells": "node --experimental-strip-types scripts/verify-dash-ext-cells.ts",
     "check:response-keys": "node scripts/check-response-keys.mjs",
-    "test:unit": "node --experimental-strip-types --test src/utils/*.test.mjs"
+    "test:unit": "node --experimental-strip-types --test src/utils/*.test.mjs",
+    "check:service-startup": "node scripts/check-service-startup.mjs",
+    "check:doc-links": "node scripts/check-doc-links.mjs"
   },
   "dependencies": {
     "@internationalized/date": "^3.12.3",

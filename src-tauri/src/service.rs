@@ -11,7 +11,7 @@
 
 use crate::extension::{read_manifest, BackendSpec, ExtensionManifest};
 use crate::process::NoConsoleWindow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -27,11 +27,45 @@ pub struct ServiceRuntime {
 }
 
 /// 全局 service 运行时注册表（ext_id → ServiceRuntime）
-pub struct ServiceState(pub Mutex<HashMap<String, ServiceRuntime>>);
+pub struct ServiceState {
+    /// 已启动（或正在启动）的后端。`ServiceRuntime.port` 在就绪前不代表可用端口。
+    pub running: Mutex<HashMap<String, ServiceRuntime>>,
+    /// **正在启动中**的扩展 id。
+    ///
+    /// ⚠️ 这一层是 2026-10-06 补的：`start_service` 从主线程同步调用改成
+    ///   `spawn_blocking` 之后，两次调用会**真并发**，而幂等检查读的是
+    ///   `running` —— 端口要等「解析 node → 起进程」之后才写进去，
+    ///   所以两次调用都能通过检查 → 起两个 Node 进程、两个端口，
+    ///   而后写的那个会覆盖掉前一个的 `child` 句柄，**那个进程再也无人回收**。
+    ///   （改成后台之前是主线程串行调用的，天然不会有这个窗口。）
+    pub starting: Mutex<HashSet<String>>,
+}
 
 impl Default for ServiceState {
     fn default() -> Self {
-        ServiceState(Mutex::new(HashMap::new()))
+        ServiceState {
+            running: Mutex::new(HashMap::new()),
+            starting: Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+}
+
+/// 启动守卫：返回的守卫 drop 时自动从 `starting` 里摘掉（成功、报错、panic 都算）。
+///
+/// ⚠️ 必须用 RAII 而不是「每个 early return 前记得 remove」——
+///   `start_service` 里有 6 处提前返回（权限、manifest、backend、引擎类型、
+///   node 解析、端口分配），漏一处就会把那个扩展**永久锁死**在「正在启动」里，
+///   之后每次打开都直接返回 ALREADY_STARTING、再也起不来。
+struct StartingGuard<'a> {
+    state: &'a ServiceState,
+    ext_id: String,
+}
+
+impl Drop for StartingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.state.starting.lock() {
+            set.remove(&self.ext_id);
+        }
     }
 }
 
@@ -162,11 +196,27 @@ pub fn start_service(
     }
     let state = app.state::<ServiceState>();
     {
-        let map = state.0.lock().map_err(|e| e.to_string())?;
+        let map = state.running.lock().map_err(|e| e.to_string())?;
         if let Some(rt) = map.get(ext_id) {
             return Ok(rt.port);
         }
     }
+    // ⚠️ 抢启动权：**先占位再干活**。占位失败说明别的线程已经在起同一个扩展。
+    //   顺序不能反（先占位再查 running）—— 不查就会把「已启动」误判成「正在启动」。
+    {
+        let mut set = state.starting.lock().map_err(|e| e.to_string())?;
+        if !set.insert(ext_id.to_string()) {
+            // 不是错误：第一次启动会自己把端口写进 running，前端通过
+            // `runtime.info` 的 serviceReady 感知即可（/svc/ 代理此刻回 503，
+            // 那正是「后端还没起来」的正确回答）。
+            return Err("ALREADY_STARTING: 该扩展的后端正在启动中".into());
+        }
+    }
+    // 守卫必须在**所有**提前返回路径上生效，故交给 RAII（见 StartingGuard 的注释）
+    let _starting = StartingGuard {
+        state: &state,
+        ext_id: ext_id.to_string(),
+    };
 
     // 已装扩展与开发扩展共用解析路径（开发扩展由「我的扩展」直挂源码目录）
     let dir = crate::ext_protocol::resolve_ext_dir(app, ext_id)?;
@@ -259,7 +309,7 @@ pub fn start_service(
     // 先以 ready=false 入库并立即返回端口：netsh 放行（可 1s+）与探活（最长 10s）
     // 都不占用命令线程（read_extension_entry 懒启动路径），后台线程完成后回填 ready
     {
-        let mut map = state.0.lock().map_err(|e| e.to_string())?;
+        let mut map = state.running.lock().map_err(|e| e.to_string())?;
         map.insert(
             ext_id.to_string(),
             ServiceRuntime {
@@ -283,7 +333,7 @@ pub fn start_service(
         let ready = probe_ready(port, &bg_host, Duration::from_secs(10));
         // 探活失败时顺手取子进程退出码：后端在模块初始化阶段就崩时这是最快的判据
         let mut exit_code = None;
-        if let Ok(mut map) = bg_app.state::<ServiceState>().0.lock() {
+        if let Ok(mut map) = bg_app.state::<ServiceState>().running.lock() {
             if let Some(rt) = map.get_mut(&bg_ext) {
                 if !ready {
                     exit_code = rt
@@ -324,7 +374,7 @@ pub fn start_service(
 /// 停止并清理 service 扩展后端进程（卸载 / 宿主退出时调用）
 pub fn stop_service(app: &tauri::AppHandle, ext_id: &str) {
     if let Some(proxy) = app.try_state::<crate::proxy::ProxyState>() { proxy.revoke(ext_id); }
-    let mut rt = match app.state::<ServiceState>().0.lock() {
+    let mut rt = match app.state::<ServiceState>().running.lock() {
         Ok(mut map) => map.remove(ext_id),
         Err(_) => return,
     };
@@ -352,7 +402,7 @@ fn kill_and_reap(mut child: std::process::Child) {
 /// 宿主退出时停止所有 service 后端进程，避免残留
 pub fn stop_all(app: &tauri::AppHandle) {
     let state = app.state::<ServiceState>();
-    let mut map = match state.0.lock() {
+    let mut map = match state.running.lock() {
         Ok(m) => m,
         Err(_) => return,
     };
@@ -371,7 +421,7 @@ pub fn stop_all(app: &tauri::AppHandle) {
 /// 已启动 service 的端口（未启动返回 None）
 pub fn service_port(app: &tauri::AppHandle, ext_id: &str) -> Option<u16> {
     let state = app.state::<ServiceState>();
-    let map = state.0.lock().ok()?;
+    let map = state.running.lock().ok()?;
     map.get(ext_id).map(|rt| rt.port)
 }
 
@@ -473,7 +523,7 @@ fn ensure_firewall_rule(ext_id: &str, port: u16, program: &str) {
 /// service 是否就绪
 pub fn service_ready(app: &tauri::AppHandle, ext_id: &str) -> bool {
     let state = app.state::<ServiceState>();
-    let map = state.0.lock().ok();
+    let map = state.running.lock().ok();
     map.and_then(|m| m.get(ext_id).map(|rt| rt.ready))
         .unwrap_or(false)
 }
@@ -612,5 +662,98 @@ mod tests {
         assert!(mk(Some("192.168.1.5".into())).is_external());
         assert_eq!(mk(None).listen_host(), "127.0.0.1");
         assert_eq!(mk(Some("0.0.0.0".into())).listen_host(), "0.0.0.0");
+    }
+}
+
+#[cfg(test)]
+mod starting_guard_tests {
+    use super::*;
+
+    /// 并发启动必须只放一个进来。
+    ///
+    /// ⚠️ 这条守的是 2026-10-06 引入的洞：幂等检查读 `running`，而端口要等
+    ///   「解析 node → 起进程」之后才写进去。改成 `spawn_blocking` 之后两次调用
+    ///   会真并发，两次都能通过那个检查 → **两个 Node 进程**，
+    ///   而后写的覆盖掉前一个的 `child` 句柄，那个进程再也无人回收。
+    ///
+    /// 做法：模拟两个线程同时抢同一个 ext_id，断言「恰好一个拿到启动权」。
+    /// 用 `Barrier` 让它们真正撞在一起（不加的话大概率串行，测试是假绿）。
+    #[test]
+    fn concurrent_start_lets_exactly_one_win() {
+        // ServiceState 的两个字段都是 Mutex → 整个结构是 Send + Sync，
+        // 所以 Arc 共享是安全的，**不需要**裸指针（第一版用了 &as *const _，
+        // 那是在给自己埋 UB：线程里解引用一个可能已 drop 的借用）。
+        let state = std::sync::Arc::new(ServiceState::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let winners = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                let winners = winners.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    // 复刻 start_service 的抢位逻辑：insert 成功者拿到启动权
+                    let mut set = state.starting.lock().unwrap();
+                    if set.insert("ext".to_string()) {
+                        drop(set);
+                        *winners.lock().unwrap() += 1;
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(*winners.lock().unwrap(), 1, "两个线程只应有一个拿到启动权");
+    }
+
+    /// 不同扩展互不阻塞（`starting` 是按 id 记的，不是全局开关）。
+    #[test]
+    fn starting_is_per_extension() {
+        let state = ServiceState::default();
+        // ⚠️ 先自己占位（守卫只负责 drop 时摘除，占位是 start_service 里的 insert）——
+        //   第一版直接 new 守卫就断言 contains，那测的是「守卫会插位」，它压根不干这事
+        state.starting.lock().unwrap().insert("a".to_string());
+        let _a = StartingGuard {
+            state: &state,
+            ext_id: "a".to_string(),
+        };
+        let mut set = state.starting.lock().unwrap();
+        assert!(set.insert("b".to_string()), "另一个扩展应当能同时占位");
+        assert!(!set.insert("a".to_string()), "同一个扩展不应能重复占位");
+    }
+
+    /// 守卫 drop 时必须摘掉 —— 否则该扩展被**永久锁死**在「正在启动」里，
+    /// 之后每次打开都直接 ALREADY_STARTING、再也起不来。
+    #[test]
+    fn guard_releases_on_drop_including_panic() {
+        let state = ServiceState::default();
+        {
+            state.starting.lock().unwrap().insert("x".to_string());
+            let _g = StartingGuard {
+                state: &state,
+                ext_id: "x".to_string(),
+            };
+            assert!(state.starting.lock().unwrap().contains("x"));
+        }
+        assert!(!state.starting.lock().unwrap().contains("x"), "正常作用域结束应释放");
+
+        // panic  unwind 也要释放：catch_unwind 验证 RAII 而非「每条 return 记得 remove」
+        let st = ServiceState::default();
+        st.starting.lock().unwrap().insert("y".to_string());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = StartingGuard {
+                state: &st,
+                ext_id: "y".to_string(),
+            };
+            panic!("boom");
+        }));
+        assert!(r.is_err());
+        assert!(
+            !st.starting.lock().unwrap().contains("y"),
+            "panic 后也必须释放，否则该扩展再也起不来"
+        );
     }
 }

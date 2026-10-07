@@ -211,7 +211,7 @@ fn default_kind() -> String {
 
 /// 扩展来源：已装（位于扩展根，可被市场更新 / 卸载）
 pub const SOURCE_INSTALLED: &str = "installed";
-/// 扩展来源：「我的扩展」直挂的本机源码目录（不参与市场更新与卸载，见 docs/adr/0005）
+/// 扩展来源：「我的扩展」直挂的本机源码目录（不参与市场更新与卸载，见 AGENTS.md 约定 45）
 pub const SOURCE_DEV: &str = "dev";
 
 /// 已安装扩展的注册表项（返回给前端的展示结构）。
@@ -297,7 +297,7 @@ pub fn scan_extensions(app: &tauri::AppHandle) -> Result<Vec<ExtensionEntry>, St
         }
     }
 
-    // 本机源码目录直挂（不复制进扩展根，见 docs/adr/0005）。
+    // 本机源码目录直挂（不复制进扩展根，见 AGENTS.md 约定 45）。
     // 已装扩展优先：同 id 冲突时跳过开发目录，避免「打开的到底是哪一份」这种排查噩梦。
     // 注：v0.6.x 起**不再有「开发者模式」开关**——加进「我的扩展」就等于要调试，登记即加载。
     let cfg = crate::config::load();
@@ -465,7 +465,7 @@ pub fn list_extensions(app: tauri::AppHandle) -> Result<Vec<ExtensionEntry>, Str
     Ok(entries)
 }
 
-// ---------------- 「我的扩展」：本机源码目录直挂（docs/adr/0005） ----------------
+// ---------------- 「我的扩展」：本机源码目录直挂（AGENTS.md 约定 45） ----------------
 
 /// 单个开发扩展目录的解析结果（扩展中心「我的扩展」展示用）
 #[derive(Debug, Clone, Serialize)]
@@ -1083,9 +1083,22 @@ pub(crate) fn inject_bridge(html: &str, bridge: &str) -> String {
 ///
 /// 入口 HTML 由扩展协议在返回时**动态注入桥脚本**，不再写 `<扩展目录>/.xhpack/<surface>.html`：
 /// 入口与扩展目录内的相对资源（Vite 产物的 module script / css）仍同源可加载，
-/// 而开发扩展的源码目录不会被宿主写脏（见 docs/adr/0008-extension-content-origin-isolation.md）。
+/// 而开发扩展的源码目录不会被宿主写脏（见 AGENTS.md 约定 44）。
+///
+/// ⚠️ **必须是 `async fn`**（2026-10-06 修「装 service 扩展后整窗卡死」）。
+///
+///   同步命令跑在**主线程**上，而下面的 service 懒启动会在主线程上
+///   `block_on` 下载内置 Node 运行时 —— 实测国内链路 ~340KB/s、48.8MB，
+///   整窗无响应 2.5 分钟；若连接半死且没有读取超时，就是**永久冻结**。
+///
+///   两处一起改，缺一不可：
+///   ① 声明成 `async`，让 Tauri 把它派到异步运行时，主线程不被占；
+///   ② service 启动整段 `spawn_blocking` 抛出去 —— 它是「下载 + 起进程 + 探活」
+///      的阻塞活，放异步运行时上会占住一个 worker 线程（多线程运行时不死锁，
+///      但同样是长时间空占）。这也与本函数既有的设计一致：下方 service 启动
+///      的 netsh 放行与探活**本来就**是抛到后台线程做的，只有 node 下载被漏掉了。
 #[tauri::command]
-pub fn read_extension_entry(
+pub async fn read_extension_entry(
     app: tauri::AppHandle,
     id: String,
     surface: Option<String>,
@@ -1099,10 +1112,18 @@ pub fn read_extension_entry(
         if !permission_granted(&app, &id, "service:execute") {
             return Err("PERMISSION_DENIED: 本地后端尚未授权。请在扩展权限设置中确认信任此版本后开启「运行本地后端」".into());
         }
-        if let Err(e) = crate::service::start_service(&app, &id) {
-            // 不阻断前端加载：前端仍能打开，runtime.info 会返回 serviceReady=false
-            log::warn!("service 扩展 {id} 后端启动失败: {e}");
-        }
+        // ⚠️ 整段抛到后台线程：**不 await**。
+        //   契约本来就是「后端没就绪时前端仍能打开，runtime.info 返回
+        //   serviceReady=false」（见 ext_scaffold 的脚手架文案），
+        //   所以这里等不等对前端没有区别 —— 但等就是主线程/worker 被占住。
+        //   端口返回值本来就被丢弃（只用 Err 记一行日志），抛出去无损。
+        let bg_app = app.clone();
+        let bg_id = id.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(e) = crate::service::start_service(&bg_app, &bg_id) {
+                log::warn!("service 扩展 {bg_id} 后端启动失败: {e}");
+            }
+        });
     }
 
     let surface = surface.unwrap_or_else(|| manifest.kind.clone());

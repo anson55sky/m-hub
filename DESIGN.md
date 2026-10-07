@@ -1,6 +1,6 @@
 # m-hub Design System
 
-> 版本对齐：v0.7.4。本文档为当前实现的唯一设计基线，UI 改动以本文件 + `src/style.css` 为准。
+> 版本对齐：v0.7.5。本文档为当前实现的唯一设计基线，UI 改动以本文件 + `src/style.css` 为准。
 
 ## 1. Atmosphere & Identity
 
@@ -244,7 +244,7 @@ m-hub 是一个安静、可靠的本地桌面工作台：用户打开它是为�
 
 ## 8. Reka UI 组件规范（v0.1.13 起）
 
-> 详细文档见 `docs/reka-ui.md`。Reka UI 为无头组件库（不提供样式），外观一律用项目设计令牌自绘。当前用于复杂输入组件：`CountdownCard.vue`（`DatePicker` 定时日期、`TimeField` 定时/每天时:分、`NumberField` 时长/间隔步进）、`TodoDateTimeField.vue`（待办截止/提醒/周期结束日期）。
+> 详细规范见 `AGENTS.md` 约定 23/24/25 与「注意事项·reka-ui 调试」。Reka UI 为无头组件库（不提供样式），外观一律用项目设计令牌自绘。当前用于复杂输入组件：`CountdownCard.vue`（`DatePicker` 定时日期、`TimeField` 定时/每天时:分、`NumberField` 时长/间隔步进）、`TodoDateTimeField.vue`（待办截止/提醒/周期结束日期）。
 
 ### 8.1 Portal 弹层：容器样式必须 `:global()`
 

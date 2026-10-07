@@ -1,7 +1,7 @@
 /**
  * m-hub 桥 API（window.mhub）全局类型声明。
  *
- * 这是扩展与宿主通信的唯一契约，对齐 `docs/extension-api.md`。
+ * 这是扩展与宿主通信的唯一契约；能力清单见 AGENTS.md 约定 32。
  * 宿主在加载扩展入口 HTML 时自动注入 `window.mhub`，扩展脚本直接调用，
  * 无需 import 任何包。
  *

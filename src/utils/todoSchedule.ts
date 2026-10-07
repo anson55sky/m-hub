@@ -1,6 +1,6 @@
 /**
  * 待办排期（截止日期/提醒）纯工具：分组、徽标文案、日历网格。
- * 与 TodoCard 原型 docs/prototypes/todo-schedule-prototype.html 的规则保持一致。
+ * 与 TodoCard 的分组规则保持一致（规则全文见 AGENTS.md 约定 40）。
  */
 
 export type DueBadgeKind = 'over' | 'today' | 'tmr' | 'date'

@@ -13,7 +13,7 @@ import { useStore } from '../../stores/workbench';
 const showToast = inject<(msg: string) => void>('showToast', () => {})
 const store = useStore()
 
-// ---- 应用壁纸与卡片玻璃透明度（见 docs/adr/0002：模糊作用于壁纸层整体） ----
+// ---- 应用壁纸与卡片玻璃透明度（见 AGENTS.md 约定 37：模糊作用于壁纸层整体） ----
 // 壁纸单一套，所有主题模式共用同一张壁纸与蒙版
 const wallpaperSrc = computed(() => {
   const p = store.state.config.wallpaper_path

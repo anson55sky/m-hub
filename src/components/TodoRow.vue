@@ -30,7 +30,7 @@ import ConfirmDialog from './ConfirmDialog.vue'
 
 /**
  * 待办行（TodoCard 的递归子组件）：父条目与子待办共用一套行渲染。
- * 子待办嵌在父行 .todo-mid 内缩进展示，规则与 docs/prototypes/todo-schedule-prototype.html 一致：
+ * 子待办嵌在父行 .todo-mid 内缩进展示，规则与 AGENTS.md 约定 40 一致：
  * 排期徽标（逾期红/今天橙/明天品牌色/其他灰）点击弹出排期层（由卡片提供）；
  * 删除经卡片统一处理（父条目级联删子 + 撤销）。
  */

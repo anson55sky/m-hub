@@ -4,7 +4,7 @@ m-hub 是一个本地优先的个人效率工作台（Tauri 2 + Vue 3），围�
 
 ## 引导（Onboarding）
 
-> ⚠️ **状态：规划中，尚未实施**（决策见 `docs/adr/0001-first-run-onboarding.md`；截至 v0.3.0 代码中不存在 OnboardingDialog / HelpView / onboarding_done / is_first_run，以下术语为实施前预登记，实现时按此命名）。
+> ⚠️ **状态：规划中，尚未实施**（决策见 AGENTS.md「待实现」节；截至 v0.3.0 代码中不存在 OnboardingDialog / HelpView / onboarding_done / is_first_run，以下术语为实施前预登记，实现时按此命名）。
 
 **快速设置弹窗（OnboardingDialog）**：
 首次运行自动弹出的三步向导（外观 / 快捷键 / 数据与隐私），目标 <60 秒完成，可跳过。
@@ -149,7 +149,7 @@ _Avoid_：毛玻璃模式（未说明是整屏柔化还是卡片局部取景）
 
 ## 扩展与市场
 
-> 本节术语来自「扩展市场开放给第三方开发者」的设计讨论（2026-09）与随后的实现。前半部分是宿主侧行为（已实现），后半部分是平台治理流程（服务端已实现，见 `docs/open-market-client-plan.md`）。
+> 本节术语来自「扩展市场开放给第三方开发者」的设计讨论（2026-09）与随后的实现。前半部分是宿主侧行为（已实现），后半部分是平台治理流程（服务端已实现，方案要点见 AGENTS.md 约定 60）。
 
 **扩展根（Extensions Root）**：
 已装扩展的唯一来源位置：`data_root()/extensions/<扩展 id>/`（便携版跟随 exe 目录）。扫描、热更新戳、入口加载全部以它为根；`.` 开头的目录（`.backup`、`.tmp-update`）被扫描与戳计算跳过。

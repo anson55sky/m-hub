@@ -1517,7 +1517,7 @@ export const tauriApi = {
     invoke<string>('read_extension_entry', { id, surface: surface ?? null }),
   /** 在系统文件管理器中打开扩展所在目录（开发调试用；返回实际打开的绝对路径） */
   openExtensionDir: (id: string) => invoke<string>('open_extension_dir', { id }),
-  // ---- 「我的扩展」（本机源码目录直挂，登记即加载；见 docs/adr/0005） ----
+  // ---- 「我的扩展」（本机源码目录直挂，登记即加载；见 AGENTS.md 约定 45） ----
   getDevModeStatus: () => invoke<DevModeStatus>('get_dev_mode_status'),
   addDevExtension: (path: string) => invoke<DevModeStatus>('add_dev_extension', { path }),
   /**
