@@ -19,7 +19,7 @@
 //
 // 三条规则都做过变异验证：逐条破坏后本守卫必须报错。
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -149,6 +149,33 @@ if (!/pub starting\s*:\s*Mutex<HashSet<String>>/.test(serviceRs)) {
     'src-tauri/src/service.rs：ServiceState 必须有独立的 `starting` 集合。\n' +
       '    只有 `running` 的话，并发启动会起两个 Node 进程，且前一个的 child 句柄被覆盖、进程成孤儿。',
   )
+}
+
+/**
+ * 规则 ⑤：`.github/workflows/` 里不许有 Windows 专属的发布 workflow。
+ *
+ * ⚠️ 这不是「顺手清理」。上游的 release.yml 触发条件是 `v*` 标签，
+ *   而它编译的是 `src-tauri/target/release/m-hub.exe` —— 本仓库是 macOS 版，
+ *   那个文件**根本不存在**（产物是 .app/.dmg）。后果：打错一个标签就白烧
+ *   10 分钟 CI 额度，产出一个用不了的 Windows exe，而且直到下载才会发现。
+ *
+ *   ci.yml 用 macos-latest 是**允许**的（它本来就该跑在 macOS 上）。
+ */
+const wfDir = join(root, '.github/workflows')
+if (existsSync(wfDir)) {
+  for (const f of readdirSync(wfDir)) {
+    if (!/\.ya?ml$/.test(f)) continue
+    const text = readFileSync(join(wfDir, f), 'utf8')
+    if (!/on:[\s\S]*?tags:/.test(text) && !/tags:\s*\[?\s*['"]v/.test(text)) continue
+    if (/runs-on:\s*windows/.test(text)) {
+      fail(
+        `.github/workflows/${f} 同时「按 v* 标签触发」且「跑在 windows runner」——\n` +
+          '    本仓库是 macOS 移植版，产物是 .app/.dmg，Windows runner 上编译不出它。\n' +
+          '    打错标签会白烧 CI 额度并产出一个用不了的 exe。\n' +
+          '    发版走本地：npm run tauri:build → 自签 → 上传 Release（见 AGENTS.md 发版清单）。',
+      )
+    }
+  }
 }
 
 if (failed) {

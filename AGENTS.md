@@ -682,6 +682,33 @@ cd src-tauri && cargo test --lib    # Rust 单元测试（macOS 直接跑，无�
 
 ## 发版清单（版本号单一来源 = README）
 
+### ⚠️ 为什么没有 release workflow（2026-10-06 开源时核实）
+
+上游的 `.github/workflows/release.yml` **已删除**：它是纯 Windows 的
+（`runs-on: windows-latest` + 找 `src-tauri/target/release/m-hub.exe` +
+打 `win-x64.zip` + 便携版 marker 文件），而本仓库是 macOS 版，产物是
+`.app` / `.dmg`，那个 exe 根本不存在。三条理由：
+
+1. **CI 上做不出可用的产物**。macOS 分发单元是整个 `.app` 包，且必须签名 ——
+   签名要证书，GitHub runner 上没有。所以 CI 只能产出**未签名**的 `.app`，
+   用户双击会被 Gatekeeper 拦（还得「右键→打开」或 `xattr -dr com.apple.quarantine`）。
+   这比不给更糟：用户会以为下载坏了。
+2. **触发条件是 `v*` 标签**，而它编译的是 Windows exe —— 打错一个标签就白烧
+   10 分钟 CI 额度并产出一个用不了的东西。
+3. **本地构建已经覆盖了**：`npm run tauri:build` 出 `.app` + `.dmg`，本机自签，
+   `shasum -a 256` 校验后上传 Release。本轮 v0.7.5 就是这么出的。
+
+保留的两个 workflow：
+- `ci.yml` —— 已适配 macOS（`macos-latest` + `npm run tauri:test`，后者在 macOS
+  上就是普通 `cargo test --lib`，不需要上游那个嵌 manifest 的 PowerShell 包装，
+  见约定 67）。
+- `release-extension.yml` —— **已停用**（`workflow_dispatch` only，任何触发只打印
+  说明并失败）。它是一份显式的历史记录：扩展发布自 2026-09 起统一走服务端，
+  该 workflow 曾依赖的签名私钥与 COS/R2 凭据 secret 已全部删除。
+  **不要因为「看起来是遗留」就删它** —— 里面记着「为什么私钥不能留在开源仓」。
+
+
+
 每次发版从 README 向下同步版本号（`README.md` 徽章 → `package.json` → `src-tauri/tauri.conf.json` → `src-tauri/Cargo.toml` → `AGENTS.md` 头部），并：
 
 1. 在 `RELEASE_NOTES.md` **顶部**新增一节 `# vX.Y.Z 发布说明`（累积式，旧版依次排后，勿覆盖历史）。若改动要**并入尚未发布的当前版本**（版本号不变，如 v0.5.2 的 tag 已打但 release 未 publish），则不新增节，直接就地修订该节条目。

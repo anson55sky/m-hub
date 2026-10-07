@@ -3,13 +3,22 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
 
 jobs:
   check:
-    runs-on: windows-latest
+    # ⚠️ macos-latest —— 本仓库是 x-hub 的 **macOS 移植版**（AGENTS.md 开篇）。
+    # 原上游用的是 windows-latest，而那边 `npm run tauri:test` 需要一个
+    # PowerShell 包装脚本给测试 exe 嵌 Common-Controls v6 manifest，否则测试
+    # 进程起不来（STATUS_ENTRYPOINT_NOT_FOUND，表现为「测试静默没跑」）。
+    # macOS 上没有这个问题：package.json 里的 `tauri:test` 就是普通的
+    # `cargo test --lib`，直接跑即可（AGENTS.md 约定 67 记录了这个差异）。
+    #
+    # ⚠️ macos-latest 是 **arm64**。本工程支持 aarch64 / x86_64 两个
+    #   darwin 目标，见 runtime.rs::DIST_TARGET。
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,7 +26,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 与 package.json 的 engines / lockfile 对齐（Vite 8 需要 ≥ 20.19）
+          node-version: 22
           cache: npm
 
       - name: Setup Rust
@@ -25,22 +35,37 @@ jobs:
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
 
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Frontend type check & build
+      # `npm run build` 会先跑 prebuild（npm lifecycle 自动触发），那里面是
+      # 全部构建期守卫：settings 索引、CSS 注释配平、圆角口径、窗口边距、
+      # 快捷键文案、响应字段名对账、service 启动线程、docs 死链。
+      # 所以这一步既是编译也是**守卫生成式的一次性验证**。
+      - name: Frontend type check & build (含全部构建期守卫)
         run: npm run build
 
-      # 安全回归（tests/security.test.mjs）：此前只存在于 package.json，CI 从未执行
+      - name: Frontend pure-function tests
+        run: npm run test:unit
+
       - name: Frontend security tests
         run: npm run test:security
 
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
-      # Rust 单测（含扩展内容协议的入口引用改写夹具回归）。必须走这个包装脚本：
-      # 它会给测试 exe 嵌 Common-Controls v6 manifest，否则 Windows 上测试进程
-      # 起不来（STATUS_ENTRYPOINT_NOT_FOUND），表现为「测试静默没跑」。
+      # macOS 直接 cargo test --lib，无需任何包装。
+      # `--lib` 是必须的：仓库里没有集成测试目标，且单元测试 exe 需要
+      # 与 bin 相同的运行环境。
       - name: Rust tests
         run: npm run tauri:test
+
+      # ⚠️ 这一条**不是**形式检查：AGENTS.md 的路径契约守卫（前后端 API 规格
+      #   对账）读的是 server/ 与 src-tauri/src/api_spec.rs 两侧的源码，
+      #   在 `npm run build` 里已经跑过；这里再显式跑一次是为了让**失败点更靠近
+      #   它该在的地方**（契约不一致在 CI 日志里单独一行，而不是混在 build 输出里）。
+      - name: API 契约对账（server ↔ client）
+        run: npm run check:spec

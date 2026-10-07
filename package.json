@@ -29,7 +29,8 @@
     "check:response-keys": "node scripts/check-response-keys.mjs",
     "test:unit": "node --experimental-strip-types --test src/utils/*.test.mjs",
     "check:service-startup": "node scripts/check-service-startup.mjs",
-    "check:doc-links": "node scripts/check-doc-links.mjs"
+    "check:doc-links": "node scripts/check-doc-links.mjs",
+    "check:spec": "node scripts/check-api-spec-conformance.mjs"
   },
   "dependencies": {
     "@internationalized/date": "^3.12.3",
