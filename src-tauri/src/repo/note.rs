@@ -13,26 +13,35 @@ pub fn create(conn: &Connection, title: &str) -> Result<Note> {
 
 pub fn get(conn: &Connection, id: i64) -> Result<Note> {
     conn.query_row(
-        "SELECT id, title, content, created_at, updated_at FROM notes WHERE id = ?1",
+        &format!("SELECT {NOTE_COLS} FROM notes WHERE id = ?1"),
         params![id],
         row_to_note,
     )
 }
 
+/// 全部**未删除**笔记。
+///
+/// ⚠️ 回收站里的笔记不进这个列表 —— 它们只在「回收站」视图里出现。
+///   不过滤的话，用户会在主列表里看到已删除的笔记（软删只是打了个标记），
+///   而那是「删了还在」的直观感受。
 pub fn list(conn: &Connection) -> Result<Vec<Note>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, content, created_at, updated_at FROM notes ORDER BY updated_at DESC, id DESC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {NOTE_COLS} FROM notes WHERE deleted_at IS NULL {LIVE_ORDER}"
+    ))?;
     let rows = stmt.query_map([], row_to_note)?;
     rows.collect()
 }
 
 /// 笔记列表（仅元信息，不拉 content）：用于外部保存速记后主窗口刷新列表，
 /// 避免每次刷新都全量读取正文，数据量大时省内存省 IO。
+///
+/// ⚠️ 同样排除回收站 —— 否则外部浮层保存速记后刷新列表，会把已删除的笔记
+///   又带回来一条。
 pub fn list_meta(conn: &Connection) -> Result<Vec<Note>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, '', created_at, updated_at FROM notes ORDER BY updated_at DESC, id DESC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, title, '', folder_id, deleted_at, icon, created_at, updated_at
+         FROM notes WHERE deleted_at IS NULL {LIVE_ORDER}"
+    ))?;
     let rows = stmt.query_map([], row_to_note)?;
     rows.collect()
 }
@@ -158,9 +167,9 @@ pub fn search(conn: &Connection, keyword: &str) -> Result<Vec<Note>> {
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, created_at, updated_at FROM notes \
+        &format!("SELECT {NOTE_COLS} FROM notes \
          ORDER BY updated_at DESC, id DESC",
-    )?;
+    ))?;
     let rows = stmt.query_map([], row_to_note)?;
     let mut out = Vec::new();
     for row in rows {
@@ -181,10 +190,10 @@ fn search_like(conn: &Connection, pattern: &str) -> Result<Vec<Note>> {
     //    笔记 `updated_at` 相同，不加 `id` 兜底时次序由 SQLite 内部决定 ——
     //    「两段式的第 1 段结果」与「直接 list 的结果」会给出不同顺序。
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, created_at, updated_at FROM notes \
+        &format!("SELECT {NOTE_COLS} FROM notes \
          WHERE title LIKE ?1 ESCAPE '\\' OR content LIKE ?1 ESCAPE '\\' \
          ORDER BY updated_at DESC, id DESC",
-    )?;
+    ))?;
     let rows = stmt.query_map(params![pattern], row_to_note)?;
     rows.collect()
 }
@@ -194,9 +203,183 @@ pub fn row_to_note(row: &rusqlite::Row) -> Result<Note> {
         id: row.get(0)?,
         title: row.get(1)?,
         content: row.get(2)?,
-        created_at: row.get(3)?,
-        updated_at: row.get(4)?,
+        folder_id: row.get(3)?,
+        deleted_at: row.get(4)?,
+        icon: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
+}
+
+/// 笔记列表的列（含 folder_id / deleted_at / icon）。
+const NOTE_COLS: &str =
+    "id, title, content, folder_id, deleted_at, icon, created_at, updated_at";
+
+/// 列表查询的 WHERE 与 ORDER。
+///
+/// ⚠️ 回收站里的笔记**默认不进任何列表** —— 它们只在「回收站」视图里出现。
+///   若这里不过滤，用户会在主列表里看到已删除的笔记（因为软删只是打了个标记），
+///   而那是「删了还在」的直观感受。
+const LIVE_ORDER: &str = "ORDER BY updated_at DESC, id DESC";
+
+/// 按文件夹筛选（含全部后代）的笔记列表。
+///
+/// `folder_ids` 的三种取值：
+/// - `None` → 全部未删除笔记（不按文件夹过滤）
+/// - `Some(&[])` → **只要未归类**（`folder_id IS NULL`）
+/// - `Some(&[1, 2])` → 这些文件夹（含各自全部后代，由调用方先算好 id 集合）
+///
+/// ⚠️ 「未归类」必须单独一个条件，不能并进 `folder_id IN (...)`：
+///   `IN` 里放不进 `NULL`，而 `folder_id = NULL` 是「未归类」这个**一等公民**，
+///   不是「某个 id 为 NULL 的文件夹」。混进 `IN` 的话，选「未归类」会返回空列表，
+///   而用户看到的是「这个文件夹里一条笔记都没有」。
+pub fn list_by_folder(
+    conn: &Connection,
+    folder_ids: Option<&[i64]>,
+) -> Result<Vec<Note>> {
+    let sql = match folder_ids {
+        None => format!("SELECT {NOTE_COLS} FROM notes WHERE deleted_at IS NULL {LIVE_ORDER}"),
+        Some(ids) if ids.is_empty() => format!(
+            "SELECT {NOTE_COLS} FROM notes WHERE deleted_at IS NULL AND folder_id IS NULL {LIVE_ORDER}"
+        ),
+        Some(ids) => {
+            // `IN (?, ?, ...)` 的占位符个数必须与 ids 长度一致 ——
+            // 拼错的话 SQLite 会报「参数个数不匹配」，而那种错只在运行时出现。
+            let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            format!(
+                "SELECT {NOTE_COLS} FROM notes WHERE deleted_at IS NULL
+                 AND folder_id IN ({ph}) {LIVE_ORDER}"
+            )
+        }
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = match folder_ids {
+        Some(ids) if !ids.is_empty() => {
+            // ⚠️ 不能用 `params![ids]`：rusqlite 的 `params!` 对 `&[i64]`
+            //   不直接支持（它要 `&[&dyn ToSql]`）。逐个转。
+            let refs: Vec<&dyn rusqlite::ToSql> =
+                ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+            stmt.query_map(&refs[..], row_to_note)?
+        }
+        _ => stmt.query_map([], row_to_note)?,
+    };
+    rows.collect()
+}
+
+/// 回收站列表（按删除时间倒序 —— 最近删的排最前，用户最可能想还原它）。
+pub fn list_trash(conn: &Connection) -> Result<Vec<Note>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {NOTE_COLS} FROM notes WHERE deleted_at IS NOT NULL
+         ORDER BY deleted_at DESC, id DESC"
+    ))?;
+    let rows = stmt.query_map([], row_to_note)?;
+    rows.collect()
+}
+
+/// 软删：只打标记，不动正文。
+pub fn trash(conn: &Connection, id: i64) -> Result<Note> {
+    let affected = conn.execute(
+        "UPDATE notes SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![now(), id],
+    )?;
+    if affected == 0 {
+        // 两种可能：笔记不存在，或已经在回收站里。都要报，但文案不同 ——
+        // 「不存在」是用户点错了，「已在回收站」是重复操作，后者不该报错。
+        let exists: bool = conn.query_row(
+            "SELECT 1 FROM notes WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, i32>(0).map(|n| n > 0),
+        )?;
+        if !exists {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "NOT_FOUND: 笔记 {id} 不存在"
+            )));
+        }
+        return get(conn, id);
+    }
+    get(conn, id)
+}
+
+/// 从回收站还原。
+pub fn restore(conn: &Connection, id: i64) -> Result<Note> {
+    let affected = conn.execute(
+        "UPDATE notes SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
+        params![id],
+    )?;
+    if affected == 0 {
+        let exists: bool = conn.query_row(
+            "SELECT 1 FROM notes WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, i32>(0).map(|n| n > 0),
+        )?;
+        if !exists {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "NOT_FOUND: 笔记 {id} 不存在"
+            )));
+        }
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "笔记 {id} 不在回收站里"
+        )));
+    }
+    get(conn, id)
+}
+
+/// 彻底删除单条（回收站里「删除」按钮）。**不可逆**，前端必须二次确认。
+pub fn purge(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// 清空回收站。**不可逆**，前端必须二次确认。
+///
+/// ⚠️ 只删 `deleted_at IS NOT NULL` 的 —— 没有这个条件的话，一个拼写错误
+///    （比如将来有人把 `IS NOT NULL` 写成 `IS NULL`）会删掉**全部笔记**。
+pub fn empty_trash(conn: &Connection) -> Result<usize> {
+    let n = conn.execute("DELETE FROM notes WHERE deleted_at IS NOT NULL", [])?;
+    Ok(n)
+}
+
+/// 设置专属小图标。空串 = 恢复默认图标。
+pub fn set_icon(conn: &Connection, id: i64, icon: &str) -> Result<Note> {
+    let affected = conn.execute(
+        "UPDATE notes SET icon = ?1, updated_at = ?2 WHERE id = ?3",
+        params![icon, now(), id],
+    )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 笔记 {id} 不存在"
+        )));
+    }
+    get(conn, id)
+}
+
+/// 移动笔记到某个文件夹。`None` = 未归类。
+pub fn move_to_folder(conn: &Connection, id: i64, folder_id: Option<i64>) -> Result<Note> {
+    if let Some(fid) = folder_id {
+        // ⚠️ 必须校验目标存在。不校验的话，一个过期的 folder_id（文件夹刚被删）
+        //   会让笔记「消失」—— 它还在库里，但所有列表都按 folder_id 过滤，
+        //   于是用户看到的是「笔记不见了」，而它其实在一个不存在的文件夹里。
+        let ok: bool = conn.query_row(
+            "SELECT 1 FROM note_folders WHERE id = ?1",
+            params![fid],
+            |r| r.get::<_, i32>(0).map(|n| n > 0),
+        )?;
+        if !ok {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "NOT_FOUND: 文件夹 {fid} 不存在"
+            )));
+        }
+    }
+    let affected = conn.execute(
+        "UPDATE notes SET folder_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![folder_id, now(), id],
+    )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 笔记 {id} 不存在"
+        )));
+    }
+    get(conn, id)
 }
 
 #[cfg(test)]
@@ -390,6 +573,160 @@ mod tests {
         let a = create(&conn, "路径 C:\\temp").unwrap();
         assert_eq!(search_like(&conn, &like_pattern("\\temp")).unwrap().len(), 1);
         assert_eq!(search_like(&conn, &like_pattern("\\temp")).unwrap()[0].id, a.id);
+    }
+
+    /* ── 回收站（发布说明 ③）─────────────────────────────────────── */
+
+    fn mk(conn: &Connection, title: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO notes (title) VALUES (?1)",
+            params![title],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn trash_is_soft_delete_and_restore_brings_it_back() {
+        let conn = init_in_memory().unwrap();
+        let n = mk(&conn, "待删");
+        trash(&conn, n).unwrap();
+        // 软删：行还在，只是打了标记
+        assert!(get(&conn, n).is_ok(), "软删不该让 get 失败");
+        assert!(get(&conn, n).unwrap().deleted_at.is_some());
+        // 主列表里看不到
+        assert!(list(&conn).unwrap().is_empty(), "回收站里的笔记不该进主列表");
+        assert_eq!(list_trash(&conn).unwrap().len(), 1);
+        // 还原
+        restore(&conn, n).unwrap();
+        assert!(get(&conn, n).unwrap().deleted_at.is_none());
+        assert_eq!(list(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn trash_twice_is_idempotent_not_an_error() {
+        let conn = init_in_memory().unwrap();
+        let n = mk(&conn, "待删");
+        trash(&conn, n).unwrap();
+        // 重复删不该报错 —— 那是重复操作，不是错误
+        trash(&conn, n).unwrap();
+        assert_eq!(list_trash(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn restore_something_not_in_trash_is_an_error() {
+        let conn = init_in_memory().unwrap();
+        let n = mk(&conn, "正常");
+        assert!(restore(&conn, n).is_err(), "不在回收站的不能还原");
+    }
+
+    #[test]
+    fn purge_is_hard_delete() {
+        let conn = init_in_memory().unwrap();
+        let n = mk(&conn, "待删");
+        trash(&conn, n).unwrap();
+        purge(&conn, n).unwrap();
+        assert!(get(&conn, n).is_err(), "彻底删除后 get 必须失败");
+    }
+
+    #[test]
+    fn empty_trash_only_removes_trashed() {
+        let conn = init_in_memory().unwrap();
+        let a = mk(&conn, "要删");
+        let b = mk(&conn, "留着");
+        trash(&conn, a).unwrap();
+        let n = empty_trash(&conn).unwrap();
+        assert_eq!(n, 1, "只删回收站里的");
+        assert!(get(&conn, a).is_err());
+        assert!(get(&conn, b).is_ok(), "未删除的不该被清掉");
+    }
+
+    /* ── 文件夹 / 图标（发布说明 ①⑨）───────────────────────────── */
+
+    #[test]
+    fn move_to_folder_and_back() {
+        let conn = init_in_memory().unwrap();
+        let n = mk(&conn, "笔记");
+        let f = conn.execute(
+            "INSERT INTO note_folders (name) VALUES ('工作')",
+            [],
+        ).unwrap();
+        let fid = conn.last_insert_rowid();
+        assert_eq!(f, 1);
+        let moved = move_to_folder(&conn, n, Some(fid)).unwrap();
+        assert_eq!(moved.folder_id, Some(fid));
+        let back = move_to_folder(&conn, n, None).unwrap();
+        assert_eq!(back.folder_id, None, "None = 未归类");
+    }
+
+    #[test]
+    fn move_to_nonexistent_folder_is_rejected() {
+        let conn = init_in_memory().unwrap();
+        let n = mk(&conn, "笔记");
+        // ⚠️ 不校验的话，一个过期的 folder_id 会让笔记「消失」—— 它还在库里，
+        //   但所有列表都按 folder_id 过滤，用户看到的是「笔记不见了」。
+        assert!(move_to_folder(&conn, n, Some(9999)).is_err());
+        assert_eq!(get(&conn, n).unwrap().folder_id, None, "失败的移动不该留下痕迹");
+    }
+
+    #[test]
+    fn list_by_folder_filters_and_excludes_trash() {
+        let conn = init_in_memory().unwrap();
+        let a = mk(&conn, "甲");
+        let b = mk(&conn, "乙");
+        let c = mk(&conn, "丙");
+        conn.execute("INSERT INTO note_folders (name) VALUES ('工作')", []).unwrap();
+        let fid = conn.last_insert_rowid();
+        move_to_folder(&conn, a, Some(fid)).unwrap();
+        move_to_folder(&conn, b, Some(fid)).unwrap();
+        trash(&conn, c).unwrap();
+
+        assert_eq!(list_by_folder(&conn, None).unwrap().len(), 2, "全部未删除");
+        assert_eq!(list_by_folder(&conn, Some(&[fid])).unwrap().len(), 2, "工作文件夹");
+        assert_eq!(list_by_folder(&conn, Some(&[])).unwrap().len(), 0, "未归类为空");
+    }
+
+    /// ⚠️ 「未归类」= `folder_id IS NULL`，**不是** `folder_id = 0`。
+    ///
+    /// 我第一版只测了「未归类为空列表」—— 而那时恰好一条未归类笔记都没有，
+    /// 于是把 `IS NULL` 写成 `= 0` 结果完全相同，这条断言守不住它守的东西
+    /// （实测）。必须有一条**真的未归类**的笔记才能区分。
+    #[test]
+    fn list_by_folder_unfiled_is_null_not_zero() {
+        let conn = init_in_memory().unwrap();
+        let unfiled = mk(&conn, "未归类的");
+        conn.execute("INSERT INTO note_folders (name) VALUES ('工作')", []).unwrap();
+        let fid = conn.last_insert_rowid();
+        let filed = mk(&conn, "已归类的");
+        move_to_folder(&conn, filed, Some(fid)).unwrap();
+
+        let unfiled_hits = list_by_folder(&conn, Some(&[])).unwrap();
+        assert_eq!(unfiled_hits.len(), 1, "未归类列表要有那一条");
+        assert_eq!(unfiled_hits[0].id, unfiled);
+        // 反向：选了「工作」不该把未归类的带出来
+        let filed_hits = list_by_folder(&conn, Some(&[fid])).unwrap();
+        assert!(filed_hits.iter().all(|n| n.id != unfiled));
+    }
+
+    #[test]
+    fn set_icon_and_default() {
+        let conn = init_in_memory().unwrap();
+        let n = mk(&conn, "笔记");
+        assert_eq!(get(&conn, n).unwrap().icon, "", "默认空串");
+        set_icon(&conn, n, "📌").unwrap();
+        assert_eq!(get(&conn, n).unwrap().icon, "📌");
+        set_icon(&conn, n, "").unwrap();
+        assert_eq!(get(&conn, n).unwrap().icon, "", "空串 = 恢复默认");
+    }
+
+    #[test]
+    fn new_note_defaults_are_sane() {
+        let conn = init_in_memory().unwrap();
+        let n = mk(&conn, "笔记");
+        let note = get(&conn, n).unwrap();
+        assert_eq!(note.folder_id, None, "新笔记未归类");
+        assert_eq!(note.deleted_at, None, "新笔记未删除");
+        assert_eq!(note.icon, "");
     }
 
     #[test]

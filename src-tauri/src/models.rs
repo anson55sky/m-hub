@@ -58,8 +58,41 @@ pub struct Note {
     pub id: i64,
     pub title: String,
     pub content: String,
+    /// 所属文件夹 id；`None` = 未归类（顶层）。
+    ///
+    /// ⚠️ 用 `Option<i64>` 而不是 `i64` + 0 表示未归类：0 是合法的自增 id
+    ///   （虽然 SQLite 默认从 1 开始，但 `INTEGER PRIMARY KEY` 允许显式插 0），
+    ///   用 0 当哨兵值会让「未归类」和「id=0 的文件夹」无法区分。
+    pub folder_id: Option<i64>,
+    /// 回收站：`None` = 未删除，`Some(时间)` = 删除时刻。
+    ///
+    /// 软删而非硬删（发布说明 ③）：用户删错了一键还原，而硬删的代价是
+    /// 「删掉一个文件夹连带删掉一堆笔记」这种不可逆事故。
+    pub deleted_at: Option<String>,
+    /// 专属小图标（emoji 字符串）；空串 = 用默认图标。
+    pub icon: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// 速记文件夹（v0.8.0，发布说明 ①）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteFolder {
+    pub id: i64,
+    /// 全路径（`工作`、`工作/会议`）。层级在 name 里，不在 parent_id 列。
+    pub name: String,
+    pub sort_order: i64,
+}
+
+/// 文件夹树节点（含「含后代」的笔记数）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderNode {
+    pub id: i64,
+    pub name: String,
+    pub depth: usize,
+    pub full_path: String,
+    pub note_count: i64,
+    pub children: Vec<FolderNode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

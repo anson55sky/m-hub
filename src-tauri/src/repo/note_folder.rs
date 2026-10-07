@@ -479,7 +479,7 @@ mod tests {
         let conn = init_in_memory().unwrap();
         let work = create(&conn, "", "工作").unwrap();
         let meet = create(&conn, "工作", "会议").unwrap();
-        create(&conn, "工作", "日常")).unwrap();
+        create(&conn, "工作", "日常").unwrap();
         insert_note(&conn, work.id, "直属工作");
         insert_note(&conn, meet.id, "会议里");
 
@@ -513,9 +513,9 @@ mod tests {
     fn subtree_ids_compare_by_segment() {
         let conn = init_in_memory().unwrap();
         let dev = create(&conn, "", "开发").unwrap();
-        create(&conn, "开发", "前端")).unwrap();
+        create(&conn, "开发", "前端").unwrap();
         let dev2 = create(&conn, "", "开发者").unwrap();
-        create(&conn, "开发者", "移动端")).unwrap();
+        create(&conn, "开发者", "移动端").unwrap();
 
         let ids = subtree_ids(&conn, dev.id).unwrap();
         assert_eq!(ids.len(), 2, "开发 + 开发/前端");
