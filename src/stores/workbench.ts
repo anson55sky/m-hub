@@ -729,7 +729,15 @@ export function useStore() {
     state.notes = state.notes.filter((x) => x.id !== id)
   }
 
-  /** 剪贴板浮层等外部保存速记后，主窗口刷新笔记列表（仅拉元信息，轻量） */
+  /**
+   * 刷新笔记列表（**含正文**）。
+   *
+   * ⚠️ 后端这一度只返回元信息（`content` 为空串），理由是「省内存省 IO」——
+   *   那是错的：它替换掉 `state.notes` 之后正文全成空串，而编辑器切到某篇时
+   *   直接 `syncLocal()` 取 `props.note.content`，于是「切走再切回来」看到一篇
+   *   空白笔记，此刻随便敲两个字就把空正文存回去（原笔记内容**永久丢失**），
+   *   且全程不报任何错。现在 `list_notes` 返回全量正文。
+   */
   async function refreshNotes() {
     if (!isTauri()) return
     state.notes = await tauriApi.listNotes()
@@ -788,24 +796,18 @@ export function useStore() {
   }
 
   /**
-   * 导入速记后的**全量**重拉（含正文）。
+   * 导入速记后的重拉：笔记（含正文）+ **文件夹 + 标签**。
    *
-   * ⚠️ 不能用 `refreshNotes()`：那条走 `list_notes` = `note::list_meta`，
-   *   正文列被 SELECT 成空串。导入后的列表里那些新笔记**全部是空的** ——
-   *   点开是空白，改一下就把空白存回去（用户丢的是导入刚给的内容）。
-   *   所以这里经 `list_notes_by_folder`（不传 folderIds = 全量）拿真正文。
-   *
-   * 同时刷文件夹与标签：导入会**新建**它们，只刷笔记的话文件夹栏与标签筛选条
-   * 都不出现新项，而笔记已经挂在那些文件夹下了 —— 表现为「筛选不出来」。
+   * 后者两个不能省：导入会**新建**它们，只刷笔记的话文件夹栏与标签筛选条都不出现
+   * 新项，而笔记已经挂在那些文件夹下了 —— 表现为「导入的笔记筛不出来」。
    */
   async function reloadNotesFull() {
     if (!isTauri()) return
-    const [notes, folders, tags] = await Promise.all([
-      tauriApi.listNotesByFolder(),
+    const [folders, tags] = await Promise.all([
       tauriApi.listNoteFolders(),
       tauriApi.listTags(),
     ])
-    state.notes = notes
+    await refreshNotes()
     state.noteFolders = folders
     state.tags = tags
   }

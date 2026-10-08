@@ -674,10 +674,9 @@ pub async fn export_notes(
 
 /// 从 zip 导入速记。**只追加**，重复的按「标题 + 创建时间」跳过。
 ///
-/// ⚠️ 不 emit `notes-changed`：那个事件的监听者走的是「仅元信息」的刷新
-///   （`note::list_meta`，不拉正文）。用 meta 列表替换掉导入后的全量列表，
-///   新导入的笔记会**正文为空**——用户点开就是一片空白且无法编辑保存。
-///   正确做法是前端调 store 的全量重拉（见 `reloadNotesFull`）。
+/// ⚠️ 不 emit `notes-changed`：那个事件的监听者是 `refreshNotes`，而导入还会
+///   **新建文件夹与标签**（只刷笔记的话文件夹栏与标签筛选条都不出现新项）。
+///   正确做法是前端调 `store.reloadNotesFull()`（笔记 + 文件夹 + 标签一起刷）。
 #[tauri::command]
 pub async fn import_notes(
     state: State<'_, DbState>,
@@ -733,12 +732,16 @@ pub fn list_notes_by_folder(
     note::list_by_folder(&conn, folder_ids.as_deref()).map_err(err_str)
 }
 
-/// 笔记列表（仅元信息，不拉正文）：外部浮层保存速记后主窗口刷新列表用，
-/// 轻量于 get_initial_data 的全量加载。**排除回收站**。
+/// 笔记列表（**含正文**，排除回收站）：前端刷新列表走它。
+///
+/// ⚠️ 这一度是「仅元信息」的（`note::list_meta`，正文 SELECT 成空串），理由是省 IO。
+///   已改回全量：它替换掉 `state.notes` 之后正文全成空串，而编辑器切笔记时直接拿
+///   `props.note.content` —— 「切走再切回来」看到空白笔记，敲两个字就把原文覆盖掉。
+///   理由与证据见 `repo::note::list` 的注释。
 #[tauri::command]
 pub fn list_notes(state: State<'_, DbState>) -> Result<Vec<Note>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    note::list_meta(&conn).map_err(err_str)
+    note::list(&conn).map_err(err_str)
 }
 
 // ---------- 速记文件夹（v0.8.0，发布说明 ①）----------

@@ -32,20 +32,15 @@ pub fn list(conn: &Connection) -> Result<Vec<Note>> {
     rows.collect()
 }
 
-/// 笔记列表（仅元信息，不拉 content）：用于外部保存速记后主窗口刷新列表，
-/// 避免每次刷新都全量读取正文，数据量大时省内存省 IO。
+/// 笔记列表（**含正文**，排除回收站）：主窗口刷新列表走它。
 ///
-/// ⚠️ 同样排除回收站 —— 否则外部浮层保存速记后刷新列表，会把已删除的笔记
-///   又带回来一条。
-pub fn list_meta(conn: &Connection) -> Result<Vec<Note>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT id, title, '', folder_id, deleted_at, icon, created_at, updated_at
-         FROM notes WHERE deleted_at IS NULL {LIVE_ORDER}"
-    ))?;
-    let rows = stmt.query_map([], row_to_note)?;
-    rows.collect()
-}
-
+/// ⚠️ 这里曾有过一个 `list_meta`（`content` SELECT 成空串的「仅元信息」版本），
+///   理由是「刷新时省内存省 IO」。**那是错的**：它替换掉 `state.notes` 之后
+///   正文列全成空串，而编辑器切到某篇时直接 `syncLocal()` 取 `props.note.content`
+///   —— 于是「切走再切回来」看到一篇空白笔记，此刻随便敲两个字就把空正文存回去，
+///   原笔记内容**永久丢失**，且全程不报任何错（数据丢失类缺陷的典型形状，约定 72/73）。
+///   启动时的 `get_initial_data` 本来就全量拉正文，刷新这一趟省不下什么。
+///   **要 meta 列表就用 `list_meta_notes` 那种显式命名**，别把正文悄悄掏空。
 pub fn update(conn: &Connection, id: i64, title: &str, content: &str) -> Result<Note> {
     let affected = conn.execute(
         "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
@@ -746,6 +741,38 @@ mod tests {
         //   但所有列表都按 folder_id 过滤，用户看到的是「笔记不见了」。
         assert!(move_to_folder(&conn, n, Some(9999)).is_err());
         assert_eq!(get(&conn, n).unwrap().folder_id, None, "失败的移动不该留下痕迹");
+    }
+
+    #[test]
+    /// 列表（`list` / `list_by_folder` / `list_meta` 已删）**必须带正文**。
+    ///
+    /// 判据用「内容真的在里面」而不是「有没有 content 这个字段」——
+    /// 曾经的 `list_meta` 正是字段齐全、内容恒为空串，那份结果会**整份替换**
+    /// `state.notes`，而编辑器切到某篇时直接取 `props.note.content`：
+    /// 「切走再切回来」看到空白笔记，敲两个字就把原正文覆盖掉（永久丢失、无报错）。
+    #[test]
+    fn list_queries_carry_the_actual_content() {
+        let conn = init_in_memory().unwrap();
+        let a = mk(&conn, "甲");
+        update(&conn, a, "甲", "这是正文，不是空串").unwrap();
+        conn.execute("INSERT INTO note_folders (name) VALUES ('工作')", []).unwrap();
+        let fid = conn.last_insert_rowid();
+        move_to_folder(&conn, a, Some(fid)).unwrap();
+
+        for (name, got) in [
+            ("list", list(&conn).unwrap()),
+            ("list_by_folder(None)", list_by_folder(&conn, None).unwrap()),
+            (
+                "list_by_folder(Some)",
+                list_by_folder(&conn, Some(&[fid])).unwrap(),
+            ),
+        ] {
+            assert_eq!(got.len(), 1, "{name} 条数不对");
+            assert_eq!(
+                got[0].content, "这是正文，不是空串",
+                "{name} 少带了正文 —— 前端整份替换 state.notes 之后编辑器会拿到空正文"
+            );
+        }
     }
 
     #[test]

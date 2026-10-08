@@ -1290,6 +1290,7 @@ export const tauriApi = {
   reorderNoteFolders: (ids: number[]) => invoke<void>('reorder_note_folders', { ids }),
   /** 某文件夹及其全部后代的 id —— 判定真源在 Rust。 */
   noteFolderSubtreeIds: (id: number) => invoke<number[]>('note_folder_subtree_ids', { id }),
+  /** 笔记列表（**含正文**，排除回收站）。⚠️ 别再把这条改成「仅元信息」——理由见 store.refreshNotes */
   listNotes: () => invoke<Note[]>('list_notes'),
   searchAll: (keyword: string) => invoke<SearchResult>('search_all', { keyword }),
   listTodos: () => invoke<Todo[]>('list_todos'),
@@ -1391,8 +1392,9 @@ export const tauriApi = {
   exportNotes: (destPath: string) =>
     invoke<NotesExportStats>('export_notes', { destPath }),
   /**
-   * 从 zip 导入速记。⚠️ **必须走 `store.reloadNotesFull()` 而不是 `refreshNotes()`** ——
-   * 后者拉的是 meta-only 列表（`list_meta` 不含正文），导入进来的笔记会正文为空。
+   * 从 zip 导入速记。⚠️ 导入**不 emit** `notes-changed`，前端要自己重拉：
+   * 走 `store.reloadNotesFull()`（笔记 + 文件夹 + 标签一起），否则新文件夹与新标签
+   * 不出现，而笔记已经挂在它们下面了。
    */
   importNotes: (srcPath: string) => invoke<NotesImportStats>('import_notes', { srcPath }),
   /**
