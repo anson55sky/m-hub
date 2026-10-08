@@ -4,6 +4,10 @@ import { isTauri, tauriApi } from '../api/tauri'
  * 把编辑器拿到的图片 File 落盘为笔记图片，返回可内嵌 Markdown 的 URL。
  * Tauri 环境走 import_note_image（数据根 notes/images，mhub-note 协议渲染）；
  * 浏览器预览环境无后端，回退 data URL 直接展示。
+ *
+ * ⚠️ URL 的**平台形态**（Windows `http://…localhost/` vs macOS `mhub-note://`）
+ *   由后端 `note_image_url` 按平台出，正文里已有的老地址由
+ *   `noteImageUrl.ts::normalizeNoteImageUrls` 在载入时归一 —— 本文件只管落盘。
  */
 export async function saveNoteImageFile(file: File): Promise<string> {
   // 与 Rust 端 NOTE_IMAGE_MAX_BYTES 对齐：提前拒绝，避免 13MB+ 的 base64 白过一次 IPC

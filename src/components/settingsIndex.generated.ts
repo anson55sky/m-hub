@@ -27,6 +27,7 @@ export const SETTINGS_INDEX: SettingsIndexEntry[] = [
   { section: 'data', title: '数据存储路径' },
   { section: 'data', title: '数据备份' },
   { section: 'data', title: '数据恢复' },
+  { section: 'data', title: '清理无引用的笔记图片' },
   { section: 'data', title: '自动备份' },
   { section: 'data', title: '备份目录' },
   { section: 'data', title: '备份频率' },

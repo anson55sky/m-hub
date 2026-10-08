@@ -1398,6 +1398,14 @@ export const tauriApi = {
    */
   importNotes: (srcPath: string) => invoke<NotesImportStats>('import_notes', { srcPath }),
   /**
+   * 统计 / 清理「没有任何笔记引用的图片文件」（v0.8.1）。
+   *
+   * ⚠️ `dryRun = true` 只报数不删 —— 设置里的按钮是**两段式**的：
+   *   第一次点先看「会清掉几个、多大」，用户再点一次才真删（删的是磁盘文件，不可逆）。
+   */
+  purgeOrphanNoteImages: (dryRun: boolean) =>
+    invoke<{ files: number; bytes: number }>('purge_orphan_note_images', { dryRun }),
+  /**
    * AI 深度整理：把正文交给对话模型梳理结构，返回整理后的 Markdown。
    *
    * ⚠️ **返回但不落库** —— 是否采纳由用户在预览面板里决定。调用方拿到结果后

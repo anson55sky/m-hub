@@ -25,6 +25,7 @@ mod mac;
 mod models;
 mod net;
 mod notify;
+mod note_images;
 mod notes_port;
 mod online;
 mod paths;
@@ -918,6 +919,7 @@ pub fn run() {
             commands::empty_note_trash,
             commands::purge_expired_trash,
             commands::set_note_icon,
+            commands::purge_orphan_note_images,
             commands::export_notes,
             commands::import_notes,
             commands::tidy_note_content,

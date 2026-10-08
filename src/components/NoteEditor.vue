@@ -23,6 +23,8 @@ import { deriveNoteTitle } from '../utils/markdown'
 import { NOTE_EDITOR_MODES, normalizeNoteEditorMode, type NoteEditorMode } from '../utils/noteEditorMode'
 import { getQuickEmojis } from '../utils/emoji'
 import { saveNoteImageFile } from '../utils/noteImage'
+import { normalizeNoteImageUrls } from '../utils/noteImageUrl'
+import { IS_MAC } from '../utils/platform'
 import { parseTimestamp } from '../utils/time'
 import type { ShowToast } from '../utils/toast'
 import EmojiPicker from './EmojiPicker.vue'
@@ -321,7 +323,9 @@ watch(
 
 function syncLocal() {
   localTitle.value = props.note?.title ?? ''
-  localContent.value = props.note?.content ?? ''
+  // ⚠️ 归一图片 URL（macOS 上 Windows 形态的地址打不开，见 normalizeNoteImageUrls）：
+  //   载入时就改，笔记下次保存即自愈成当前平台的形态 —— 不需要在库里做数据迁移。
+  localContent.value = normalizeNoteImageUrls(props.note?.content ?? '', IS_MAC)
   dirty.value = false
 }
 
@@ -352,9 +356,12 @@ function onEdited(markdown: string) {
 
 /** 把一份 Markdown 收进当前笔记。内容没变就不重新排保存。 */
 function adoptMarkdown(markdown: string) {
-  if (!props.note || markdown === localContent.value) return
-  localContent.value = markdown
-  deriveTitleFromContent(markdown)
+  if (!props.note) return
+  // 与 syncLocal 同一道归一：源码模式手输、AI 整理、美化三条路都从这里进编辑器
+  const next = normalizeNoteImageUrls(markdown, IS_MAC)
+  if (next === localContent.value) return
+  localContent.value = next
+  deriveTitleFromContent(next)
   scheduleSave()
 }
 

@@ -5,7 +5,7 @@
 // 首次打开只需外壳 + 当前大类的代码，切大类时才加载对应面板。
 import { computed, inject, onMounted, ref } from 'vue';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Download, FolderCog, Lock, Upload } from 'lucide-vue-next';
+import { Download, Eraser, FolderCog, Lock, Upload } from 'lucide-vue-next';
 import { isTauri, tauriApi } from '../../api/tauri';
 import type { DataPathInfo } from '../../api/tauri';
 import AboutSection from '../AboutSection.vue';
@@ -165,6 +165,55 @@ async function restoreData() {
   }
 }
 
+// ---- 孤儿笔记图片清理（v0.8.1）----
+//
+// 「没有任何笔记引用的图片文件」。永久删除笔记时会自动清一部分，
+// 但历史遗留的（早期版本 / 改过数据目录 / 导出过再删）要靠这个按钮收尾。
+//
+// 两段式：第一次点只**报数**（dry-run），第二次才删 —— 删的是磁盘上的文件，
+// 不可逆（约定 53：不可逆操作必须先把后果交代在原地，而不是一条 toast）。
+const orphanBusy = ref(false)
+const orphanPreview = ref<{ files: number; bytes: number } | null>(null)
+let orphanTimer: ReturnType<typeof setTimeout> | null = null
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+async function onPurgeOrphanImages() {
+  if (!isTauri() || orphanBusy.value) return
+  orphanBusy.value = true
+  try {
+    if (orphanPreview.value) {
+      orphanPreview.value = null
+      const s = await tauriApi.purgeOrphanNoteImages(false)
+      showToast(
+        s.files > 0
+          ? `已清理 ${s.files} 个无引用图片（${formatBytes(s.bytes)}）`
+          : '没有可清理的图片',
+      )
+      return
+    }
+    const s = await tauriApi.purgeOrphanNoteImages(true)
+    if (s.files === 0) {
+      orphanPreview.value = null
+      showToast('没有无引用的图片，很干净')
+      return
+    }
+    orphanPreview.value = { files: s.files, bytes: s.bytes }
+    if (orphanTimer) clearTimeout(orphanTimer)
+    orphanTimer = setTimeout(() => {
+      orphanPreview.value = null
+    }, 8000)
+  } catch (e) {
+    showToast(`清理失败：${String(e)}`)
+  } finally {
+    orphanBusy.value = false
+  }
+}
+
 onMounted(() => {
 
   void loadDataPath()
@@ -214,6 +263,26 @@ onMounted(() => {
             >
               <Upload :size="14" :stroke-width="2" />
               {{ confirmRestore ? '确认恢复？' : '恢复' }}
+            </button>
+          </div>
+
+          <!-- 孤儿笔记图片（v0.8.1）：删掉的笔记会留下没人引用的图片文件 -->
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">清理无引用的笔记图片</span>
+              <span class="setting-desc">
+                笔记里已不再引用的图片文件（删过笔记、换过数据目录会留下）。
+                永久删除笔记时会自动清一部分，这里收尾历史遗留。
+              </span>
+            </div>
+            <button
+              class="ghost-btn data-btn"
+              :class="{ confirm: !!orphanPreview }"
+              :disabled="orphanBusy"
+              @click="onPurgeOrphanImages"
+            >
+              <Eraser :size="14" :stroke-width="2" />
+              {{ orphanBusy ? '统计中…' : orphanPreview ? `确认清理 ${orphanPreview.files} 个（${formatBytes(orphanPreview.bytes)}）` : '检查并清理' }}
             </button>
           </div>
 

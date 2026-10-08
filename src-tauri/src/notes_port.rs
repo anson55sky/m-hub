@@ -36,12 +36,12 @@ const IMAGES_DIR: &str = "images/";
 /// 「未归类」笔记在包内的目录名（它们没有 folder_id，包里必须有个去处）。
 const UNFILED_DIR: &str = "未归类";
 
-/// 正文里内嵌图片 URL 的两种形态。
+/// 正文里内嵌图片 URL 的两种形态（**两种都要认**，理由见下）。
 ///
-/// `note_image_url` 写进正文的是第一种（Windows 的 WebView2 形态）；第二种是
-/// Tauri 自定义协议在 macOS/Linux 上的原生形态（同一个协议、两种 URL 语法）。
-/// 两种都可能已经在用户的笔记里，改写时必须都认 —— 只认一种的话，
-/// 另一种形态的图片会在导出后变成死链（而作者完全看不出为什么）。
+/// `note_image_url` 写进正文的是「当前平台可渲染的那一种」（见
+/// `commands::note_image_prefix`）；另一种是别的平台写下的数据 —— 换台机器、
+/// 或从 Windows 导出到 macOS 时正文里就是它。只认一种的话，另一种形态的图片
+/// 会在导出后变成死链（而作者完全看不出为什么）。
 const URL_PREFIXES: &[&str] = &["http://mhub-note.localhost/", "mhub-note://localhost/"];
 /// 包内相对路径前缀（导入时认它改回协议 URL）。
 const REL_PREFIXES: &[&str] = &[IMAGES_DIR];
@@ -139,7 +139,13 @@ fn earliest(hay: &str, needles: &[&str]) -> Option<(usize, usize)> {
 /// 返回 (新正文, 命中的文件名集合)。
 fn swap_image_urls(content: &str, to_relative: bool) -> (String, BTreeSet<String>) {
     let needles: &[&str] = if to_relative { URL_PREFIXES } else { REL_PREFIXES };
-    let repl = if to_relative { IMAGES_DIR } else { URL_PREFIXES[0] };
+    // 导入时写回**当前平台**的形态（不是固定第一种）—— 在 macOS 上写回 Windows 形态
+    // 等于把图片原样搬回「必然裂」的状态，导出的包换个机器打开也照样裂。
+    let repl = if to_relative {
+        IMAGES_DIR
+    } else {
+        crate::commands::note_image_prefix()
+    };
     let mut out = String::with_capacity(content.len());
     let mut rest = content;
     let mut found = BTreeSet::new();
@@ -649,8 +655,13 @@ mod tests {
 
         let (back, found2) = swap_image_urls(&rel, false);
         assert_eq!(found2.len(), 2);
-        assert!(back.contains(&format!("http://mhub-note.localhost/0123456789abcdef.png")));
-        assert!(back.contains(&format!("http://mhub-note.localhost/fedcba9876543210.jpg")));
+        // 导入时写回的是**当前平台**的形态（`note_image_prefix`），两种形态都要能被
+        // 下一次导出重新认出来 —— 这条「往返」性质比断言某个具体前缀更耐改，
+        // 前缀本身由下面那条测试钉住。
+        let prefix = crate::commands::note_image_prefix();
+        assert!(back.contains(&format!("{prefix}0123456789abcdef.png")), "{back}");
+        assert!(back.contains(&format!("{prefix}fedcba9876543210.jpg")), "{back}");
+        assert!(URL_PREFIXES.contains(&prefix), "写回的形态必须是自己认得的形态");
         assert!(back.contains("images/照片.jpg"), "误伤会变成死链：{back}");
         assert_eq!(
             back.matches("mhub-note").count(),

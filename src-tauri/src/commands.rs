@@ -432,12 +432,48 @@ pub fn delete_note(state: State<'_, DbState>, id: i64) -> Result<(), String> {
 }
 
 /// 彻底删除单条笔记（回收站里的「删除」按钮）。**不可逆**，前端必须二次确认。
+///
+/// 删除后顺手清一次孤儿图片：这一步跟着「永久删除」走而不是独立按钮，是因为
+/// 用户此刻的心智模型就是「这条笔记没了，它的东西也该没了」。
+/// ⚠️ **绝不在 `delete_note`（软删）里清** —— 回收站里的笔记还能还原，
+///   那时图不见了就再也回不来（`note_images` 语义 1）。
 #[tauri::command]
 pub fn purge_note(state: State<'_, DbState>, id: i64) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     note::purge(&conn, id).map_err(err_str)?;
+    drop(conn);
+    // 重新取锁再扫：孤儿判定要读**全部**笔记正文（含回收站），持着上一把锁做会更省事，
+    // 但那会把「永久删除 → 清理」这段时间的其它写操作一起堵住。
+    let orphans = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::note_images::purge_orphans(&conn, false)
+    };
+    if let Ok(s) = orphans {
+        if s.files > 0 {
+            log::info!("随彻底删除清理孤儿图片: {} 个 / {} KB", s.files, s.bytes / 1024);
+        }
+    }
     log::warn!("彻底删除笔记: id={}", id);
     Ok(())
+}
+
+/// 统计/清理「没有任何笔记引用」的笔记图片（设置 → 数据与关于里那个按钮）。
+///
+/// `dry_run = true` 只报数不删 —— 界面必须先把「会清掉几张、多大」说清楚
+/// 再让用户点确认（约定 53：不可逆的操作，交代要留在原地而不是 toast）。
+#[tauri::command]
+pub fn purge_orphan_note_images(
+    state: State<'_, DbState>,
+    dry_run: bool,
+) -> Result<crate::note_images::OrphanStats, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let s = crate::note_images::purge_orphans(&conn, dry_run)?;
+    if dry_run {
+        log::info!("统计孤儿笔记图片: {} 个 / {} KB", s.files, s.bytes / 1024);
+    } else {
+        log::info!("清理孤儿笔记图片: {} 个 / {} KB", s.files, s.bytes / 1024);
+    }
+    Ok(s)
 }
 
 /// 从回收站还原。
@@ -459,8 +495,20 @@ pub fn list_trash_notes(state: State<'_, DbState>) -> Result<Vec<Note>, String> 
 /// 清空回收站。**不可逆**，前端必须二次确认并报出条数。
 #[tauri::command]
 pub fn empty_note_trash(state: State<'_, DbState>) -> Result<usize, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let n = note::empty_trash(&conn).map_err(err_str)?;
+    let n = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        note::empty_trash(&conn).map_err(err_str)?
+    };
+    // 同 purge_note：清空回收站 = 这些笔记的图也该走了。软删那一步绝不能做（可还原）。
+    let orphans = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        crate::note_images::purge_orphans(&conn, false)
+    };
+    if let Ok(s) = orphans {
+        if s.files > 0 {
+            log::info!("随清空回收站清理孤儿图片: {} 个 / {} KB", s.files, s.bytes / 1024);
+        }
+    }
     log::warn!("清空回收站: {} 条", n);
     Ok(n)
 }
@@ -3091,12 +3139,29 @@ pub fn import_note_image(data_b64: String, ext: String) -> Result<String, String
     Ok(note_image_url(&name))
 }
 
+/// 当前平台**能真正渲染**的笔记图片 URL 前缀。
+///
+/// ⚠️ 同一套 Tauri 自定义协议在不同平台上的 URL 语法不一样，判据来自 Tauri/wry 源码：
+///   · Windows / Android —— wry 用「URL 前缀改写」把自定义协议映射到
+///     `http://<scheme>.localhost/…`（`custom_protocol_workaround::work_around_uri_prefix`），
+///     WebView2 只拦这个形态；
+///   · macOS / Linux —— wry 给 WKWebView 注册 `WKURLSchemeHandler(handler, "mhub-note")`，
+///     只认**裸 scheme** 的 `mhub-note://…`。
+/// 也就是说 Windows 形态的地址在 macOS 上是一次**真实的 HTTP 请求**（打到一台并不存在的
+/// `.localhost` 主机），图片必然裂 —— 而这里原先不分平台（注释里写着「本应用仅面向
+/// Windows 桌面，如需跨平台再分支」），那句「再分支」在 macOS 移植时**没做**。
+pub fn note_image_prefix() -> &'static str {
+    if cfg!(windows) || cfg!(target_os = "android") {
+        "http://mhub-note.localhost/"
+    } else {
+        "mhub-note://localhost/"
+    }
+}
+
 /// 笔记图片的内嵌 URL。mhub-note 协议（lib.rs 注册）按数据根 notes/images 解析，
 /// URL 中不含数据根绝对路径——「更改数据存储路径」或整目录迁移后，已写入笔记的 URL 仍有效。
 pub fn note_image_url(name: &str) -> String {
-    // Windows/Android 上 Tauri 自定义协议以 http://<scheme>.localhost/ 形式访问；
-    // macOS/Linux 为 <scheme>://localhost/（本应用仅面向 Windows 桌面，如需跨平台再分支）
-    format!("http://mhub-note.localhost/{}", name)
+    format!("{}{}", note_image_prefix(), name)
 }
 
 // ---------- 扫描已安装应用 ----------
@@ -4283,6 +4348,32 @@ mod tests {
         // 未传且钥匙串里也没有 → 明确提示
         assert!(probe_key("", None).is_err());
         assert_eq!(probe_key("", Some("sk-stored".into())).unwrap(), "sk-stored");
+    }
+
+    // ---- 笔记图片 URL 的平台形态（macOS 移植修复）----
+
+    /// `note_image_prefix` 必须与**该平台的 wry 行为**对上，而不是恒为 Windows 形态。
+    ///
+    /// 这条就是「macOS 上笔记图片全裂」那个 bug 的守卫：原实现无条件写
+    /// `http://mhub-note.localhost/`，而在 macOS 上 wry 只给 `WKURLSchemeHandler`
+    /// 注册了裸 scheme，那个地址是一次打到不存在主机的**真实 HTTP 请求**。
+    /// 守卫里把 wry 的规则原样抄一遍（而不是引用同一个常量）—— 引用同一个常量的话
+    /// 改错了两边一起变，测试照样绿（约定 73）。
+    #[test]
+    fn note_image_prefix_follows_the_platforms_custom_protocol_syntax() {
+        let wry_uses_http_prefix = cfg!(windows) || cfg!(target_os = "android");
+        let expected = if wry_uses_http_prefix {
+            "http://mhub-note.localhost/"
+        } else {
+            "mhub-note://localhost/"
+        };
+        assert_eq!(
+            note_image_prefix(),
+            expected,
+            "wry 在本平台用的是 {} 形态的前缀",
+            if wry_uses_http_prefix { "http://<scheme>.localhost/" } else { "<scheme>://" }
+        );
+        assert_eq!(note_image_url("0123456789abcdef.png"), format!("{expected}0123456789abcdef.png"));
     }
 
     // ---- AI 深度整理（发布说明 ⑦）----
