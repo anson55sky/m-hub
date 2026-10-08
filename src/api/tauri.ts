@@ -141,6 +141,19 @@ export interface FolderNode {
   children: FolderNode[]
 }
 
+/**
+ * 速记的筛选目标。
+ *
+ * 三态而不是一个 `number | null`，因为「未归类」与「全部」**不是同一件事**：
+ * - 某个数字 → 该文件夹**及其全部后代**里的笔记
+ * - `'unfiled'` → `folder_id IS NULL` 的笔记（速记的一等公民，无默认文件夹）
+ * - `null` → 不筛
+ *
+ * ⚠️ 未归类没有文件夹 id，所以不能塞进 `number` 里当哨兵（`0` / `-1` 都是
+ *   有效的自增 id 或能与真实 id 撞上），必须是独立的字面量。
+ */
+export type NoteFolderTarget = number | 'unfiled' | null
+
 export interface Todo {
   id: number
   title: string
@@ -384,6 +397,8 @@ export interface AppConfig {
   clipboard_max_items: number
   /** 非置顶记录保留天数 */
   clipboard_ttl_days: number
+  /** 速记回收站保留天数；0 = 永久保留（不自动清理）。 */
+  notes_trash_days: number
   /** 暂停剪贴板记录 */
   clipboard_paused: boolean
   /** 粘贴快捷键方式：auto / ctrl_v / ctrl_shift_v / shift_insert */

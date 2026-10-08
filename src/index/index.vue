@@ -7,6 +7,10 @@ import TodoCard from '../components/TodoCard.vue'
 import TodoCalendarCard from '../components/TodoCalendarCard.vue'
 import Suda from '../components/Suda.vue'
 import NoteList from '../components/NoteList.vue'
+import NoteFolderTree from '../components/NoteFolderTree.vue'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
+import { parseTimestamp } from '../utils/time'
+import { filterNotesByFolder } from '../utils/noteFolderFilter'
 import NotesOverviewCard from '../components/NotesOverviewCard.vue'
 import TodoOverviewCard from '../components/TodoOverviewCard.vue'
 import ResourcesOverviewCard from '../components/ResourcesOverviewCard.vue'
@@ -24,7 +28,7 @@ import WindowResizeHandles from '../components/WindowResizeHandles.vue'
 import { useStore } from '../stores/workbench'
 import { isTauri, tauriApi } from '../api/tauri'
 import { convertFileSrc } from '@tauri-apps/api/core'
-import type { Countdown, ExtensionEntry, Note, Resource, Snippet, Todo } from '../api/tauri'
+import type { Countdown, ExtensionEntry, Note, NoteFolderTarget, Resource, Snippet, Todo } from '../api/tauri'
 import { playChime } from '../utils/chime'
 import { shortcutLabel } from '../utils/platform'
 import { FileText, FolderOpen, LayoutDashboard, ListTodo, MessageSquare, Puzzle, Settings, ChevronLeft, ChevronRight, AppWindow, PanelRight } from 'lucide-vue-next'
@@ -788,7 +792,33 @@ function hideBootSplash() {
 const activeNoteId = ref<number | null>(null)
 const highlightTodoId = ref<number | null>(null)
 
+/** 当前筛选目标：数字 = 某文件夹（含后代），`'unfiled'` = 未归类，`null` = 全部。 */
+const activeNoteFolderId = ref<NoteFolderTarget>(null)
+/** 「全部后代」id 集合 —— 真源是 Rust `note_folder::subtree_ids`，这里只是它的缓存。 */
+const activeNoteFolderSubtree = ref<number[] | null>(null)
+/** 回收站视图开关。 */
+const trashVisible = ref(false)
+const trashNotes = ref<Note[]>([])
+const trashDays = ref(0)
+/** 文件夹树显隐（收起 = 笔记列表独占左栏）。 */
+const foldersVisible = ref(true)
+
+/**
+ * 文件夹筛选：点父级 = 连全部后代一起看（约定 76 同款口径）。
+ *
+ * ⚠️ `activeNoteFolderSubtree` 异步取，取回来之前**不筛** —— 否则切文件夹的
+ *   第一帧会先闪一次「全部笔记」里恰好不含该文件夹的空列表，用户看到的是
+ *   「点进去是空的，等一下才有内容」。
+ * ⚠️ 未归类（`subtree = []`）必须单独判：`[]` 在 `includes` 里恒假，
+ *   用它筛会得到空列表，而用户看到的是「未归类里一条都没有」（实际有）。
+ */
+const visibleNotes = computed(() =>
+  filterNotesByFolder(store.state.notes, activeNoteFolderId.value, activeNoteFolderSubtree.value),
+)
+
 const activeNote = computed(
+  // 用**全量**列表而不是 visibleNotes：筛掉之后如果当前笔记不在筛选内，
+  // 编辑器会变成空白且没有任何提示，用户以为笔记丢了（它其实在另一个文件夹里）。
   () => store.state.notes.find((n) => n.id === activeNoteId.value) ?? null,
 )
 
@@ -803,24 +833,166 @@ function onSelectNote(id: number) {
   activeNoteId.value = id
 }
 
+async function onSelectNoteFolder(target: NoteFolderTarget) {
+  activeNoteFolderId.value = target
+  trashVisible.value = false
+  if (target === null) {
+    activeNoteFolderSubtree.value = null
+    return
+  }
+  if (target === 'unfiled') {
+    // 未归类没有文件夹 id，Rust 那侧也就没有子树可查 —— 传空数组（筛选的
+    // 真正判定在 `filterNotesByFolder`，它把 `'unfiled'` 单独处理）。
+    activeNoteFolderSubtree.value = []
+    return
+  }
+  // 真源在 Rust；拿不到就留 null（= 不筛），绝不猜
+  try {
+    activeNoteFolderSubtree.value = await store.noteFolderSubtree(target)
+  } catch (e) {
+    // ⚠️ 目标也要一起复位：只把子树置 null 的话，树上仍高亮着那个（可能已被
+    //   删掉的）文件夹，而列表显示的是全部 —— 正是「选中 A 显示 B」的反话。
+    activeNoteFolderId.value = null
+    activeNoteFolderSubtree.value = null
+    showToast(e instanceof Error ? e.message : String(e))
+  }
+}
+
+async function openTrash() {
+  activeNoteFolderId.value = null
+  activeNoteFolderSubtree.value = null
+  trashNotes.value = isTauri() ? await tauriApi.listTrashNotes() : []
+  trashDays.value = isTauri() ? (store.state.config.notes_trash_days ?? 30) : 30
+  trashVisible.value = true
+}
+
+/**
+ * 删除笔记 → 进回收站（v0.8.0 起软删）。
+ *
+ * ⚠️ 撤销走 `restore_note` **还原原笔记**，不再 `addNote + saveNote` 重建。
+ *   重建会丢 id，于是标签关联、图片、双链全部断掉 —— 表现为「撤销回来的笔记
+ *   标签没了、图也不见了」，而用户明明点的是「撤销」。
+ */
 async function onDeleteNote(id: number) {
   const target = store.state.notes.find((n) => n.id === id)
   if (!target) return
   await store.removeNote(id)
   if (activeNoteId.value === id) activeNoteId.value = null
-  showToast('笔记已删除', {
+  showToast('笔记已移入回收站', {
     label: '撤销',
     onClick: async () => {
-      const n = await store.addNote(target.title)
-      await store.saveNote(n.id, target.title, target.content)
-      activeNoteId.value = n.id
-      showToast('已恢复笔记')
+      try {
+        const n = await tauriApi.restoreNote(id)
+        await store.refreshNotes()
+        activeNoteId.value = n.id
+        showToast('已还原笔记')
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : String(e))
+      }
     },
   })
 }
 
 function onSaveNote(id: number, title: string, content: string) {
   store.saveNote(id, title, content)
+}
+
+// ---- 二次确认（宿主层单实例）----
+//
+// ConfirmDialog 是「visible + confirm/cancel 事件」的组件，不是 promise 函数。
+// 每个危险操作各挂一个组件会随调用点线性增长（且多实例焦点陷阱会互相抢），
+// 所以这里用**一个实例 + 一个 resolve 句柄**包成 `await askConfirm(...)`。
+const confirmState = ref({
+  visible: false,
+  title: '',
+  message: '',
+  confirmText: '确认',
+})
+let confirmResolve: ((ok: boolean) => void) | null = null
+
+function askConfirm(opts: { title: string; message: string; confirmText?: string }): Promise<boolean> {
+  return new Promise((resolve) => {
+    // 连点两次时旧的 resolve 被替换，旧 Promise 拿不到答复 → 永远 pending。
+    // 先兑现掉再替换，调用方的 await 不会悬着。
+    confirmResolve?.(false)
+    confirmResolve = resolve
+    confirmState.value = {
+      visible: true,
+      title: opts.title,
+      message: opts.message,
+      confirmText: opts.confirmText ?? '确认',
+    }
+  })
+}
+
+function settleConfirm(ok: boolean) {
+  const r = confirmResolve
+  confirmResolve = null
+  confirmState.value.visible = false
+  r?.(ok)
+}
+
+/** 回收站里的三个操作。**每一步都要刷新回收站列表**，否则行不动 = 用户以为没点上。 */
+async function onRestoreNote(id: number) {
+  try {
+    await tauriApi.restoreNote(id)
+    trashNotes.value = await tauriApi.listTrashNotes()
+    await store.refreshNotes()
+    showToast('已还原')
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : String(e))
+  }
+}
+
+async function onPurgeNote(id: number) {
+  const t = trashNotes.value.find((n) => n.id === id)
+  const ok = await askConfirm({
+    title: '彻底删除这条笔记？',
+    // 点名具体是哪一条 + 说清不可逆：泛泛的「确定吗」用户会不看就点掉，
+    // 而这里点错的代价是数据永久没了。
+    message: `「${t?.title ?? '这条笔记'}」将被永久删除，无法还原。`,
+    confirmText: '永久删除',
+  })
+  if (!ok) return
+  try {
+    await tauriApi.purgeNote(id)
+    trashNotes.value = await tauriApi.listTrashNotes()
+    if (activeNoteId.value === id) activeNoteId.value = null
+    await store.refreshNotes()
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : String(e))
+  }
+}
+
+async function onEmptyTrash() {
+  const n = trashNotes.value.length
+  const ok = await askConfirm({
+    title: `清空回收站（${n} 条）？`,
+    // ⚠️ 必须带上条数并用模板串：写死「这 n 条」正是用户读到的字面量，
+    //   他会以为是占位符没替换 —— 而这里恰好是「点错即数据全没」的确认框。
+    message: `这 ${n} 条笔记将被永久删除，无法还原。`,
+    confirmText: '全部删除',
+  })
+  if (!ok) return
+  try {
+    await tauriApi.emptyNoteTrash()
+    trashNotes.value = []
+    await store.refreshNotes()
+    showToast(`已清空 ${n} 条`)
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : String(e))
+  }
+}
+
+function formatTrashTime(iso: string | null): string {
+  if (!iso) return '未知时刻'
+  // ⚠️ `parseTimestamp` 回的是**毫秒数**，不是 Date —— 直接 `.getFullYear()`
+  //   会 TypeError（回收站每一行都炸）。返回 0 视为解析失败。
+  const ms = parseTimestamp(iso)
+  if (!ms) return '未知时刻'
+  const d = new Date(ms)
+  const pad = (x: number) => String(x).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 // ---- 全局搜索 / 设置 ----
@@ -1271,19 +1443,78 @@ provide('showToast', showToast)
         <!-- 速记：独立视图 -->
         <section v-else-if="activeView === 'notes'" class="view view-notes" tabindex="-1" aria-label="速记">
           <div class="notes-split">
+            <!-- 文件夹树（发布说明 ①⑭）。收起时整栏消失，笔记列表补上它的宽度。 -->
+            <NoteFolderTree
+              v-if="foldersVisible"
+              class="ns-tree"
+              :active="activeNoteFolderId"
+              @select="onSelectNoteFolder"
+              @error="showToast($event)"
+            />
+            <div v-else class="ns-tree ns-tree--closed" aria-hidden="true" />
+
             <NoteList
-              :notes="store.state.notes"
+              class="ns-list"
+              :notes="visibleNotes"
               :active-id="activeNoteId"
+              :folders-active="activeNoteFolderId !== null"
+              :trash-count="trashNotes.length"
+              :trash-open="trashVisible"
               @select="onSelectNote"
               @create="onCreateNote"
               @delete="onDeleteNote"
+              @toggle-folders="foldersVisible = !foldersVisible"
+              @open-trash="openTrash"
             />
             <NoteEditor
+              class="ns-editor"
               :note="activeNote"
               @save="onSaveNote"
               @delete="onDeleteNote"
             />
           </div>
+
+          <!-- 回收站视图：盖在编辑器上（它是「另一个地方」，不是一篇笔记）。 -->
+          <div v-if="trashVisible" class="trash-view">
+            <header class="tv-header">
+              <h2 class="tv-title">回收站</h2>
+              <span class="tv-sub">
+                保留 {{ trashDays }} 天<template v-if="trashDays === 0">（永久保留）</template>
+              </span>
+              <button class="tv-close" aria-label="关闭回收站" @click="trashVisible = false">
+                <X :size="15" :stroke-width="2.2" />
+              </button>
+            </header>
+
+            <p v-if="trashNotes.length === 0" class="tv-empty">回收站是空的</p>
+
+            <div v-else class="tv-body">
+              <div v-for="n in trashNotes" :key="n.id" class="tv-row">
+                <div class="tv-main">
+                  <span class="tv-name">{{ n.title }}</span>
+                  <span class="tv-time">删除于 {{ formatTrashTime(n.deleted_at) }}</span>
+                </div>
+                <div class="tv-acts">
+                  <button class="tv-act" @click="onRestoreNote(n.id)">还原</button>
+                  <button class="tv-act danger" @click="onPurgeNote(n.id)">彻底删除</button>
+                </div>
+              </div>
+            </div>
+
+            <footer v-if="trashNotes.length > 0" class="tv-foot">
+              <button class="tv-act danger" @click="onEmptyTrash">清空回收站</button>
+            </footer>
+          </div>
+
+          <ConfirmDialog
+            :visible="confirmState.visible"
+            :title="confirmState.title"
+            :message="confirmState.message"
+            confirm-text="永久删除"
+            tone="danger"
+            @confirm="settleConfirm(true)"
+            @cancel="settleConfirm(false)"
+          />
         </section>
 
         <!-- 速达：独立视图 -->
@@ -1909,6 +2140,8 @@ html[data-wallpaper='1'] .title-bar [data-tip]::after {
 /* 速记视图：两栏布局（仅右下外边距，左上贴边与原版一致） */
 .view-notes {
   padding: 0 20px 20px 0;
+  /* 回收站面板是它的定位祖先（absolute inset 定位） */
+  position: relative;
 }
 .view-suda {
   padding: 0 20px 20px 0;
@@ -2027,19 +2260,148 @@ html[data-theme='dark'][data-wallpaper-clear='1'] .ext-drawer {
 .view-layout-editor {
   padding: 0 20px 20px 0;
 }
+/* 三栏：文件夹树 / 笔记列表 / 编辑器。
+   ⚠️ 必须用显式类名，不能沿用 `:first-child` / `:last-child` ——
+   树那栏可以被收起（渲染成 .ns-tree--closed 的空壳），一旦子元素数量
+   变化，伪类就会指到错误的栏上，表现为「收起树之后编辑器顶掉了列表」。 */
 .notes-split {
   display: flex;
   gap: 14px;
   height: 100%;
   min-height: 0;
 }
-.notes-split > *:first-child {
+.notes-split .ns-tree {
+  flex: 0 0 172px;
+  min-width: 0;
+}
+/* 收起态保留一个 0 宽的占位节点，让「三栏」的结构恒定 */
+.notes-split .ns-tree--closed {
+  flex: 0 0 0;
+  padding: 0;
+  overflow: hidden;
+}
+.notes-split .ns-list {
   flex: 0 0 300px;
   min-width: 0;
 }
-.notes-split > *:last-child {
+.notes-split .ns-editor {
   flex: 1;
   min-width: 0;
+}
+/* 收起文件夹栏时把列表放宽，别留一条空隙 */
+.notes-split:has(.ns-tree--closed) .ns-list {
+  flex: 0 0 340px;
+}
+
+/* ── 回收站视图（盖在编辑器之上：它是「另一个地方」，不是一篇笔记）── */
+.trash-view {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: min(560px, 70%);
+  display: flex;
+  flex-direction: column;
+  z-index: 20;
+  padding: 18px;
+  background: var(--bg-card-solid);
+  border-left: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-card);
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+}
+.tv-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.tv-title {
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--text-1);
+}
+.tv-sub {
+  font-size: 12px;
+  color: var(--text-4);
+}
+.tv-close {
+  margin-left: auto;
+  display: flex;
+  padding: 4px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.tv-close:hover {
+  background: var(--bg-card-soft);
+  color: var(--text-1);
+}
+.tv-empty {
+  padding: 32px 0;
+  font-size: 13px;
+  color: var(--text-4);
+  text-align: center;
+}
+.tv-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tv-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-card-soft);
+}
+.tv-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tv-name {
+  font-size: 13px;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tv-time {
+  font-size: 11px;
+  color: var(--text-4);
+}
+.tv-acts {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.tv-act {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-2);
+  background: var(--bg-card-solid);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tv-act:hover {
+  border-color: var(--brand-500);
+  color: var(--brand-500);
+}
+.tv-act.danger:hover {
+  border-color: var(--c-red);
+  color: var(--c-red);
+}
+.tv-foot {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
 }
 .view-chat-hint {
   flex: 1;

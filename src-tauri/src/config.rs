@@ -263,6 +263,13 @@ pub struct AppConfig {
     pub clipboard_max_items: i64,
     /// 非置顶记录的保留天数
     pub clipboard_ttl_days: i64,
+    /// 速记回收站的保留天数（v0.8.0）。**0 = 永久保留，不自动清理**。
+    ///
+    /// ⚠️ 0 必须是「不清理」而不是「立即清空」——`purge_expired_trash` 里
+    ///   有对应的早退分支。写成 `keep_days.max(1)` 这种归一化会在每次启动时
+    ///   把整个回收站清空，而用户从没点过「清空」。
+    #[serde(default = "default_notes_trash_days")]
+    pub notes_trash_days: i64,
     /// 是否暂停记录（暂停期间复制内容不写入历史）
     pub clipboard_paused: bool,
     /// 粘贴快捷键方式：auto(自动检测终端) / ctrl_v / ctrl_shift_v / shift_insert
@@ -409,6 +416,11 @@ fn one() -> f64 {
 
 fn default_paste_method() -> String {
     "auto".to_string()
+}
+
+/// 回收站默认保留 30 天：够长（误删通常几天后才发现）、又不至于让回收站无限膨胀。
+fn default_notes_trash_days() -> i64 {
+    30
 }
 
 /// 速达网页默认打开方式：内嵌面板（ADR 0011 2026-09-25 拍板：默认落点 = 面板，可设置）
@@ -672,6 +684,7 @@ impl Default for AppConfig {
             shortcut_capture_enabled: true,
             clipboard_max_items: 500,
             clipboard_ttl_days: 7,
+            notes_trash_days: default_notes_trash_days(),
             clipboard_paused: false,
             clipboard_paste_method: "auto".to_string(),
             suda_web_open_mode: "panel".to_string(),

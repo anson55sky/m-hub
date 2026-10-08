@@ -22,6 +22,7 @@ import {
   type SearchResult,
   type Sticky,
   type SystemInfo,
+  type FolderNode,
   type Tag,
   type Todo,
   type RepeatRuleInput,
@@ -45,6 +46,8 @@ const DEFAULT_CHAT_SHORTCUT = DEFAULT_SHORTCUTS.chat
 interface StoreState {
   resources: Resource[]
   notes: Note[]
+  /** 速记文件夹树（根节点数组，判定真源在 Rust `repo::note_folder::tree`）。 */
+  noteFolders: FolderNode[]
   todos: Todo[]
   stickies: Sticky[]
   detached: DetachedSticky[]
@@ -76,6 +79,7 @@ interface StoreState {
 const state = reactive<StoreState>({
   resources: [],
   notes: [],
+  noteFolders: [] as FolderNode[],
   todos: [],
   stickies: [],
   detached: [],
@@ -138,6 +142,8 @@ const state = reactive<StoreState>({
     focus_pins: ['todo', 'sticky1', 'countdown'],
     clipboard_max_items: 500,
     clipboard_ttl_days: 7,
+    // 回收站保留天数；0 = 永久保留
+    notes_trash_days: 30,
     clipboard_paused: false,
     clipboard_paste_method: 'auto',
     suda_web_open_mode: 'panel',
@@ -712,6 +718,64 @@ export function useStore() {
   async function refreshNotes() {
     if (!isTauri()) return
     state.notes = await tauriApi.listNotes()
+  }
+
+  // ---- 速记文件夹（v0.8.0，发布说明 ①）----
+  //
+  // 与速达小类（`resourceSubcategories`）刻意**分开**而不是抽象成一份：
+  // 两者的增删改语义不同（删除文件夹时笔记改挂「未归类」，而速达是改挂默认小类），
+  // 抽成通用 CRUD 会得到一堆 `if (kind === 'note')` 分支 —— 那比重复更糟。
+
+  async function refreshNoteFolders() {
+    if (!isTauri()) return
+    state.noteFolders = await tauriApi.listNoteFolders()
+  }
+
+  /**
+   * 文件夹树。**组件一律用这个，别直接读 `state.noteFolders`**。
+   *
+   * `state` 对外是 `readonly`（约定 13），直接取会拿到 `DeepReadonly<FolderNode>`，
+   * 传给按 `FolderNode` 声明的函数就类型不符（Suda.vue 的 `subcategoryTree()`
+   * 是同一处理法，那份是既有先例）。
+   */
+  function noteFolderTree(): FolderNode[] {
+    return state.noteFolders
+  }
+
+  async function addNoteFolder(parent: string, name: string) {
+    if (!isTauri()) return null
+    const f = await tauriApi.createNoteFolder(parent, name)
+    await refreshNoteFolders()
+    return f
+  }
+
+  async function editNoteFolder(id: number, name: string) {
+    await tauriApi.renameNoteFolder(id, name)
+    await refreshNoteFolders()
+  }
+
+  async function removeNoteFolder(id: number) {
+    await tauriApi.deleteNoteFolder(id)
+    // ⚠️ 必须同时刷笔记：删文件夹会把子树里的笔记改挂「未归类」，
+    // 而那些笔记的 folder_id 变了 —— 只刷文件夹的话，笔记行左侧的
+    // 「归属」标记会指向一个已不存在的文件夹。
+    await Promise.all([refreshNoteFolders(), refreshNotes()])
+  }
+
+  async function moveNoteToFolder(noteId: number, folderId: number | null) {
+    await tauriApi.moveNoteToFolder(noteId, folderId)
+    await Promise.all([refreshNotes(), refreshNoteFolders()])
+  }
+
+  async function setNoteIcon(noteId: number, icon: string) {
+    await tauriApi.setNoteIcon(noteId, icon)
+    await refreshNotes()
+  }
+
+  /** 某文件夹及其全部后代的 id —— 判定真源在 Rust，前端不做这个计算。 */
+  async function noteFolderSubtree(id: number): Promise<number[]> {
+    if (!isTauri()) return []
+    return tauriApi.noteFolderSubtreeIds(id)
   }
 
   async function searchAll(keyword: string) {
@@ -1881,6 +1945,14 @@ export function useStore() {
     saveNote,
     removeNote,
     refreshNotes,
+    refreshNoteFolders,
+    noteFolderTree,
+    addNoteFolder,
+    editNoteFolder,
+    removeNoteFolder,
+    moveNoteToFolder,
+    setNoteIcon,
+    noteFolderSubtree,
     searchAll,
     createTodo,
     toggleTodo,
