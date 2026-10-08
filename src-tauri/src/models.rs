@@ -21,6 +21,12 @@ pub struct Resource {
     pub last_launched_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// 加密备注的**明文名字**（v0.8.0 发布说明 ⑧）；空串 = 没有备注。
+    ///
+    /// ⚠️ 它是明文，且**列表里会显示** —— 这是有意的：备注名加密的话，
+    ///   列表上就只剩一串密文，用户无法分辨哪条资源写了备注。
+    ///   正文（`resources.secret_note`）才是密文，列表任何时候都不带它。
+    pub secret_label: String,
 }
 
 /// 速达小类（ADR 0012）：大类（resources.kind）下单归属的小类，单归属、非多选标签。

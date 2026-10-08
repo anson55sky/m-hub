@@ -60,6 +60,29 @@ pub fn update(conn: &Connection, id: i64, title: &str, content: &str) -> Result<
     get(conn, id)
 }
 
+/// 导入速记专用：**按导出包里的原始时间戳落库**（`created_at` / `updated_at`
+/// 都不取当前时刻）。
+///
+/// 为什么不复用 `create`：列表排序与「相对时间」都按这两个时间戳走，导入后全部
+/// 变成「导入的那一刻」的话，同一批笔记会集体跳到列表最前，而且用户会发现
+/// 「导出时的日期」与「导入后显示的日期」对不上 —— 那正是这个功能的承诺之一。
+pub fn import(
+    conn: &Connection,
+    title: &str,
+    content: &str,
+    folder_id: Option<i64>,
+    icon: &str,
+    created_at: &str,
+    updated_at: &str,
+) -> Result<Note> {
+    conn.execute(
+        "INSERT INTO notes (title, content, folder_id, icon, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![title, content, folder_id, icon, created_at, updated_at],
+    )?;
+    get(conn, conn.last_insert_rowid())
+}
+
 pub fn delete(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
     Ok(())

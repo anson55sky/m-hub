@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { listen } from '@tauri-apps/api/event'
+import { open, save } from '@tauri-apps/plugin-dialog'
 import TitleBar from '../components/TitleBar.vue'
 import SudaWebPanel from '../components/SudaWebPanel.vue'
 import TodoCard from '../components/TodoCard.vue'
@@ -882,6 +883,95 @@ async function onSelectNoteFolder(target: NoteFolderTarget) {
   }
 }
 
+// ---- 速记导出 / 导入（发布说明 ⑤）----
+//
+// 入口放在速记视图的列表栏里（NoteList 头部两个图标钮）而不是设置页：
+// 导出/导入的对象就是「我眼前这批笔记」，让用户为了导笔记先去设置页找一遍
+// 是本末倒置。设置 → 数据与关于里另有一份完整数据备份，那不是同一件事。
+
+/** 打包期间禁掉两个按钮，防连点开两个文件选择器 / 同时导两次。 */
+const notesPortBusy = ref(false)
+
+async function onExportNotes() {
+  if (notesPortBusy.value) return
+  if (!isTauri()) {
+    showToast('浏览器预览下不可导出速记')
+    return
+  }
+  notesPortBusy.value = true
+  try {
+    // 默认文件名带时间戳：同名覆盖时对话框已经会问，而用户在文件列表里
+    // 也能一眼分出「这次导出是哪一份」。
+    const stamp = new Date()
+      .toISOString()
+      .slice(0, 16)
+      .replace(/[-:T]/g, '')
+    const target = await save({
+      title: '导出速记',
+      defaultPath: `m-hub-notes-${stamp}.zip`,
+      filters: [{ name: '速记导出包', extensions: ['zip'] }],
+    })
+    if (!target) return
+    const s = await tauriApi.exportNotes(target)
+    const bits = [`${s.notes} 篇笔记`]
+    if (s.folders > 0) bits.push(`${s.folders} 个文件夹`)
+    if (s.tags > 0) bits.push(`${s.tags} 个标签`)
+    if (s.images > 0) bits.push(`${s.images} 张图片`)
+    showToast(`已导出 ${bits.join('、')}`)
+    // ⚠️ 有引用却取不到文件的历史孤儿图要说出来 —— 静默少几张图，
+    //   用户只能在导入回去之后才发现，而那时他已经迁走了。
+    if (s.images_missing > 0) {
+      showToast(`另有 ${s.images_missing} 张图片在磁盘上已找不到，未包含在导出包中`, {
+        duration: 6000,
+      })
+    }
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : String(e))
+  } finally {
+    notesPortBusy.value = false
+  }
+}
+
+async function onImportNotes() {
+  if (notesPortBusy.value) return
+  if (!isTauri()) {
+    showToast('浏览器预览下不可导入速记')
+    return
+  }
+  notesPortBusy.value = true
+  try {
+    const picked = await open({
+      title: '导入速记',
+      multiple: false,
+      filters: [{ name: '速记导出包', extensions: ['zip'] }],
+    })
+    if (!picked || Array.isArray(picked)) return
+    const s = await tauriApi.importNotes(picked)
+    // ⚠️ 全量重拉（含正文），不能用 refreshNotes —— 那是 meta-only 列表，
+    //   导入进来的笔记会点开一片空白。见 store.reloadNotesFull 的注释。
+    await store.reloadNotesFull()
+    if (s.notes === 0) {
+      showToast(
+        s.skipped > 0
+          ? `没有新增：这 ${s.skipped} 篇都已经存在了（导入是追加，不会覆盖）`
+          : '这个包里没有笔记',
+        { duration: 5000 },
+      )
+      return
+    }
+    const bits = [`导入 ${s.notes} 篇笔记`]
+    if (s.skipped > 0) bits.push(`跳过重复 ${s.skipped} 篇`)
+    if (s.folders > 0) bits.push(`新建 ${s.folders} 个文件夹`)
+    if (s.tags > 0) bits.push(`新建 ${s.tags} 个标签`)
+    if (s.images > 0) bits.push(`${s.images} 张图片`)
+    showToast(bits.join('、'), { duration: 5000 })
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : String(e))
+  } finally {
+    notesPortBusy.value = false
+  }
+}
+
 async function openTrash() {
   activeNoteFolderId.value = null
   activeNoteFolderSubtree.value = null
@@ -1229,18 +1319,39 @@ interface ToastAction {
   onClick: () => void
 }
 
+/**
+ * `duration` 是给「话比较多、2.2 秒读不完」的那些结果用的（导出/导入的条目清单）。
+ *
+ * ⚠️ 顺带说明它为什么不是「第二参数塞个数字」：第二参数是撤销按钮那个结构，
+ *   两边都在第二位就是两条含义，靠猜区分必然踩错。合成一个对象后，
+ *   「只有时长」与「只有撤销」都不必写占位字段。
+ */
+interface ToastOptions {
+  /** 毫秒。给了就按它算，含撤销按钮时的 5000s 经验值也不再套用。 */
+  duration?: number
+  label?: string
+  onClick?: () => void
+}
+
 const toastMsg = ref('')
 const toastAction = ref<ToastAction | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 
-function showToast(msg: string, action?: ToastAction) {
+function showToast(msg: string, opts?: ToastAction | ToastOptions) {
+  // 旧调用点传的是 `{ label, onClick }`（无 duration 的结构）——按「有 label 即动作」判定，
+  // 不去判 `duration` 在不在，那样两个形状会互相误判（约定：判据用形状里最明确的那个字段）。
+  const action =
+    opts && 'label' in opts && opts.label
+      ? { label: opts.label, onClick: opts.onClick ?? (() => {}) }
+      : null
+  const duration = opts && 'duration' in opts && opts.duration ? opts.duration : undefined
   toastMsg.value = msg
-  toastAction.value = action ?? null
+  toastAction.value = action
   if (toastTimer) clearTimeout(toastTimer)
   toastTimer = setTimeout(() => {
     toastMsg.value = ''
     toastAction.value = null
-  }, action ? 5000 : 2200)
+  }, duration ?? (action ? 5000 : 2200))
 }
 
 provide('showToast', showToast)
@@ -1484,11 +1595,14 @@ provide('showToast', showToast)
               :folders-active="activeNoteFolderId !== null"
               :trash-count="trashNotes.length"
               :trash-open="trashVisible"
+              :porting="notesPortBusy"
               @select="onSelectNote"
               @create="onCreateNote"
               @delete="onDeleteNote"
               @toggle-folders="foldersVisible = !foldersVisible"
               @open-trash="openTrash"
+              @export="onExportNotes"
+              @import="onImportNotes"
             />
             <NoteEditor
               class="ns-editor"

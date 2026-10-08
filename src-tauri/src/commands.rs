@@ -11,6 +11,7 @@ use crate::models::{
 use crate::process;
 use crate::github_auth::GithubStatus;
 use crate::models::{FolderNode, NoteFolder};
+use crate::notes_port;
 use crate::repo::{
     chat, clipboard, countdown, detached_sticky, note, note_folder, resource, snippet, sticky,
     subcategory, tag, todo, todo_tag,
@@ -478,6 +479,225 @@ pub fn purge_expired_trash(state: State<'_, DbState>, keep_days: i64) -> Result<
         log::info!("回收站自动清理: {} 条（保留 {} 天）", n, keep_days);
     }
     Ok(n)
+}
+
+// ---------- 速达加密备注（v0.8.0，发布说明 ⑧）----------
+
+/// 加密备注的名字 / 正文长度上限。
+///
+/// 上限是给「有人在备注里粘了一整篇文档」兜底的 —— 密文膨胀 4/3 后进 SQLite，
+/// 一条几十 MB 的备注既拖慢备份也拖慢数据库迁移。
+const SECRET_LABEL_MAX: usize = 40;
+const SECRET_NOTE_MAX: usize = 20_000;
+
+/// 一条解密后的备注（发给前端；**不含密文**）。
+#[derive(serde::Serialize)]
+pub struct SecretNote {
+    pub label: String,
+    pub note: String,
+}
+
+/// 写（或清除）某条资源的加密备注，返回更新后的资源（前端据此刷新列表上的 🔒）。
+///
+/// `note` 为空 = 清除备注（名字与正文一起清）。
+///
+/// ⚠️ 命令层**不做**「先查后写」：清空与设置走同一条 SQL 路径（`set_secret`
+///   两条列一起改），少一个分支就少一处「名字还在、正文没了」的中间态。
+#[tauri::command]
+pub fn set_resource_secret(
+    state: State<'_, DbState>,
+    id: i64,
+    label: String,
+    note: String,
+) -> Result<Resource, String> {
+    let label = label.trim();
+    let note = note.trim();
+    if label.chars().count() > SECRET_LABEL_MAX {
+        return Err(format!("备注名最多 {SECRET_LABEL_MAX} 个字"));
+    }
+    if note.chars().count() > SECRET_NOTE_MAX {
+        return Err(format!("备注正文最多 {SECRET_NOTE_MAX} 个字"));
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    if note.is_empty() {
+        resource::set_secret(&conn, id, "", None).map_err(err_str)?;
+        log::info!("清除资源加密备注: id={}", id);
+        return resource::get(&conn, id).map_err(err_str);
+    }
+    let label = if label.is_empty() { "加密备注" } else { label };
+    let cipher = crate::secret::encrypt(note)?;
+    resource::set_secret(&conn, id, label, Some(&cipher)).map_err(err_str)?;
+    log::info!("写入资源加密备注: id={} {} 字", id, note.chars().count());
+    resource::get(&conn, id).map_err(err_str)
+}
+
+/// 读取并解密某条资源的备注。没有备注时返回空 `note`（不是错误）。
+#[tauri::command]
+pub fn get_resource_secret(state: State<'_, DbState>, id: i64) -> Result<SecretNote, String> {
+    let (label, cipher) = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        resource::get_secret(&conn, id).map_err(err_str)?
+    };
+    let note = match cipher {
+        Some(c) => crate::secret::decrypt(&c)?,
+        None => String::new(),
+    };
+    Ok(SecretNote { label, note })
+}
+
+// ---------- AI 深度整理（v0.8.0，发布说明 ⑦）----------
+
+/// 深度整理的输入上限。超了直接拒 —— 悄悄截断会让模型「以为自己看全了」，
+/// 然后给出后半段内容根本没参与整理的结果，而用户完全看不出来。
+const TIDY_INPUT_MAX_CHARS: usize = 20_000;
+
+/// 把一篇笔记的正文交给对话模型梳理结构，返回整理后的 Markdown。
+///
+/// **只返回、不落库**：是否采纳由用户在预览面板里决定。这是与「一键美化」
+/// 的关键区别 —— 那个是纯本地幂等的排版整理、点错了能看出来；
+/// 这里的输出是模型生成的、可能整篇改写，覆盖原笔记就是不可逆的数据损失。
+///
+/// 不新建会话、不写 `chat_messages`：它是**一次性工具**，不是对话。
+/// 用户若想追问细节，应该在 AI 对话里把那篇内容自己发过去 —— 顺手让这里的
+/// 过程变成一条会话记录，只会给对话列表塞一堆无意义的空壳会话。
+#[tauri::command]
+pub async fn tidy_note_content(content: String) -> Result<String, String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err("这篇笔记还没有内容，没什么可整理的".into());
+    }
+    if trimmed.chars().count() > TIDY_INPUT_MAX_CHARS {
+        return Err(format!(
+            "正文超过 {} 字，先拆成几篇再整理 —— 一次全交给模型，出来的结果通常两头都不细",
+            TIDY_INPUT_MAX_CHARS
+        ));
+    }
+
+    // 模型选择口径与对话**完全一致**（同一个 pick_chat_model）：平台额度走
+    // 「一个入口 + 多模型负载切换」，自备供应商走默认模型。绝不在这里另写一套
+    // 「取第一个模型」—— 那会让「设置里换了模型」在对话里生效、在整理里不生效。
+    let models = config::load().chat_models;
+    let model = pick_chat_model(&models, &default_session_model_name(&models))?;
+
+    let system = concat!(
+        "你是 Markdown 笔记整理助手。用户会给你一篇笔记的 Markdown 正文。",
+        "请在不改变原意、不增删信息、不翻译、不改写措辞的前提下改进它的结构：",
+        "合理分层级标题、统一的列表与编号、归并零散段落、给并列要点加粗关键词、",
+        "必要时补分隔线。",
+        "只输出整理后的 Markdown 正文本身：不要任何前言、解释或结语，",
+        "不要用代码块包裹，也不要额外添加原文没有的信息。"
+    );
+    let messages = vec![
+        ChatMessage {
+            id: 0,
+            session_id: 0,
+            role: "system".into(),
+            content: system.into(),
+            created_at: String::new(),
+        },
+        ChatMessage {
+            id: 0,
+            session_id: 0,
+            role: "user".into(),
+            content: trimmed.to_string(),
+            created_at: String::new(),
+        },
+    ];
+
+    // 收尾回调 `|_| Ok(())`：整理结果**整篇回来**才展示，不做流式。
+    // 流式在这里没有用户价值（用户看的是「改完什么样」，不是「一个字一个字蹦」），
+    // 却在多一道逐字渲染的排版雷 —— 部分 Markdown 渲染出来是坏的。
+    let mut out = String::new();
+    crate::chat::stream_chat(&model, &messages, &mut out, |_| Ok(())).await?;
+
+    let result = strip_code_fence(&out).trim().to_string();
+    if result.is_empty() {
+        return Err("模型没有返回内容，换个模型再试一次".into());
+    }
+    log::info!(
+        "AI 深度整理: {} 字 -> {} 字（模型 {}）",
+        trimmed.chars().count(),
+        result.chars().count(),
+        model.name
+    );
+    Ok(result)
+}
+
+/// 模型常把 Markdown 整个裹进 ``` 代码块返回（提示词里说了不要，也常有模型不听）。
+/// 剥掉外层围栏；正文**内部**的代码块不动 —— 那些是用户笔记里的代码。
+fn strip_code_fence(text: &str) -> &str {
+    let t = text.trim();
+    for fence in ["```", "~~~"] {
+        let Some(rest) = t.strip_prefix(fence) else { continue };
+        // 围栏后面可以跟语言标记（```markdown / ```md），也要剥掉
+        let Some(i) = rest.find('\n') else { continue };
+        let body = rest[i + 1..].trim_end();
+        // 没闭合就是模型把输出截断了（或它压根不是包裹）——一律不动，
+        // 宁可多一层可见的围栏，也不要因为「猜它大概是包裹」而吃掉正文。
+        if let Some(inner) = body.strip_suffix(fence) {
+            return inner.trim();
+        }
+    }
+    t
+}
+
+// ---------- 速记导出 / 导入（v0.8.0，发布说明 ⑤）----------
+
+/// 把全部速记（含文件夹、标签、图标、时间戳、内嵌图片）打包成 zip。
+///
+/// ⚠️ **async 是必要的，不是风格选择**：全量正文 + 图片读盘打包，
+///   同步命令会在主线程上跑完整个过程（几百篇笔记 + 几十 MB 图片 = 数秒冻结）。
+///   锁仍然只在这一个 await-free 的小段里持有，`stream_chat` 那种要跨 await 的
+///   写法在这里会编译不过（MutexGuard 不许跨 await）。
+#[tauri::command]
+pub async fn export_notes(
+    state: State<'_, DbState>,
+    dest_path: String,
+) -> Result<notes_port::ExportStats, String> {
+    let dest = std::path::PathBuf::from(&dest_path);
+    let stats = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        notes_port::export_to_zip(&conn, &dest)?
+    };
+    log::info!(
+        "速记导出: {} 篇 / {} 文件夹 / {} 图片 -> {}",
+        stats.notes,
+        stats.folders,
+        stats.images,
+        dest.display()
+    );
+    if stats.images_missing > 0 {
+        log::warn!("导出时发现 {} 张图片引用不到文件（未包含在包内）", stats.images_missing);
+    }
+    Ok(stats)
+}
+
+/// 从 zip 导入速记。**只追加**，重复的按「标题 + 创建时间」跳过。
+///
+/// ⚠️ 不 emit `notes-changed`：那个事件的监听者走的是「仅元信息」的刷新
+///   （`note::list_meta`，不拉正文）。用 meta 列表替换掉导入后的全量列表，
+///   新导入的笔记会**正文为空**——用户点开就是一片空白且无法编辑保存。
+///   正确做法是前端调 store 的全量重拉（见 `reloadNotesFull`）。
+#[tauri::command]
+pub async fn import_notes(
+    state: State<'_, DbState>,
+    src_path: String,
+) -> Result<notes_port::ImportStats, String> {
+    let src = std::path::PathBuf::from(&src_path);
+    let stats = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        notes_port::import_from_zip(&conn, &src)?
+    };
+    log::info!(
+        "速记导入: 新增 {} 篇（跳过重复 {}）/ 文件夹 {} / 标签 {} / 图片 {} <- {}",
+        stats.notes,
+        stats.skipped,
+        stats.folders,
+        stats.tags,
+        stats.images,
+        src.display()
+    );
+    Ok(stats)
 }
 
 /// 设置笔记的专属小图标。空串 = 恢复默认图标。
@@ -2825,7 +3045,11 @@ pub fn cleanup_wallpapers() -> Result<(), String> {
 // ---------- 笔记图片 ----------
 
 /// 笔记内嵌图片支持的格式（笔记是文档配图，gif 动图放行——仅 <img> 渲染，无壁纸的常驻 GPU 纹理问题）
-const NOTE_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
+///
+/// **pub**：`notes_port` 判定导出包里的图片文件名时用的是同一份白名单
+/// ——另抄一份的话，往上加一种格式只改一处，导出包里的图就静默「消失」了
+/// （写入被拒、统计里也没有，用户只会看到图没了）。
+pub const NOTE_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 /// 单张笔记图片大小上限
 const NOTE_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
 
@@ -4056,6 +4280,29 @@ mod tests {
         // 未传且钥匙串里也没有 → 明确提示
         assert!(probe_key("", None).is_err());
         assert_eq!(probe_key("", Some("sk-stored".into())).unwrap(), "sk-stored");
+    }
+
+    // ---- AI 深度整理（发布说明 ⑦）----
+
+    /// 模型裹回代码块时必须剥掉外层围栏，而**正文内部的代码块必须留着** ——
+    /// 后者往往是用户笔记里那段真代码，剥了它等于静默删内容。
+    #[test]
+    fn strip_code_fence_only_removes_the_outer_wrapper() {
+        assert_eq!(strip_code_fence("```markdown\n# 标题\n```"), "# 标题");
+        assert_eq!(strip_code_fence("```\n正文\n```"), "正文");
+        assert_eq!(strip_code_fence("~~~\n正文\n~~~"), "正文");
+        // 内部代码块不动
+        let inner = "```markdown\n前文\n\n```rust\nfn main() {}\n```\n\n后文\n```";
+        assert_eq!(
+            strip_code_fence(inner),
+            "前文\n\n```rust\nfn main() {}\n```\n\n后文"
+        );
+        // 没裹围栏的：原样返回（一个都不许动）
+        assert_eq!(strip_code_fence("# 标题\n正文"), "# 标题\n正文");
+        // 文末孤立的 ```（没有换行、不是包裹）不是围栏
+        assert_eq!(strip_code_fence("正文```"), "正文```");
+        // 只开了围栏没闭合：宁可不动，也不要吃掉正文（模型截断时会这样）
+        assert_eq!(strip_code_fence("```markdown\n标题"), "```markdown\n标题");
     }
 
     // ---- 平台额度：一个入口 + 多模型负载切换（自备供应商精确命中照旧）----

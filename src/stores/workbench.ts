@@ -356,6 +356,18 @@ export function useStore() {
     return r
   }
 
+  /**
+   * 就地替换列表里的某一条资源（**不整表重拉**）。
+   *
+   * 用于只改了一个小字段的场景 —— 加密备注的 `secret_label`（v0.8.0 ⑧）。
+   * 整表重拉会让 5 列网格全部重渲染，还会打断正在进行的拖拽排序；
+   * `state` 是只读代理，所以替换必须走 store，不能让组件直接写。
+   */
+  function patchResource(updated: Resource) {
+    const idx = state.resources.findIndex((x) => x.id === updated.id)
+    if (idx >= 0) state.resources[idx] = updated
+  }
+
   async function removeResource(id: number) {
     await tauriApi.deleteResource(id)
     state.resources = state.resources.filter((x) => x.id !== id)
@@ -773,6 +785,29 @@ export function useStore() {
   async function setNoteIcon(noteId: number, icon: string) {
     await tauriApi.setNoteIcon(noteId, icon)
     await refreshNotes()
+  }
+
+  /**
+   * 导入速记后的**全量**重拉（含正文）。
+   *
+   * ⚠️ 不能用 `refreshNotes()`：那条走 `list_notes` = `note::list_meta`，
+   *   正文列被 SELECT 成空串。导入后的列表里那些新笔记**全部是空的** ——
+   *   点开是空白，改一下就把空白存回去（用户丢的是导入刚给的内容）。
+   *   所以这里经 `list_notes_by_folder`（不传 folderIds = 全量）拿真正文。
+   *
+   * 同时刷文件夹与标签：导入会**新建**它们，只刷笔记的话文件夹栏与标签筛选条
+   * 都不出现新项，而笔记已经挂在那些文件夹下了 —— 表现为「筛选不出来」。
+   */
+  async function reloadNotesFull() {
+    if (!isTauri()) return
+    const [notes, folders, tags] = await Promise.all([
+      tauriApi.listNotesByFolder(),
+      tauriApi.listNoteFolders(),
+      tauriApi.listTags(),
+    ])
+    state.notes = notes
+    state.noteFolders = folders
+    state.tags = tags
   }
 
   /** 某文件夹及其全部后代的 id —— 判定真源在 Rust，前端不做这个计算。 */
@@ -1944,6 +1979,7 @@ export function useStore() {
     toggleFloatPin,
     addResource,
     editResource,
+    patchResource,
     removeResource,
     removeResources,
     reorderResources,
@@ -1972,6 +2008,7 @@ export function useStore() {
     saveNote,
     removeNote,
     refreshNotes,
+    reloadNotesFull,
     refreshNoteFolders,
     noteFolderTree,
     addNoteFolder,

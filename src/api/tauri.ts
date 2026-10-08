@@ -12,6 +12,11 @@ export interface Resource {
   last_launched_at: string | null
   created_at: string
   updated_at: string
+  /**
+   * 加密备注的**明文名字**（v0.8.0 发布说明 ⑧）；空串 = 没有备注。
+   * ⚠️ 正文（密文）**永远不会**出现在列表里，只能由 `getResourceSecret` 现取现解密。
+   */
+  secret_label: string
 }
 
 /** 工作台「自定义速达」槽位内容配置（槽位 id 固定 suda1..suda4，同便签 1/2 池子模式） */
@@ -1010,6 +1015,24 @@ export interface NoteTagRow {
   tag_id: number
 }
 
+/** 速记导出统计。`images_missing` = 正文引用了但盘上已找不到的图片数（历史孤儿）。 */
+export interface NotesExportStats {
+  notes: number
+  folders: number
+  tags: number
+  images: number
+  images_missing: number
+}
+
+/** 速记导入统计。`skipped` = 判重跳过的笔记数（重复导入同一个包时它 = 包内笔记数）。 */
+export interface NotesImportStats {
+  notes: number
+  skipped: number
+  folders: number
+  tags: number
+  images: number
+}
+
 export interface Countdown {
   id: number
   name: string
@@ -1134,6 +1157,20 @@ export const tauriApi = {
     icon: payload.icon ?? null,
     args: payload.args ?? null,
   }),
+  /**
+   * 写（或清除）某条资源的加密备注（v0.8.0 发布说明 ⑧）。
+   *
+   * ⚠️ `note` 为空串 = **清除**（名字与正文一起清）。返回更新后的资源，
+   *   用它的 `secret_label` 刷新列表上的 🔒 —— 后端不 emit 资源变更事件，
+   *   因为这个字段的更新不该让整个速达列表重排（用户往往正在这一页上操作）。
+   * ⚠️ 首次调用可能会弹系统钥匙串授权（macOS/Windows 的一次性询问），
+   *   密钥只进钥匙串、永不落盘。
+   */
+  setResourceSecret: (id: number, label: string, note: string) =>
+    invoke<Resource>('set_resource_secret', { id, label, note }),
+  /** 读取并解密某条资源的备注。没有备注时 `note` 为空串（不是错误）。 */
+  getResourceSecret: (id: number) =>
+    invoke<{ label: string; note: string }>('get_resource_secret', { id }),
   /**
    * 抓取网站 favicon 并落盘到数据根，返回**本地绝对路径**（抓不到返回 null）。
    *
@@ -1347,6 +1384,26 @@ export const tauriApi = {
   setNoteTags: (noteId: number, tagIds: number[]) =>
     invoke<void>('set_note_tags', { noteId, tagIds }),
   listNoteTags: () => invoke<NoteTagRow[]>('list_note_tags'),
+  /**
+   * 导出全部速记到 zip（文件夹/标签/图标/时间戳/内嵌图片都在里面）。
+   * ⚠️ 后端**不 emit** `notes-changed`，导出不动库，无需刷新。
+   */
+  exportNotes: (destPath: string) =>
+    invoke<NotesExportStats>('export_notes', { destPath }),
+  /**
+   * 从 zip 导入速记。⚠️ **必须走 `store.reloadNotesFull()` 而不是 `refreshNotes()`** ——
+   * 后者拉的是 meta-only 列表（`list_meta` 不含正文），导入进来的笔记会正文为空。
+   */
+  importNotes: (srcPath: string) => invoke<NotesImportStats>('import_notes', { srcPath }),
+  /**
+   * AI 深度整理：把正文交给对话模型梳理结构，返回整理后的 Markdown。
+   *
+   * ⚠️ **返回但不落库** —— 是否采纳由用户在预览面板里决定。调用方拿到结果后
+   * 绝不能直接 `saveNote`：模型输出可能整篇改写，覆盖原笔记不可逆。
+   * 模型选择口径与对话完全一致（同一个 pick_chat_model），无需传模型名。
+   */
+  tidyNoteContent: (content: string) =>
+    invoke<string>('tidy_note_content', { content }),
   backupData: (targetDir: string) => invoke<string>('backup_data', { targetDir }),
   getDndConfig: () => invoke<{
     enabled: boolean; scheduled: boolean; startHour: number; endHour: number; activeNow: boolean

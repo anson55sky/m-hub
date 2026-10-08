@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { PanelLeft, Plus, Smile, StickyNote, Trash2, X } from 'lucide-vue-next'
+import { Download, PanelLeft, Plus, Smile, StickyNote, Trash2, Upload, X } from 'lucide-vue-next'
 import type { Note } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { useNoteFolderDrag } from '../composables/useNoteFolderDrag'
@@ -16,6 +16,8 @@ const props = defineProps<{
   /** 回收站条数；`0` 也显示入口（空回收站要能进去看，否则像功能不存在）。 */
   trashCount?: number
   trashOpen?: boolean
+  /** 导出/导入进行中（父层置位）：禁掉那两个按钮，防连点开两个对话框。 */
+  porting?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -24,6 +26,8 @@ const emit = defineEmits<{
   (e: 'delete', id: number): void
   (e: 'toggle-folders'): void
   (e: 'open-trash'): void
+  (e: 'export'): void
+  (e: 'import'): void
 }>()
 
 const store = useStore()
@@ -181,6 +185,30 @@ const iconPickerNote = computed(
         </span>
       </h2>
       <div class="nl-head-acts">
+        <!--
+          导出 / 导入（发布说明 ⑤）。
+          ⚠️ 两个都在**这一栏**（而不是设置页）：它们操作的就是眼前这批笔记，
+          让用户为导笔记先去设置里翻一遍是本末倒置。
+          打包期间靠 `porting` 禁掉：连点会开出两个保存对话框。
+        -->
+        <button
+          class="icon-btn"
+          title="导出全部笔记为 zip"
+          aria-label="导出速记"
+          :disabled="porting"
+          @click="emit('export')"
+        >
+          <Download :size="14" :stroke-width="2" />
+        </button>
+        <button
+          class="icon-btn"
+          title="从 zip 导入笔记（追加，不覆盖已有笔记）"
+          aria-label="导入速记"
+          :disabled="porting"
+          @click="emit('import')"
+        >
+          <Upload :size="14" :stroke-width="2" />
+        </button>
         <button
           class="icon-btn"
           :class="{ on: trashOpen }"
@@ -351,6 +379,13 @@ const iconPickerNote = computed(
 .icon-btn.add:hover {
   background: var(--brand-500);
   color: var(--text-on-accent);
+}
+/* 导出/导入进行中：置灰且不响应 hover 上浮（`transform` 也一并压掉，
+   否则「正在打包」的按钮看起来仍可点） */
+.nl-head-acts .icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
 }
 
 .nl-body {

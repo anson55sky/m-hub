@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.7.5"
+version = "0.8.0"
 description = "本地个人效率工作台"
 authors = ["you"]
 license = ""
@@ -60,6 +60,10 @@ sha2 = "0.10"
 getrandom = "0.3"
 ed25519-dalek = "2"
 base64 = "0.22"
+# 速达加密备注（v0.8.0 发布说明 ⑧）：AEAD 加密，主密钥只进系统钥匙串
+# （永不落盘，见 src/secret.rs 顶部四条口径）。AEAD 而非裸 AES：密文被改动
+# 一个字节就会解不开，而不是悄悄解出乱码。
+aes-gcm = "0.10"
 semver = "1"
 sysinfo = "0.32"
 # 剪贴板图片快照的转码（保存图片 / 粘贴回写）：BMP/PNG/TIFF 三个编解码。

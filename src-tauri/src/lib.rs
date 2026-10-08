@@ -25,6 +25,7 @@ mod mac;
 mod models;
 mod net;
 mod notify;
+mod notes_port;
 mod online;
 mod paths;
 mod precheck;
@@ -33,6 +34,7 @@ mod proxy;
 mod publisher;
 mod repo;
 mod runtime;
+mod secret;
 mod service;
 mod shortcut;
 pub mod signing;
@@ -916,6 +918,11 @@ pub fn run() {
             commands::empty_note_trash,
             commands::purge_expired_trash,
             commands::set_note_icon,
+            commands::export_notes,
+            commands::import_notes,
+            commands::tidy_note_content,
+            commands::set_resource_secret,
+            commands::get_resource_secret,
             commands::move_note_to_folder,
             commands::list_notes_by_folder,
             commands::list_note_folders,

@@ -17,6 +17,7 @@ import {
   Monitor,
   ChevronLeft,
   ChevronRight,
+  Lock,
 } from 'lucide-vue-next'
 import type { DesktopEntry } from '../api/tauri'
 import { isTauri, tauriApi, type InstalledAppInfo, type InstalledBrowser, type Resource } from '../api/tauri'
@@ -32,6 +33,7 @@ import SudaFormDialog from './SudaFormDialog.vue'
 import SudaBookmarkDialog from './SudaBookmarkDialog.vue'
 import SudaDesktopDialog from './SudaDesktopDialog.vue'
 import SudaScanDialog from './SudaScanDialog.vue'
+import SecretNoteDialog from './SecretNoteDialog.vue'
 
 const store = useStore()
 // ---- 批量管理（2026-10-03）----
@@ -750,6 +752,13 @@ async function onResourceContext(e: MouseEvent, r: Resource) {
       formVisible.value = true
     },
   })
+  // 加密备注（v0.8.0 发布说明 ⑧）：已有备注时菜单项直接写名字，
+  // 用户不必打开弹窗才知道「写的是哪一条」。
+  items.push({
+    label: r.secret_label ? `加密备注：${r.secret_label}` : '加密备注',
+    dividerBefore: true,
+    onClick: () => openSecret(r),
+  })
   items.push({
     label: '删除',
     danger: true,
@@ -761,6 +770,25 @@ async function onResourceContext(e: MouseEvent, r: Resource) {
 // ---- 弹窗 ----
 const formVisible = ref(false)
 const editing = ref<Resource | null>(null)
+
+// ---- 加密备注（v0.8.0 发布说明 ⑧）----
+const secretVisible = ref(false)
+const secretResource = ref<Resource | null>(null)
+
+function openSecret(r: Resource) {
+  secretResource.value = r
+  secretVisible.value = true
+}
+
+/**
+ * 备注保存后就地更新这一条资源的 `secret_label`。
+ *
+ * ⚠️ **刻意不整表重拉**：改个备注名就让整页 5 列网格重新渲染（用户往往正在
+ *   这一页上），而且会打断正在进行的拖拽排序。落库在后端、列表字段只改一行。
+ */
+function onSecretSaved(updated: Resource) {
+  store.patchResource(updated)
+}
 
 async function onOpen(r: Resource) {
   try {
@@ -1105,6 +1133,17 @@ function cardAccentStyle(r: Resource) {
           <span class="suda-name">
             <span v-if="isRunning(r)" class="suda-dot" title="运行中" />
                 <span class="suda-name-text" :title="r.name">{{ r.name }}</span>
+            <!-- 加密备注标记（v0.8.0 发布说明 ⑧）。名字是明文（后端刻意不加密名字），
+                 所以直接显示出来 —— 用户靠它分辨「哪条写了备注」。 -->
+            <Lock
+              v-if="r.secret_label"
+              class="suda-secret"
+              :size="11"
+              :stroke-width="2.2"
+              :title="`加密备注：${r.secret_label}`"
+              :aria-label="`有加密备注：${r.secret_label}`"
+              @click.stop="openSecret(r)"
+            />
           </span>
         </div>
         </template>
@@ -1155,6 +1194,12 @@ function cardAccentStyle(r: Resource) {
       :visible="scanVisible"
       @close="scanVisible = false"
       @imported="onScanImported"
+    />
+    <SecretNoteDialog
+      :visible="secretVisible"
+      :resource="secretResource"
+      @close="secretVisible = false"
+      @saved="onSecretSaved"
     />
 
     <!-- 拖拽导入遮罩（dropping = 拖拽中；parsing = 正在识别程序） -->
@@ -1325,6 +1370,18 @@ function cardAccentStyle(r: Resource) {
   border-radius: 50%;
   background: var(--c-green);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-green) 22%, transparent);
+}
+/* 加密备注标记（发布说明 ⑧）。可点：直接开弹窗 —— 名字在 title 里，
+   所以不开弹窗也知道写的是什么，而它还是个真的能点的按钮（不是装饰图标）。 */
+.suda-secret {
+  flex-shrink: 0;
+  margin-left: 2px;
+  color: var(--c-purple-ink);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.suda-secret:hover {
+  color: var(--c-purple);
 }
 .suda-kind {
   position: absolute;

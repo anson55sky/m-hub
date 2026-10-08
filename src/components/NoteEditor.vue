@@ -11,7 +11,7 @@ import { createTable } from '@milkdown/kit/preset/gfm'
 import { Fragment, type Node as ProseNode, type Schema } from '@milkdown/kit/prose/model'
 import type { EditorView } from '@milkdown/kit/prose/view'
 import { NodeSelection, TextSelection, type EditorState } from '@milkdown/kit/prose/state'
-import { ChevronDown, ChevronRight, Link2, Sparkles, Tag as TagIcon, Trash2, X } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight, Link2, Loader2, Sparkles, Tag as TagIcon, Trash2, Wand2, X } from 'lucide-vue-next'
 import { isTauri, tauriApi, type Note, type Tag } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { attachBlockDrag } from '../utils/blockDrag'
@@ -435,23 +435,107 @@ const backlinksOpen = ref(true)
  * `beautify(beautify(x)) === beautify(x)`（18 例），这里不必再算一次。
  */
 function onBeautify() {
-  // 实时预览模式下正文的真源是 Crepe（localContent 只是它的回写），先取一次，
-  // 否则美化的是上一次回写的内容、用户刚敲的几个字会被整段覆盖掉。
-  const captured = mode.value === 'wysiwyg' ? captureCrepeMarkdown() : null
-  const current = captured == null ? localContent.value : restoreCrepeMarkdown(captured)
+  const current = currentMarkdown()
   const next = beautifyMarkdown(current)
   if (next === current) {
     showToast('已是整洁格式，没有可整理的地方')
     return
   }
+  rewriteEditorContent(next)
+}
+
+/** 当前正文的真值（三种模式同一个口径）。 */
+function currentMarkdown(): string {
+  // 实时预览模式下正文的真源是 Crepe（localContent 只是它的回写），先取一次，
+  // 否则整理的是上一次回写的内容、用户刚敲的几个字会被整段覆盖掉。
+  const captured = mode.value === 'wysiwyg' ? captureCrepeMarkdown() : null
+  return captured == null ? localContent.value : restoreCrepeMarkdown(captured)
+}
+
+/**
+ * 用一整段新正文替换当前内容（本地美化、AI 整理共用一条路径）。
+ *
+ * ⚠️ 实时预览里改 `localContent` **不会**改 Crepe 的文档 —— 两者是「编辑器 →
+ *   localContent」的单向回写，不是双向绑定。不重挂的话用户看到的是
+ *   「点了一下没反应」，而库里其实已经存了新版本（界面与事实相反）。
+ * ⚠️ 走 `mountEditor` 而不是 `@milkdown/kit/utils` 的 `replaceAll`：
+ *   `replaceAll` 会触发 `markdownUpdated` → `restoreCrepeMarkdown` 回序列化，
+ *   可能把刚整理好的结果改回去一部分，表现为「整理点完又变回去」。
+ */
+function rewriteEditorContent(next: string) {
   adoptMarkdown(next)
-  // ⚠️ 实时预览里改 `localContent` **不会**改 Crepe 的文档 —— 两者是「编辑器 →
-  //   localContent」的单向回写，不是双向绑定。不重挂的话用户看到的是
-  //   「点了一下没反应」，而库里其实已经存了美化后的版本（界面与事实相反）。
-  // ⚠️ 走 `mountEditor` 而不是 `@milkdown/kit/utils` 的 `replaceAll`：
-  //   `replaceAll` 会触发 `markdownUpdated` → `restoreCrepeMarkdown` 回序列化，
-  //   可能把刚美化好的结果改回去一部分，表现为「美化点完又变回去」。
   if (mode.value === 'wysiwyg') void mountEditor(next)
+}
+
+// ---- AI 深度整理（发布说明 ⑦）----
+
+const tidyBusy = ref(false)
+const tidyOpen = ref(false)
+/** 模型给的整理结果；面板打开期间**不落库**。 */
+const tidyResult = ref('')
+/** 就地常驻的错误（约定 53：可能等十几秒的操作不能只挂 2.2s 的 toast）。 */
+const tidyError = ref('')
+/** 发起时的原文快照。面板左栏直接用它，不在模板里重新序列化编辑器
+ *  （`currentMarkdown()` 在实时预览下要走一次 `crepe.getMarkdown()`，
+ *   每渲染一次就重算一遍，且读到的是「点按钮那一刻」还是「现在」并不显然）。 */
+const tidyFrom = ref('')
+const tidyFromLen = computed(() => tidyFrom.value.length)
+const tidyToLen = computed(() => tidyResult.value.length)
+
+async function onTidy() {
+  if (!props.note || tidyBusy.value) return
+  if (!isTauri()) {
+    showToast('浏览器预览下没有对话模型，AI 深度整理不可用')
+    return
+  }
+  const current = currentMarkdown()
+  if (!current.trim()) {
+    showToast('这篇笔记还没有内容，没什么可整理的')
+    return
+  }
+  tidyFrom.value = current
+  tidyResult.value = ''
+  tidyError.value = ''
+  tidyOpen.value = true
+  tidyBusy.value = true
+  try {
+    tidyResult.value = await tauriApi.tidyNoteContent(current)
+  } catch (e) {
+    tidyError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    tidyBusy.value = false
+  }
+}
+
+function closeTidy() {
+  tidyOpen.value = false
+  tidyResult.value = ''
+  tidyError.value = ''
+}
+
+/**
+ * 采纳整理结果，替换正文。
+ *
+ * 替换**不经过 undo**：600ms 防抖的自动保存会立刻把它写进库。所以这里必须让
+ * 用户看清楚再点，且「取消」是零成本的退路 —— 原正文在采纳前一直完好无损。
+ */
+function adoptTidy() {
+  const next = tidyResult.value.trim()
+  if (!next) return
+  rewriteEditorContent(next)
+  closeTidy()
+  showToast('已用整理结果替换正文（⌘Z 之前可以先撤销）')
+}
+
+watch(tidyOpen, (v) => {
+  if (v) window.addEventListener('keydown', onTidyKeydown)
+  else window.removeEventListener('keydown', onTidyKeydown)
+})
+
+function onTidyKeydown(e: KeyboardEvent) {
+  // busy 期间 Esc 只收起面板、**不**中止请求（没有中止接口）——
+  // 结果回来后仍会写进 tidyResult，下次打开面板就能看到。
+  if (e.key === 'Escape') closeTidy()
 }
 
 /** 离开当前笔记时立刻落盘。id 用离开前的那篇，不能用已经换上来的 props.note。 */
@@ -1117,6 +1201,17 @@ function onEditorAreaMouseDown(e: MouseEvent) {
           <Sparkles :size="14" :stroke-width="1.8" />
         </button>
         <button
+          class="icon-btn tidy"
+          type="button"
+          :disabled="tidyBusy"
+          title="AI 深度整理：让对话模型梳理这篇笔记的结构（先看预览，确认后才替换正文）"
+          aria-label="AI 深度整理"
+          @click="onTidy"
+        >
+          <Loader2 v-if="tidyBusy" class="spin" :size="14" :stroke-width="1.8" />
+          <Wand2 v-else :size="14" :stroke-width="1.8" />
+        </button>
+        <button
           class="icon-btn del"
           title="删除笔记"
           aria-label="删除笔记"
@@ -1273,6 +1368,71 @@ function onEditorAreaMouseDown(e: MouseEvent) {
 
     <EmojiPicker :visible="emojiPickerVisible" @select="onPickEmoji" @close="emojiPickerVisible = false" />
 
+    <!--
+      AI 深度整理的预览面板（发布说明 ⑦）。
+      必看：结果**不自动替换正文** —— 模型的输出可能整篇改写，让用户先看清楚
+      再决定，「取消」是零成本退路。挂 Teleport 到 body 走全局 `.modal-mask`
+      （它自带与窗口同款圆角，见 check-rounded-window.mjs）。
+    -->
+    <Teleport to="body">
+      <div
+        v-if="tidyOpen"
+        class="modal-mask tidy-mask"
+        role="dialog"
+        aria-modal="true"
+        aria-label="AI 深度整理"
+        @click.self="closeTidy"
+      >
+        <div class="modal-card tidy-card">
+          <header class="tidy-head">
+            <h3 class="tidy-title">AI 深度整理</h3>
+            <button class="icon-btn" type="button" title="关闭" aria-label="关闭" @click="closeTidy">
+              <X :size="15" :stroke-width="2" />
+            </button>
+          </header>
+
+          <p class="tidy-hint">
+            模型只调整结构（分层标题、列表、要点加粗），不改原意、不增删内容。确认无误再替换正文。
+          </p>
+
+          <div class="tidy-body">
+            <p v-if="tidyBusy" class="tidy-status">
+              <Loader2 class="spin" :size="14" :stroke-width="2" />
+              正在整理……通常几秒到十几秒，取决于模型与网络
+            </p>
+            <p v-else-if="tidyError" class="tidy-error">{{ tidyError }}</p>
+            <template v-else>
+              <div class="tidy-cols">
+                <div class="tidy-col">
+                  <span class="tidy-col-title">原文（{{ tidyFromLen }} 字）</span>
+                  <pre class="tidy-out">{{ tidyFrom }}</pre>
+                </div>
+                <div class="tidy-col">
+                  <span class="tidy-col-title">整理后（{{ tidyToLen }} 字）</span>
+                  <pre class="tidy-out">{{ tidyResult }}</pre>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <footer class="tidy-foot">
+            <span class="tidy-note">替换后自动保存，原正文不再可一键取回</span>
+            <div class="tidy-acts">
+              <button class="ghost-btn" type="button" :disabled="tidyBusy" @click="closeTidy">取消</button>
+              <button
+                class="pill-btn"
+                type="button"
+                :disabled="tidyBusy || !tidyResult.trim()"
+                @click="adoptTidy"
+              >
+                替换正文
+              </button>
+            </div>
+          </footer>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- 图片预览灯箱（瞬态表面，点击遮罩/关闭按钮/Esc 关闭） -->
     <Teleport to="body">
       <div
@@ -1362,6 +1522,143 @@ function onEditorAreaMouseDown(e: MouseEvent) {
 .beautify:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* AI 深度整理钮：与美化的视觉一致，但色相分开一点 ——
+   两个都是「改写正文」的按钮，共用同一个强调色会分不清谁是谁。 */
+.tidy:hover {
+  color: var(--c-purple);
+  background: color-mix(in srgb, var(--c-purple) 12%, transparent);
+}
+
+.tidy:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+}
+
+/* 整理中的转圈（图标自带 .spin，避免与别处的 keyframes 撞名） */
+.spin {
+  animation: ed-spin 0.8s linear infinite;
+}
+
+@keyframes ed-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- AI 深度整理面板 ---- */
+/* 挂在全局 `.modal-mask`（自带 --window-radius 圆角，见 check-rounded-window.mjs）上，
+   卡片走约定 56 的 padding 口径：自身 0、头 16px 18px 0、体 14px 18px、脚 12px 18px。 */
+.tidy-card {
+  width: min(920px, calc(100vw - 96px));
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+.tidy-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 16px 18px 0;
+}
+
+.tidy-title {
+  font-size: 1em;
+  font-weight: 650;
+  color: var(--text-1);
+}
+
+.tidy-hint {
+  padding: 6px 18px 0;
+  font-size: 0.75rem;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.tidy-body {
+  padding: 12px 18px;
+  min-height: 120px;
+  max-height: min(52vh, 460px);
+  overflow: auto;
+}
+
+.tidy-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8125rem;
+  color: var(--text-3);
+}
+
+/* 错误就地常驻（约定 53）：整理可能要等十几秒，结果不能只挂 2.2s 的 toast */
+.tidy-error {
+  font-size: 0.8125rem;
+  color: var(--c-red);
+  line-height: 1.6;
+}
+
+.tidy-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.tidy-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tidy-col-title {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+/* 原文/整理后并列对照。`pre` 不换行会撑破格子，这里用 `white-space: pre-wrap`
+   + `word-break: break-word`；Markdown 源码按原样显示，不渲染（渲染了
+   就看不出「模型把列表改成了什么」）。 */
+.tidy-out {
+  flex: 1;
+  min-height: 160px;
+  max-height: min(46vh, 420px);
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--input-bg);
+  color: var(--text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tidy-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.tidy-note {
+  font-size: 0.6875rem;
+  color: var(--text-4);
+}
+
+.tidy-acts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .crepe-root {

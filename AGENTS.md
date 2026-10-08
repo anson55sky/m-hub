@@ -1,6 +1,6 @@
 # m-hub (个人效率工作台) — macOS
 
-**生成:** 2026-08-29 | **分支:** master | **版本:** 0.7.4
+**生成:** 2026-08-29 | **分支:** master | **版本:** 0.8.0
 **平台:** macOS（本仓库是上游 [x-hub](https://github.com/dckxx/x-hub) 的 macOS 移植版）
 
 ## 概述
@@ -47,6 +47,7 @@ m-hub/
 │       ├── SudaWebPanel.vue    # 速达网页主窗内嵌面板（ADR 0011：自绘工具栏 + 内容区空白位，子 webview 由 Rust 预创建，见 suda_browser.rs）
 │       ├── BrowserChrome.vue   # 独立应用内浏览器顶栏（suda-web-{i}-chrome label 专属渲染：轻量 tab 条 + 地址栏 + 系统浏览器出口）
 │       ├── SudaScanDialog.vue  # 扫描已安装应用批量导入弹窗
+│       ├── SecretNoteDialog.vue # 速达加密备注弹窗（v0.8.0 发布说明 ⑧：正文密文 + 名称明文，打开即解密，清空=永久删除需确认）
 │       ├── SudaCustomCard.vue  # 工作台「自定义速达」卡片（suda1..4 槽位：可点击启动网格 + 右上角配置入口）
 │       ├── SudaCustomEditDialog.vue # 自定义速达内容配置弹窗（手动挑选/大类/小类，存 AppConfig.suda_custom_modules）
 │       ├── AppSelect.vue       # 通用下拉选择器（无头封装，样式自绘）
@@ -109,6 +110,8 @@ m-hub/
 │   │   ├── floating_ball.rs    # 桌面悬浮球（预创建透明置顶小窗 + 环形菜单几何 + 贴边半隐/悬停滑出的边缘监视循环，见 ADR 0004）
 │   │   ├── notify.rs           # 右下角自绘通知窗（独立 WebView「notice」，跨 Win10/11 一致；替代 tauri-plugin-notification，前端 NoticeOverlay.vue 渲染卡片）
 │   │   ├── suda_browser.rs     # 速达「应用内打开网页」（ADR 0011）：主窗内嵌面板 child webview + 独立浏览器窗口池×1（2026-09-25 内存优化 4→2→1，全部页面收进 tab；chrome 走轻量入口 chrome.html，chrome/content 双子 webview），启动期预创建、运行期零 build/destroy；tauri `unstable` 特性
+│   │   ├── notes_port.rs      # 速记导出/导入 zip（v0.8.0 发布说明 ⑤：manifest 为数据源 + 可读 .md 副本 + 图片相对路径，见约定 83）
+│   │   ├── secret.rs          # 速达加密备注的 AEAD 加解密 + 主密钥存取（v0.8.0 发布说明 ⑧，密钥只进系统钥匙串，见约定 85）
 │   │   └── repo/               # 数据访问层：resource, note, todo, sticky, detached_sticky, snippet, tag, countdown, chat, clipboard, subcategory
 │   ├── capabilities/default.json  # Tauri 权限声明（含 start-dragging/global-shortcut/dialog/notification）
 │   └── tauri.conf.json         # 窗口配置（无边框、1400x900）
@@ -531,6 +534,54 @@ m-hub/
     ⚠️ 守卫判据写的是「**存在任意镜像**」而非「存在 npmmirror」——
     第一版写死域名，结果「删掉 npmmirror 只留阿里云」这条变异是绿的，
     规则退化成查一个具体域名，域名一换就失效。
+
+83. **速记导出包的 `manifest.json` 是导入的唯一数据源，`.md` 只是给人读的副本**（v0.8.0 ⑤，`notes_port.rs`）：
+    包里三样东西：`manifest.json`（文件夹路径 / 标签 / 图标 / 原始时间戳 / 正文）、
+    `notes/<文件夹>/<NNN>-<标题>.md`（同一次导出写出的可读副本）、`images/`（内嵌图片）。
+    五条口径：① **导入不解析 Markdown** —— 解析意味着标题、标签、时间戳要从文件名与正文里猜，
+    猜错就是静默丢数据；代价是「手改 `.md` 再导入不生效」，这一点写在包内 `README.txt` 里。
+    ② **导入永远是追加**，按「标题 + 创建时间」判重跳过 —— 导入错一个包的代价只是
+    一堆可删的重复行，覆盖的代价是原笔记找不回来。③ **回收站不导出**（否则删掉的笔记会复活）。
+    ④ **图片地址在包内改写成 `images/<名>` 相对路径**，导入时改回协议 URL；
+    绝不把数据根绝对路径写进包（约定 72 判据：换台机器还能用吗）。
+    改写只认 `16 位十六进制 + 白名单扩展名` 这个形状（`import_note_image` 的产出形态），
+    否则正文里偶然出现的 `images/照片.jpg`（外部相对链接）会被改写成协议 URL 而成死链。
+    协议形态有**两种**（Windows 的 `http://mhub-note.localhost/<名>` 与
+    macOS/Linux 原生的 `mhub-note://localhost/<名>`），导出时两种都认，只认一种的话
+    另一种形态的图片会在导出后变成死链而作者看不出原因。
+    ⑤ 两条命令都是 **async**：同步命令会在主线程上跑完整个打包过程（几百篇笔记 + 几十 MB 图片 = 数秒冻结），
+    锁只在 await-free 的一段里持有。⚠️ **导入后前端必须走 `store.reloadNotesFull()` 而不是
+    `refreshNotes()`** —— 后者拉的是 `note::list_meta`（正文 SELECT 成空串），
+    导入进来的笔记会**点开一片空白**；后端也**刻意不 emit** `notes-changed`（它的监听者走的正是那条 meta 刷新）。
+
+84. **AI 深度整理只返回、不落库，采纳与否由用户在预览面板里决定**（v0.8.0 ⑦，`commands::tidy_note_content`）：
+    与「一键美化」的本质差别：那个是纯本地幂等的排版整理、点错了能看出来；
+    这里的输出是模型生成的、可能整篇改写，而 600ms 防抖的自动保存会让「替换」立刻落库。
+    四条配套：① **模型选择必须复用 `pick_chat_model`**（含平台额度的负载切换）——
+    另写一套「取第一个模型」会让「设置里换了模型」在对话里生效、在整理里不生效。
+    ② **不新建会话、不写 `chat_messages`**：它是一次性工具，顺手记一条只会给对话列表塞空壳会话。
+    ③ **不流式**：用户看的是「改完什么样」而非逐字蹦；流式还多一道「部分 Markdown 渲染成坏的」的排版雷。
+    ④ 输入上限 2 万字，超了直接拒 —— 悄悄截断会让模型以为看全了，产出两头都不细的结果。
+    模型常把整篇裹进 ```` ``` ```` 代码块返回，`strip_code_fence` 剥掉**外层**围栏而**保留正文内部的代码块**
+    （后者往往是用户笔记里的真代码，剥了等于静默删内容）；没闭合的围栏一律不动
+    ——宁可多一层可见的围栏，也不要因为「猜它大概是包裹」而吃掉正文。
+
+85. **速达加密备注：名字明文、正文密文、密钥只进钥匙串且读不出时绝不重生成**（v0.8.0 ⑧，`secret.rs`）：
+    四条口径（缺一条这套东西就变成「看起来有、其实不能用」）：
+    ① **`resources.secret_label` 是明文且列表可见**（界面上是 🔒 + title）——
+    名字加密的话用户面对的是一串密文，无法分辨哪条资源写了备注；
+    密文只在 `resources.secret_note`，且**只经 `repo::resource::get_secret` 取**，
+    绝不进 `COLS`（列表/详情查询）。守卫 `list_payload_never_carries_the_ciphertext`
+    断言「序列化给前端的 JSON 里不含密文」+「`COLS` 不含 secret_note」两条（都做过变异验证）。
+    ② **主密钥存独立 keyring 服务名 `m-hub-secret`**（不是 `m-hub-chat`）——
+    混进 AI Key 那一个的话，某条 chat 模型被删/改名会连带搞丢密钥，全部密文当场不可逆报废。
+    ③ **`master_key` 只在 `NoEntry` 时生成**；钥匙串里那串读出来长度不对就**报错**，
+    绝不当作「没有密钥」重新生成 —— 重新生成 = 旧密文永久解不开，而症状是一句看不懂的错。
+    ④ **AES-256-GCM、每次新 nonce**（守卫 `nonce_is_fresh_per_encryption`）：同明文两次密文必须不同。
+    单测**只走纯函数**（`encrypt_with`/`decrypt_with`）——真钥匙串路径在 CI/单测里会弹系统授权框。
+    前端：打开弹窗即解密（能打开应用的人就能看备注），但正文**默认掩码显示**
+    （`textarea` 没有 `type=password`，隐藏态走 `-webkit-text-security`；
+    写成 `:type` 只是个被忽略的属性，界面看起来加了密而实际是明文）；清空正文保存 = 永久删除，需二次确认。
 
 ## 平台约定（macOS 移植，**先读这一节再改任何代码**）
 

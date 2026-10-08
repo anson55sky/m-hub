@@ -38,18 +38,25 @@ pub fn create(
     get(conn, id)
 }
 
+/// 资源列表的**全部列**。
+///
+/// ⚠️ 别再各处硬写一串列名（v0.8.0 前有 5 份逐字重复，加一列就得改 5 处，
+///   漏一处就是 `row_to_resource` 取列错位 —— 而那种错不报错，
+///   表现为「某几个字段串了行」，能排查很久）。
+const COLS: &str = "id, kind, name, target, category, icon, args, sort_order, last_launched_at, created_at, updated_at, secret_label";
+
 pub fn get(conn: &Connection, id: i64) -> Result<Resource> {
     conn.query_row(
-        "SELECT id, kind, name, target, category, icon, args, sort_order, last_launched_at, created_at, updated_at FROM resources WHERE id = ?1",
+        &format!("SELECT {COLS} FROM resources WHERE id = ?1"),
         params![id],
         row_to_resource,
     )
 }
 
 pub fn list_all(conn: &Connection) -> Result<Vec<Resource>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, kind, name, target, category, icon, args, sort_order, last_launched_at, created_at, updated_at FROM resources ORDER BY sort_order ASC, id ASC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM resources ORDER BY sort_order ASC, id ASC"
+    ))?;
     let rows = stmt.query_map([], row_to_resource)?;
     rows.collect()
 }
@@ -106,11 +113,46 @@ pub fn reorder(conn: &Connection, ids: &[i64]) -> Result<()> {
 
 pub fn search(conn: &Connection, keyword: &str) -> Result<Vec<Resource>> {
     let pattern = format!("%{}%", keyword);
-    let mut stmt = conn.prepare(
-        "SELECT id, kind, name, target, category, icon, args, sort_order, last_launched_at, created_at, updated_at FROM resources WHERE name LIKE ?1 ORDER BY sort_order ASC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM resources WHERE name LIKE ?1 ORDER BY sort_order ASC"
+    ))?;
     let rows = stmt.query_map(params![pattern], row_to_resource)?;
     rows.collect()
+}
+
+/// 写/清加密备注（v0.8.0 发布说明 ⑧）。
+///
+/// `cipher` 为 `None` 或空串 = **清除**（正文置 NULL、名字置空串），两条一起做 ——
+/// 留着名字却没了正文，列表上就是一条打不开的空备注，比从来没有更费解。
+pub fn set_secret(conn: &Connection, id: i64, label: &str, cipher: Option<&str>) -> Result<()> {
+    let affected = conn.execute(
+        "UPDATE resources SET secret_label = ?1, secret_note = ?2, updated_at = ?3 WHERE id = ?4",
+        params![label, cipher, now(), id],
+    )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 资源 {id} 不存在"
+        )));
+    }
+    Ok(())
+}
+
+/// 读一条资源的加密备注：`(备注名, 密文 Option)`。
+///
+/// ⚠️ **密文列永远不进任何列表查询**（`COLS` 里没有它）——只有这个函数能取到。
+///   列写错一个字符的后果不是报错，而是密文被当明文发给前端。
+pub fn get_secret(conn: &Connection, id: i64) -> Result<(String, Option<String>)> {
+    conn.query_row(
+        "SELECT secret_label, secret_note FROM resources WHERE id = ?1",
+        params![id],
+        |r| {
+            let label: String = r.get(0)?;
+            // 空串与 NULL 同义（老数据/命令层的「清空」都可能落成这两种）
+            let raw: Option<String> = r.get(1)?;
+            let cipher = raw.filter(|s| !s.is_empty());
+            Ok((label, cipher))
+        },
+    )
 }
 
 pub fn kind_to_str(kind: &ResourceKind) -> &'static str {
@@ -139,6 +181,7 @@ pub fn row_to_resource(row: &rusqlite::Row) -> Result<Resource> {
         last_launched_at: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        secret_label: row.get(11)?,
     })
 }
 
@@ -217,5 +260,65 @@ mod tests {
         let found = search(&conn, "git").unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "GitHub");
+    }
+
+    // ---- 加密备注（v0.8.0 发布说明 ⑧）----
+
+    #[test]
+    fn secret_writes_reads_and_clears() {
+        let conn = setup();
+        let r = create(&conn, ResourceKind::Web, "GitHub", "https://github.com", None, None, None).unwrap();
+        // 没有备注时是空名 + 无密文（不是错误）
+        assert_eq!(get_secret(&conn, r.id).unwrap(), (String::new(), None));
+
+        set_secret(&conn, r.id, "账号密码", Some("CIPHER-TEXT")).unwrap();
+        assert_eq!(
+            get_secret(&conn, r.id).unwrap(),
+            ("账号密码".to_string(), Some("CIPHER-TEXT".to_string()))
+        );
+        // 名字进列表（明文，可见 🔒）
+        assert_eq!(get(&conn, r.id).unwrap().secret_label, "账号密码");
+        assert_eq!(list_all(&conn).unwrap()[0].secret_label, "账号密码");
+
+        // 清除：名字与密文必须**一起**走，否则列表上留着一条打不开的空备注
+        set_secret(&conn, r.id, "", None).unwrap();
+        assert_eq!(get_secret(&conn, r.id).unwrap(), (String::new(), None));
+        assert_eq!(get(&conn, r.id).unwrap().secret_label, "");
+
+        // 空串密文与 NULL 同义（老数据可能落成这两种）
+        conn.execute(
+            "UPDATE resources SET secret_label = 'x', secret_note = '' WHERE id = ?1",
+            params![r.id],
+        )
+        .unwrap();
+        assert_eq!(get_secret(&conn, r.id).unwrap(), ("x".to_string(), None));
+    }
+
+    /// **密文绝不许出现在列表/详情里**。
+    ///
+    /// 判据用「序列化成前端拿到的那个 JSON」而不是「查字段」：结构体里本来就没有
+    /// 密文字段，断言它不存在是废话；真正会出事的是有人把 `secret_note` 加进
+    /// `COLS`，那时列表接口就把全部备注原文发给了前端 —— 而这类改动不报任何错。
+    #[test]
+    fn list_payload_never_carries_the_ciphertext() {
+        let conn = setup();
+        let r = create(&conn, ResourceKind::Web, "GitHub", "https://github.com", None, None, None).unwrap();
+        set_secret(&conn, r.id, "账号密码", Some("SECRET-CIPHERTEXT-DO-NOT-LEAK")).unwrap();
+        let json = serde_json::to_string(&list_all(&conn).unwrap()).unwrap();
+        assert!(
+            !json.contains("SECRET-CIPHERTEXT-DO-NOT-LEAK"),
+            "列表接口把密文发出去了：{json}"
+        );
+        assert!(!COLS.contains("secret_note"), "密文列进了列表查询的列清单");
+        // 明文的名字是要在列表里显示的（用户靠它分辨哪条写了备注）
+        assert!(json.contains("账号密码"), "{json}");
+    }
+
+    /// 改不存在的资源必须报错（否则「备注没保存」会被当成成功）。
+    #[test]
+    fn secret_on_missing_resource_errors() {
+        let conn = setup();
+        assert!(set_secret(&conn, 9999, "x", Some("c")).is_err());
+        assert!(get_secret(&conn, 9999).is_err());
     }
 }
