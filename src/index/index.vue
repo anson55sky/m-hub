@@ -716,6 +716,12 @@ onMounted(async () => {
     unlistenCaptureShortcut = await on('capture-shortcut', () => {
       captureVisible.value = !captureVisible.value
     })
+    // 速记快捷键（全局注册，Rust 分发，2026-10-08 新增，v0.8.0 发布说明 ⑩）：
+    // 切到速记并新建一条空白笔记。onCreateNote 自己会把 activeView 切成 'notes'，
+    // 所以这里不需要再赋值一次（两处都写 = 下次改一处就漂）。
+    unlistenNotesShortcut = await on('notes-shortcut', () => {
+      void onCreateNote()
+    })
     // 扩展页「去授权」跳转（桥 API mhub.openPermissions）：切到扩展中心并打开该扩展的
     // 设置弹窗（权限管理所在处）。payload = 扩展 id
     unlistenOpenExtSettings = await on<string>('open-extension-settings', (e) => {
@@ -754,6 +760,7 @@ let unlistenOpenChatSettings: (() => void) | null = null
 let unlistenSearchShortcut: (() => void) | null = null
 let unlistenChatShortcut: (() => void) | null = null
 let unlistenCaptureShortcut: (() => void) | null = null
+let unlistenNotesShortcut: (() => void) | null = null
 let unlistenOpenExtSettings: (() => void) | null = null
 let unlistenChatMode: (() => void) | null = null
 
@@ -772,6 +779,7 @@ onUnmounted(() => {
   unlistenSearchShortcut?.()
   unlistenChatShortcut?.()
   unlistenCaptureShortcut?.()
+  unlistenNotesShortcut?.()
   unlistenOpenExtSettings?.()
   unlistenChatMode?.()
   window.removeEventListener('suda-open-web-panel', onSudaWebPanelEvent)
@@ -830,6 +838,22 @@ async function onCreateNote() {
 }
 
 function onSelectNote(id: number) {
+  activeNoteId.value = id
+}
+
+/**
+ * 反链跳转（发布说明 ②）：把目标笔记从链接里点开。
+ *
+ * 目标若被当前的文件夹筛选 / 回收站挡住，要先把挡住它的那层撤掉 ——
+ * 编辑器切过去了而列表里找不到对应那一行，看上去就是
+ * 「我点的是 A，界面给的是 B」（`activeNote` 刻意读全量，见上面那条注释）。
+ */
+function onOpenNoteFromBacklink(id: number) {
+  trashVisible.value = false
+  if (!visibleNotes.value.some((n) => n.id === id)) {
+    activeNoteFolderId.value = null
+    activeNoteFolderSubtree.value = null
+  }
   activeNoteId.value = id
 }
 
@@ -1471,6 +1495,7 @@ provide('showToast', showToast)
               :note="activeNote"
               @save="onSaveNote"
               @delete="onDeleteNote"
+              @open-note="onOpenNoteFromBacklink"
             />
           </div>
 

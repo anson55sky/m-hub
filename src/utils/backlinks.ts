@@ -116,7 +116,15 @@ export interface BacklinkEntry {
   title: string
   /** 该笔记的正文片段（含被引用的那一处上下文），供列表预览。 */
   snippet: string
-  /** 被引用的那几处在正文里的偏移，编辑器点击时可逐个跳转。 */
+  /**
+   * 该笔记引用本篇的**全部**正文字节偏移（升序、同篇多次合并在此）。
+   *
+   * ⚠️ 这里不是「编辑器点击跳转坐标」——偏移是 **Markdown 源码**里的字节位，
+   *   而实时预览是 ProseMirror 文档，两者根本不是同一套坐标系（中间还隔着
+   *   序列化/反序列化）。拿它去 `posAtCoords` 之类的地方点，会跳到无关的位置。
+   *   当前实际用途只有两个：① 同篇多次引用合并成一条 ② 取最靠前那一处作摘要。
+   *   真要做「点击跳到那一处」，得先建立源码偏移 → 文档位置的映射，别直接用这里。
+   */
   offsets: number[]
 }
 
@@ -149,7 +157,9 @@ export function normalizeTitle(t: string): string {
  *   不该出现在别人的反链里，否则用户点进去看到的是一篇「已删除」）
  * @param snippetRadius 摘要半径（字符）
  */
-export function buildBacklinkIndex(notes: NoteLike[], snippetRadius = 40): BacklinkIndex {
+// `readonly` 是必须的：`store.state.notes` 是 readonly 深度代理（约定 13），
+// 收成 `NoteLike[]` 会在类型检查处直接报错，逼调用方先拷一份——那就不是同一份数据了。
+export function buildBacklinkIndex(notes: readonly NoteLike[], snippetRadius = 40): BacklinkIndex {
   const index: BacklinkIndex = {
     outgoing: new Map(),
     incoming: new Map(),

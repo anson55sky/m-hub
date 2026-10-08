@@ -4,7 +4,7 @@
  * ## 为什么需要它
  *
  * 快捷键默认值有两份拷贝：
- *   ① `src-tauri/src/shortcut.rs` 的四个 `DEFAULT_*` 常量 —— **真相源**（真机生效）
+ *   ① `src-tauri/src/shortcut.rs` 的六个 `DEFAULT_*` 常量 —— **真相源**（真机生效）
  *      它们按 `#[cfg(target_os = …)]` **分叉**，两平台**允许不同**
  *      （剪贴板：macOS `⌃⌘V` / Windows `Ctrl+\``，理由见 shortcut.rs 注释）
  *   ② `src/utils/platform.ts` 的 `DEFAULT_SHORTCUT_VARIANTS` —— 镜像，
@@ -63,6 +63,8 @@ const RUST_KEYS = {
   DEFAULT_CHAT_SHORTCUT: "chat",
   // 统一捕获（2026-09-29 新增）
   DEFAULT_CAPTURE_SHORTCUT: "capture",
+  // 速记（2026-10-08 新增，v0.8.0 发布说明 ⑩）
+  DEFAULT_NOTES_SHORTCUT: "notes",
 };
 
 // ---- ② TS 镜像（每键存 mac / other 两个分支）----------------------------------
@@ -133,5 +135,5 @@ if (problems.length) {
   process.exit(1);
 }
 console.log(
-  `[shortcuts] 五个默认值口径一致（shortcut.rs ⇄ platform.ts：${Object.values(RUST_KEYS).join("/")}）`,
+  `[shortcuts] ${Object.keys(RUST_KEYS).length} 个默认值口径一致（shortcut.rs ⇄ platform.ts：${Object.values(RUST_KEYS).join("/")}）`,
 );

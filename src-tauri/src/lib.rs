@@ -677,6 +677,17 @@ pub fn run() {
 
             let conn = init_database()?;
             fix_icon_paths(&conn);
+            // 回收站自动清理（命令注释里说的「启动时调一次」就是这里）。
+            // 按配置的保留天数清一次过期软删条目；`notes_trash_days <= 0` = 永久保留，
+            // 由 repo 层判掉（与前端手动调用走同一份实现，语义不漂）。
+            {
+                let keep = config::load().notes_trash_days;
+                match crate::repo::note::purge_expired(&conn, keep) {
+                    Ok(0) => {}
+                    Ok(n) => log::info!("回收站启动清理: {} 条（保留 {} 天）", n, keep),
+                    Err(e) => log::warn!("回收站启动清理失败: {e}"),
+                }
+            }
             app.manage(DbState(std::sync::Mutex::new(conn)));
             app.manage(clipboard::ClipboardState::default());
             app.manage(service::ServiceState::default());
@@ -976,6 +987,8 @@ pub fn run() {
             commands::set_chat_shortcut,
             commands::get_capture_shortcut,
             commands::set_capture_shortcut,
+            commands::get_notes_shortcut,
+            commands::set_notes_shortcut,
             commands::get_run_at_startup,
             commands::set_run_at_startup,
             commands::get_startup_hidden,

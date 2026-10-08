@@ -368,7 +368,7 @@ export interface AppConfig {
   /** 剪贴板历史全局呼出快捷键 */
   clipboard_shortcut: string
   /**
-   * 五个全局快捷键的启用开关（2026-10-03 补）。
+   * 六个全局快捷键的启用开关（2026-10-03 补；2026-10-08 随速记快捷键增至六个）。
    *
    * ⚠️ 「关掉」= 暂时停用，**按键组合原样保留**（见 config.rs 的注释）。
    * 全部默认 true —— 升级不该让用户的快捷键「突然没了」。
@@ -383,12 +383,15 @@ export interface AppConfig {
   shortcut_search_enabled: boolean
   shortcut_chat_enabled: boolean
   shortcut_capture_enabled: boolean
+  shortcut_notes_enabled: boolean
   /** 全局搜索呼出快捷键（默认 Ctrl+K） */
   search_shortcut: string
   /** AI 对话呼出快捷键（默认 Ctrl+Shift+K） */
   chat_shortcut: string
   /** 统一捕获快捷键（2026-09-29 新增），默认 ⇧⌘U */
   capture_shortcut: string
+  /** 速记快捷键（2026-10-08 新增，v0.8.0 ⑩），默认 ⌘⇧N：切到速记并新建一条笔记 */
+  notes_shortcut: string
   /** 聚焦模式：只显示 focus_pins 里的模块，竖排全宽（2026-09-29 新增，默认关） */
   focus_enabled: boolean
   /** 聚焦模式下显示的模块 id，顺序即显示顺序 */
@@ -1368,7 +1371,7 @@ export const tauriApi = {
     invoke<void>('set_always_on_top_config', { value }),
   getGlobalShortcut: () => invoke<string>('get_global_shortcut'),
   /**
-   * 启停一个全局快捷键。`key` ∈ toggle / clipboard / search / chat / capture。
+   * 启停一个全局快捷键。`key` ∈ toggle / clipboard / search / chat / capture / notes。
    *
    * ⚠️ 返回**最终状态**而不是 void：注册可能失败（键被别的软件占了），
    *   失败时命令返回 Err、配置不变，界面据此把开关弹回去 ——
@@ -1382,6 +1385,8 @@ export const tauriApi = {
   setChatShortcut: (value: string) => invoke<string>('set_chat_shortcut', { value }),
   getCaptureShortcut: () => invoke<string>('get_capture_shortcut'),
   setCaptureShortcut: (value: string) => invoke<string>('set_capture_shortcut', { value }),
+  getNotesShortcut: () => invoke<string>('get_notes_shortcut'),
+  setNotesShortcut: (value: string) => invoke<string>('set_notes_shortcut', { value }),
   getRunAtStartup: () =>
     invoke<AutostartStatus>('get_run_at_startup'),
   setRunAtStartup: (enabled: boolean) => invoke<void>('set_run_at_startup', { enabled }),

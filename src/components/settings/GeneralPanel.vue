@@ -135,9 +135,29 @@ const {
   showToast,
 })
 
+// 速记快捷键（2026-10-08 新增，v0.8.0 发布说明 ⑩）
+//
+// 与「统一捕获」互补而不是重复：捕获要先判断该记到哪，速记是「我现在就要写笔记」——
+// 按下即切到速记视图并新建一条空白笔记，不弹任何中间弹窗。
+const {
+  value: notesShortcut,
+  error: notesError,
+  listening: notesListening,
+  inputRef: notesInputRef,
+  commit: commitNotesShortcut,
+  startListening: startListenNotesShortcut,
+  onBlur: onNotesShortcutBlur,
+  onKeydown: onNotesShortcutKeydown,
+} = useShortcutRecorder({
+  initial: normalizeShortcutDisplay(store.state.config.notes_shortcut ?? 'Ctrl+Shift+N'),
+  label: '速记快捷键',
+  save: (v) => store.setNotesShortcut(v),
+  showToast,
+})
+
 // ---- 快捷键启用开关（2026-10-03 补）----
 //
-// 五个开关共用一份逻辑：调命令 → 用**返回的最终状态**覆盖本地 → 失败弹回并提示。
+// 六个开关共用一份逻辑：调命令 → 用**返回的最终状态**覆盖本地 → 失败弹回并提示。
 // ⚠️ 不做乐观更新后不回滚：那会让界面显示「已关闭」而实际仍在生效。
 //   （同一类谎报本工程已经吃过四次：响应少字段 → 客户端兜成默认值。）
 
@@ -165,6 +185,7 @@ void clipInputRef
 void searchInputRef
 void chatInputRef
 void captureInputRef
+void notesInputRef
 
 // ---- 右下角通知驻留时长（秒；后端每条通知都带当前值下发，改完立即生效） ----
 const noticeSeconds = ref(5)
@@ -319,6 +340,8 @@ onMounted(async () => {
   chatShortcut.value = normalizeShortcutDisplay(store.state.config.chat_shortcut ?? 'Ctrl+Shift+K')
 
   captureShortcut.value = normalizeShortcutDisplay(store.state.config.capture_shortcut ?? 'Ctrl+Shift+U')
+
+  notesShortcut.value = normalizeShortcutDisplay(store.state.config.notes_shortcut ?? 'Ctrl+Shift+N')
 
   noticeSeconds.value = Math.round((store.state.config.notice_duration_ms ?? 5000) / 1000)
 
@@ -782,6 +805,55 @@ onMounted(async () => {
               :class="{ on: store.state.config.shortcut_capture_enabled }"
               :disabled="shortcutBusy === 'capture'"
               @click="toggleShortcutEnabled('capture', !store.state.config.shortcut_capture_enabled)"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          <!-- 速记（2026-10-08 新增，v0.8.0 发布说明 ⑩） -->
+          <div class="setting-row shortcut-row">
+            <div class="setting-info">
+              <span class="setting-name">速记快捷键</span>
+              <span class="setting-desc">
+                任何应用中一键跳到速记并新建一条空白笔记。和统一捕获的区别：
+                捕获会先判断该记到哪，这个是「我现在就要写笔记」
+              </span>
+            </div>
+            <div class="shortcut-edit">
+              <div class="shortcut-input-wrap">
+                <Keyboard :size="14" :stroke-width="2" class="shortcut-icon" />
+                <input
+                  ref="notesInputRef"
+                  v-model="notesShortcut"
+                  class="shortcut-input"
+                  type="text"
+                  spellcheck="false"
+                  :readonly="notesListening"
+                  :placeholder="shortcutLabel('notes')"
+                  @keydown="onNotesShortcutKeydown"
+                  @keydown.enter="commitNotesShortcut"
+                  @blur="onNotesShortcutBlur"
+                />
+                <button class="shortcut-record-btn" type="button" @click="startListenNotesShortcut">
+                  {{ notesListening ? '按下组合键…' : '录入' }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <p v-if="notesError" class="shortcut-error">{{ notesError }}</p>
+          <div class="setting-row shortcut-row shortcut-enable-row">
+            <div class="setting-info">
+              <span class="setting-name">启用速记快捷键</span>
+              <span class="setting-desc">关掉只是暂时停用，按键组合保留，随时可重新打开</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="store.state.config.shortcut_notes_enabled"
+              :class="{ on: store.state.config.shortcut_notes_enabled }"
+              :disabled="shortcutBusy === 'notes'"
+              @click="toggleShortcutEnabled('notes', !store.state.config.shortcut_notes_enabled)"
             >
               <span class="toggle-knob"></span>
             </button>

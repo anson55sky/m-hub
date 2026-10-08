@@ -135,6 +135,8 @@ const state = reactive<StoreState>({
     search_shortcut: DEFAULT_SEARCH_SHORTCUT,
     chat_shortcut: DEFAULT_CHAT_SHORTCUT,
     capture_shortcut: DEFAULT_SHORTCUTS.capture,
+    // 速记快捷键（2026-10-08，v0.8.0 ⑩）：切到速记并新建一条笔记
+    notes_shortcut: DEFAULT_SHORTCUTS.notes,
     // 聚焦模式默认值：与 Rust 侧 default_focus_pins 一致（两边各写一份是「第二份拷贝」，
     // 但这里只是**启动快照的初值**，真源仍在 config.rs 的 serde default 上：
     // 磁盘上已有该字段时以磁盘为准，不会被这里覆盖）
@@ -177,6 +179,7 @@ const state = reactive<StoreState>({
     shortcut_search_enabled: true,
     shortcut_chat_enabled: true,
     shortcut_capture_enabled: true,
+    shortcut_notes_enabled: true,
     // 扩展中心点一行：默认看详情（点开最易误触，而「看权限」最该顺手做到）
     extension_row_click: 'detail',
     floating_ball_with_main: false,
@@ -1388,6 +1391,7 @@ export function useStore() {
       search: 'shortcut_search_enabled',
       chat: 'shortcut_chat_enabled',
       capture: 'shortcut_capture_enabled',
+      notes: 'shortcut_notes_enabled',
     } as const
     const field = FIELD[key as keyof typeof FIELD]
     if (!field) throw new Error(`未知的快捷键标识：${key}`)
@@ -1436,6 +1440,16 @@ export function useStore() {
     if (!isTauri()) return value
     const saved = await tauriApi.setCaptureShortcut(value)
     state.config.capture_shortcut = saved
+    return saved
+  }
+
+  /** 速记快捷键（2026-10-08，v0.8.0 ⑩）。与 setCaptureShortcut 同一套流程：
+   *  后端注册失败会回滚并返回旧值，覆盖回去用户才能看到「没改成」。 */
+  async function setNotesShortcut(value: string) {
+    state.config.notes_shortcut = value
+    if (!isTauri()) return value
+    const saved = await tauriApi.setNotesShortcut(value)
+    state.config.notes_shortcut = saved
     return saved
   }
 
@@ -1765,6 +1779,19 @@ export function useStore() {
     await tauriApi.saveConfig(state.config)
   }
 
+  /**
+   * 速记回收站保留天数（0 = 永久保留）。
+   *
+   * 与剪贴板保留策略同款「先本地钳制再落盘」——否则 saveConfig 会拿未钳制的
+   * 快照覆盖掉后端刚写好的值。范围与界面输入框的 min/max 必须逐字对齐。
+   */
+  async function setNotesTrashDays(days: number) {
+    const clamped = Math.min(3650, Math.max(0, Math.round(days)))
+    state.config.notes_trash_days = clamped
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
+  }
+
   // ---- 在线服务（天气 / 名言 / 连通性） ----
   let onlineTimer: ReturnType<typeof setInterval> | null = null
   let lastWeatherRefresh = 0
@@ -2007,6 +2034,7 @@ export function useStore() {
     setSearchShortcut,
     setChatShortcut,
     setCaptureShortcut,
+    setNotesShortcut,
     setDashboardMidContent,
     setDashboardLayout,
     setFocusMode,
@@ -2037,6 +2065,7 @@ export function useStore() {
     setClipboardShortcut,
     setClipboardPaused,
     setClipboardRetention,
+    setNotesTrashDays,
     setClipboardMediaEnabled,
     refreshSystemInfo,
     checkOnline,

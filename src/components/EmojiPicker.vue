@@ -14,14 +14,21 @@ import {
  * 表情选择器弹层：分类 tab + 网格 + 搜索 + 最近使用（localStorage）。
  * 由 NoteEditor 斜杠菜单「表情」分组内的「更多表情…」入口打开（受控 visible）。
  * 点击表情不自动关闭（支持连续插入多个表情），Esc / 点击遮罩 / 关闭按钮退出。
+ *
+ * `clearLabel` 是**选用**的：给「图标」这类「选一个 + 可以不设」的场景留出口
+ * （笔记图标存空串 = 恢复默认，见 `repo::note::set_icon`）。不传就不渲染，
+ * 编辑器插表情那条链完全不受影响——表情插入一个空串是毫无意义的。
  */
 
 const props = defineProps<{
   visible: boolean
+  /** 传了才显示「清除」按钮；点击发 `clear`（**不是** `select('')`）。 */
+  clearLabel?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'select', emoji: string): void
+  (e: 'clear'): void
   (e: 'close'): void
 }>()
 
@@ -83,6 +90,12 @@ function onPick(item: EmojiItem) {
   pushRecentEmoji(item.e)
   recentItems.value = getRecentEmojis()
   emit('select', item.e)
+}
+
+/** 清除：选完即关（图标回到「无」，留在开着的面板里没有下一步可做） */
+function onClear() {
+  emit('clear')
+  emit('close')
 }
 
 // ---- 分类 tab 行交互：滚轮横向滑动 + 点击自动滑出隐藏的后续标签 ----
@@ -197,6 +210,13 @@ onBeforeUnmount(() => {
             </template>
             <div v-else class="empty-state">没有匹配的表情</div>
           </div>
+
+          <!-- 放在滚动区之外：网格再长，「清掉」这个出口也得一直够得着 -->
+          <footer v-if="clearLabel" class="ep-foot">
+            <button class="ep-clear" type="button" @click="onClear">
+              {{ clearLabel }}
+            </button>
+          </footer>
         </div>
       </div>
     </Transition>
@@ -271,6 +291,31 @@ onBeforeUnmount(() => {
 
 .ep-emoji:active {
   transform: scale(0.92);
+}
+
+.ep-foot {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.ep-clear {
+  width: 100%;
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  border-radius: var(--radius-md);
+  padding: 7px 0;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.ep-clear:hover {
+  color: var(--c-red);
+  border-color: color-mix(in srgb, var(--c-red) 40%, transparent);
+  background: color-mix(in srgb, var(--c-red) 8%, transparent);
 }
 
 /* 全局 .empty-state 默认 padding 40px 16px 过大，弹层内收紧 */

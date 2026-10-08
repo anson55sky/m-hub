@@ -235,6 +235,10 @@ pub struct AppConfig {
     /// 统一捕获快捷键（2026-09-29 新增）。默认 ⇧⌘U / Ctrl+Shift+U。
     /// 用来从任何地方一行记下东西，自动路由到速记/待办/提示词/倒计时/速达。
     pub capture_shortcut: String,
+    /// 速记快捷键（2026-10-08 新增，v0.8.0 发布说明 ⑩）。默认 ⌘⇧N / Ctrl+Shift+N。
+    /// 按下即切到速记视图并新建一条笔记 —— 与统一捕获互补（捕获要先想清记到哪）。
+    #[serde(default = "default_notes_shortcut")]
+    pub notes_shortcut: String,
 
     // ---- 全局快捷键的启用开关（2026-10-03 补）----
     //
@@ -247,8 +251,8 @@ pub struct AppConfig {
     //   而且空字符串会让 `register_toggle_shortcut` 拿着空键去注册，
     //   那是注册失败还可能被吞成 warn，看起来像「开关坏了」。
     //
-    // 五个（不是发布说明写的「四个」）：统一捕获 ⇧⌘U 与其余四个同样是
-    // 全局注册的快捷键，只给它四个开关会让它在列表里成为唯一的例外。
+    // 六个（不是发布说明最初写的「四个」）：统一捕获 ⇧⌘U 与速记 ⌘⇧N 同样是
+    // 全局注册的快捷键，只给其余四个开关会让它们在列表里成为唯一的例外。
     #[serde(default = "default_true")]
     pub shortcut_toggle_enabled: bool,
     #[serde(default = "default_true")]
@@ -259,6 +263,8 @@ pub struct AppConfig {
     pub shortcut_chat_enabled: bool,
     #[serde(default = "default_true")]
     pub shortcut_capture_enabled: bool,
+    #[serde(default = "default_true")]
+    pub shortcut_notes_enabled: bool,
     /// 剪贴板历史最大条数（含置顶；置顶豁免自动清理但计入上限）
     pub clipboard_max_items: i64,
     /// 非置顶记录的保留天数
@@ -436,6 +442,14 @@ fn default_search_shortcut() -> String {
 /// AI 对话呼出快捷键默认值（与 shortcut.rs 的 DEFAULT_CHAT_SHORTCUT 同源）
 fn default_chat_shortcut() -> String {
     crate::shortcut::DEFAULT_CHAT_SHORTCUT.to_string()
+}
+
+/// 速记快捷键默认值（与 shortcut.rs 的 DEFAULT_NOTES_SHORTCUT 同源）
+///
+/// ⚠️ 必须从常量取，不能在配置里另写一份字符串 —— 那就是第二份真相，
+///   两平台 `#[cfg]` 分叉时（剪贴板 mac/非 mac 就不同）必然漂。
+fn default_notes_shortcut() -> String {
+    crate::shortcut::DEFAULT_NOTES_SHORTCUT.to_string()
 }
 
 /// 通知驻留时长默认 5 秒
@@ -676,12 +690,14 @@ impl Default for AppConfig {
             search_shortcut: crate::shortcut::DEFAULT_SEARCH_SHORTCUT.to_string(),
             chat_shortcut: crate::shortcut::DEFAULT_CHAT_SHORTCUT.to_string(),
             capture_shortcut: crate::shortcut::DEFAULT_CAPTURE_SHORTCUT.to_string(),
+            notes_shortcut: crate::shortcut::DEFAULT_NOTES_SHORTCUT.to_string(),
             // 全部默认开 —— 升级已有配置的用户不该发现自己的快捷键「突然没了」
             shortcut_toggle_enabled: true,
             shortcut_clipboard_enabled: true,
             shortcut_search_enabled: true,
             shortcut_chat_enabled: true,
             shortcut_capture_enabled: true,
+            shortcut_notes_enabled: true,
             clipboard_max_items: 500,
             clipboard_ttl_days: 7,
             notes_trash_days: default_notes_trash_days(),

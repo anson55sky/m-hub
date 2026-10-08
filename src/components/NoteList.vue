@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { PanelLeft, Plus, StickyNote, Trash2, X } from 'lucide-vue-next'
+import { PanelLeft, Plus, Smile, StickyNote, Trash2, X } from 'lucide-vue-next'
 import type { Note } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { useNoteFolderDrag } from '../composables/useNoteFolderDrag'
 import { markdownPlainText } from '../utils/markdown'
 import { parseTimestamp } from '../utils/time'
+import EmojiPicker from './EmojiPicker.vue'
 
 const props = defineProps<{
   notes: readonly Note[]
@@ -40,6 +41,9 @@ const { begin: beginDrag } = useNoteFolderDrag()
  */
 function onNotePointerDown(e: PointerEvent, note: Note) {
   if (e.button !== 0) return
+  // 图标位是行内的按钮：在这里起拖会把它变成「想换图标却把笔记拖走了」，
+  // 而且拖拽一启动就会接管后续手势。它自己有 @click.stop，不需要拖拽帮忙。
+  if ((e.target as HTMLElement | null)?.closest('.note-icon')) return
   const startY = e.clientY
   let started = false
   const move = (ev: PointerEvent) => {
@@ -127,6 +131,44 @@ function sameYear(a: Date, b: Date) {
 function summary(n: Note): string {
   return markdownPlainText(n.content, 60) || '空白笔记'
 }
+
+// ---- 笔记图标（发布说明 ⑨）----
+//
+// 图标存 `notes.icon`（emoji 字符串，空串 = 没有图标，见 repo::note::set_icon）。
+// 选择器直接复用现成的 EmojiPicker（约定 30），不在列表里再造一套表情网格 ——
+// 两套网格的「最近使用」「搜索」口径很快就会对不上，而用户看不出哪份是新的。
+
+/** 当前打开图标选择器的笔记 id；`null` = 没开。 */
+const iconPickerNoteId = ref<number | null>(null)
+
+function openIconPicker(n: Note) {
+  iconPickerNoteId.value = n.id
+}
+
+async function onIconPick(emoji: string) {
+  const id = iconPickerNoteId.value
+  iconPickerNoteId.value = null
+  if (id == null) return
+  await store.setNoteIcon(id, emoji)
+}
+
+function onIconClear() {
+  const id = iconPickerNoteId.value
+  iconPickerNoteId.value = null
+  if (id == null) return
+  void store.setNoteIcon(id, '')
+}
+
+/**
+ * 正在改图标的那条笔记。
+ *
+ * 「清除」按钮只在**它现在真有图标**时出现 —— 对一条本来就没图标的笔记
+ * 给一个「清除图标」按钮，点了什么都没发生（`setNoteIcon(id, '')` 写的还是空串），
+ * 用户看到的就是一个没反应的按钮（约定 78 那类毛病）。
+ */
+const iconPickerNote = computed(
+  () => props.notes.find((n) => n.id === iconPickerNoteId.value) ?? null,
+)
 </script>
 
 <template>
@@ -196,6 +238,17 @@ function summary(n: Note): string {
         @keydown.space.prevent="emit('select', n.id)"
         @pointerdown="onNotePointerDown($event, n)"
       >
+        <button
+          class="note-icon"
+          :class="{ set: !!n.icon }"
+          type="button"
+          :title="n.icon ? '更换图标' : '设置图标'"
+          :aria-label="n.icon ? '更换图标' : '设置图标'"
+          @click.stop="openIconPicker(n)"
+        >
+          <span v-if="n.icon" class="note-icon-glyph" aria-hidden="true">{{ n.icon }}</span>
+          <Smile v-else :size="13" :stroke-width="1.8" />
+        </button>
         <div class="note-item-main">
           <span class="note-title" :title="n.title">{{ n.title }}</span>
           <span class="note-meta">{{ formatTime(n.updated_at) }}</span>
@@ -219,6 +272,14 @@ function summary(n: Note): string {
         新建笔记
       </button>
     </div>
+
+    <EmojiPicker
+      :visible="iconPickerNoteId !== null"
+      :clear-label="iconPickerNote?.icon ? '清除图标' : undefined"
+      @select="onIconPick"
+      @clear="onIconClear"
+      @close="iconPickerNoteId = null"
+    />
   </section>
 </template>
 
@@ -357,6 +418,39 @@ function summary(n: Note): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.note-icon {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  padding: 0;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-4);
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 0.15s, background 0.15s, color 0.15s, transform 0.15s;
+}
+.note-icon.set {
+  opacity: 1;
+}
+.note-icon:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--brand-500) 14%, transparent);
+  color: var(--brand-500);
+  transform: translateY(-1px);
+}
+.note-item.active .note-icon {
+  opacity: 1;
+}
+.note-icon-glyph {
+  font-size: 13px;
+  line-height: 1;
 }
 .del {
   flex-shrink: 0;

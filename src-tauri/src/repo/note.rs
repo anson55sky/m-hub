@@ -339,6 +339,27 @@ pub fn empty_trash(conn: &Connection) -> Result<usize> {
     Ok(n)
 }
 
+/// 清理超过保留天数的回收站条目，返回**删掉的条数**。
+///
+/// `keep_days <= 0` = 永久保留，直接返回 0。这一条不能写成「按 0 天算」——
+/// 那会在每次启动时把整个回收站清空（`now() - 0 天` 的上界正好是现在）。
+///
+/// ⚠️ 两个条件缺一不可，且都必须是 `deleted_at IS NOT NULL`：
+///    少了它就会按时间删掉**正常笔记**。与 `empty_trash` 同一条防线。
+pub fn purge_expired(conn: &Connection, keep_days: i64) -> Result<usize> {
+    if keep_days <= 0 {
+        return Ok(0);
+    }
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(keep_days);
+    let cutoff = cutoff.format("%Y-%m-%d %H:%M:%S%.6f").to_string();
+    let n = conn.execute(
+        "DELETE FROM notes
+         WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+        params![cutoff],
+    )?;
+    Ok(n)
+}
+
 /// 设置专属小图标。空串 = 恢复默认图标。
 pub fn set_icon(conn: &Connection, id: i64, icon: &str) -> Result<Note> {
     let affected = conn.execute(
@@ -639,6 +660,41 @@ mod tests {
         assert_eq!(n, 1, "只删回收站里的");
         assert!(get(&conn, a).is_err());
         assert!(get(&conn, b).is_ok(), "未删除的不该被清掉");
+    }
+
+    #[test]
+    fn purge_expired_respects_keep_days_and_spares_live_notes() {
+        let conn = init_in_memory().unwrap();
+        let old = mk(&conn, "两个月前删的");
+        let fresh = mk(&conn, "昨天删的");
+        let live = mk(&conn, "从没删过");
+        trash(&conn, old).unwrap();
+        trash(&conn, fresh).unwrap();
+        // 把 old 的删除时间倒推 60 天 —— 用真实时钟写测试只会得到不确定的结论
+        conn.execute(
+            "UPDATE notes SET deleted_at = ?1 WHERE id = ?2",
+            params![
+                (chrono::Utc::now() - chrono::Duration::days(60))
+                    .format("%Y-%m-%d %H:%M:%S%.6f")
+                    .to_string(),
+                old
+            ],
+        )
+        .unwrap();
+
+        let n = purge_expired(&conn, 30).unwrap();
+        assert_eq!(n, 1, "只清掉超过 30 天的那一条");
+        assert!(get(&conn, old).is_err(), "过期的该清");
+        assert!(get(&conn, fresh).is_ok(), "还在保留期内的不该动");
+        assert!(get(&conn, live).is_ok(), "⚠️ 未删除的必须原样留住");
+
+        // 0 = 永久保留：既不删过期的，也不该退化成「按 0 天清理」
+        let conn = init_in_memory().unwrap();
+        let a = mk(&conn, "甲");
+        trash(&conn, a).unwrap();
+        assert_eq!(purge_expired(&conn, 0).unwrap(), 0, "0 天 = 一条都不清");
+        assert_eq!(purge_expired(&conn, -1).unwrap(), 0, "负数同 0");
+        assert!(get(&conn, a).is_ok());
     }
 
     /* ── 文件夹 / 图标（发布说明 ①⑨）───────────────────────────── */

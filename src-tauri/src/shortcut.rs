@@ -47,6 +47,22 @@ pub const DEFAULT_CAPTURE_SHORTCUT: &str = "CommandOrControl+Shift+U";
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_CAPTURE_SHORTCUT: &str = "Ctrl+Shift+U";
 
+/// 速记全局快捷键（2026-10-08 新增，v0.8.0 发布说明 ⑩）。
+///
+/// 按下即切到速记视图并**新建一条空白笔记** —— 「想到就记」的最短路径，
+/// 与统一捕获 ⇧⌘U（要先想清楚记到哪）互补。
+///
+/// 键位 `⌘⇧N` / `Ctrl+Shift+N`：这是「新建」的行业惯例组合（单独一个 `⌘N`
+/// 太激进 —— 全局注册会抢掉所有应用的「新建」）。Finder 的「新建文件夹」、
+/// Chrome 的「新建无痕窗口」用的也是它，但两者都是**应用内**快捷键、
+/// 不进系统热键池 —— 与主窗显隐敢用 `⌘⇧Space`（Finder 的「以选中内容搜索」）
+/// 是同一条判据，见 `DEFAULT_TOGGLE_SHORTCUT` 的注释。
+/// 万一真被别的软件占了，`rebind_shortcut` 的冲突预检会说清楚撞的是谁。
+#[cfg(target_os = "macos")]
+pub const DEFAULT_NOTES_SHORTCUT: &str = "CommandOrControl+Shift+N";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_NOTES_SHORTCUT: &str = "Ctrl+Shift+N";
+
 /// 判断两个快捷键字符串是否代表同一个物理按键组合
 /// （如 Windows 上 CommandOrControl 与 Ctrl 是同一个键，仅写法不同）
 pub fn same_hotkey(a: &str, b: &str) -> bool {
@@ -81,8 +97,12 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 if event.state == ShortcutState::Pressed {
                     // 诊断：确认全局热键事件是否到达本进程（用于定位「录入成功但呼出/隐藏不生效」）
                     log::info!("[快捷键] 事件触发: {} state={:?}", shortcut, event.state);
-                    // 按当前配置分发四个全局快捷键（搜索 / AI 对话事件由主窗前端监听处理，
-                    // 见 index.vue；剪贴板与主窗显隐由 lib.rs 的 app.listen 处理）
+                    // 按当前配置分发六个全局快捷键（搜索 / AI 对话 / 速记事件由主窗前端
+                    // 监听处理，见 index.vue；剪贴板与主窗显隐由 lib.rs 的 app.listen 处理）
+                    //
+                    // ⚠️ 顺序有讲究：**兜底分支必须留在最后**。主窗显隐没有自己的
+                    //   `same_hotkey` 命中时才落到 `global-shortcut-toggle`，所以它前面
+                    //   每加一个快捷键都要插在 else 之前 —— 插在 else 之后等于永远匹配不到。
                     let cfg = crate::config::load();
                     let pressed = shortcut.to_string();
                     if same_hotkey(&cfg.clipboard_shortcut, &pressed) {
@@ -93,6 +113,8 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                         let _ = app.emit("chat-shortcut", ());
                     } else if same_hotkey(&cfg.capture_shortcut, &pressed) {
                         let _ = app.emit("capture-shortcut", ());
+                    } else if same_hotkey(&cfg.notes_shortcut, &pressed) {
+                        let _ = app.emit("notes-shortcut", ());
                     } else {
                         let _ = app.emit("global-shortcut-toggle", ());
                     }
@@ -120,15 +142,32 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 五个全局快捷键的「开关 + 组合」对照表。
+/// 六个全局快捷键的「开关 + 组合」对照表。
 ///
-/// ⚠️ 这里**刻意枚举全部五个**，而不是「四个 + 捕获那个例外」——
+/// ⚠️ 这里**刻意枚举全部六个**，而不是「四个 + 捕获那个例外」——
 ///   统一捕获 ⇧⌘U 同样是全局注册的快捷键，少给它一个开关会让它在
 ///   设置列表里成为唯一的例外（而例外就会被当成 bug）。
 ///
-/// 顺序固定（主窗/剪贴板/搜索/对话/捕获）：日志与测试都按这个顺序断言。
+/// 顺序固定（主窗/剪贴板/搜索/对话/捕获/速记）：日志与测试都按这个顺序断言。
 pub fn enabled_pairs(cfg: &crate::config::AppConfig) -> Vec<(&'static str, bool)> {
     shortcut_items(cfg).into_iter().map(|(l, _, e)| (l, e)).collect()
+}
+
+/// 六个全局快捷键的「标签 / 热键 / 启用开关」三合一。
+///
+/// ⚠️ `enabled_pairs` 只给标签与开关，**给不出热键** —— 而冲突描述恰恰需要
+///   热键才能比对。第一版 `describe_conflict` 拿 `enabled_pairs` 的第二项当热键
+///   去比，类型直接对不上（bool vs &str）。两张表看着重复，故合并成这一张：
+///   `enabled_pairs` 改成它的薄封装，全工程只有这一处列全六个。
+pub fn shortcut_items(cfg: &crate::config::AppConfig) -> Vec<(&'static str, &str, bool)> {
+    vec![
+        ("全局快捷键", &cfg.global_shortcut, cfg.shortcut_toggle_enabled),
+        ("剪贴板快捷键", &cfg.clipboard_shortcut, cfg.shortcut_clipboard_enabled),
+        ("搜索快捷键", &cfg.search_shortcut, cfg.shortcut_search_enabled),
+        ("AI 对话快捷键", &cfg.chat_shortcut, cfg.shortcut_chat_enabled),
+        ("统一捕获快捷键", &cfg.capture_shortcut, cfg.shortcut_capture_enabled),
+        ("速记快捷键", &cfg.notes_shortcut, cfg.shortcut_notes_enabled),
+    ]
 }
 
 /// 按开关启停某一个全局快捷键。
@@ -137,22 +176,6 @@ pub fn enabled_pairs(cfg: &crate::config::AppConfig) -> Vec<(&'static str, bool)
 /// 先反注册旧的，成功注册新的才算换；注册失败就把旧的注册回去。
 /// 否则「打开开关」失败会留下一个**既没开也没关**的中间态 ——
 /// 配置说开着、实际没注册，用户按半天没反应也看不出是哪一环坏了。
-/// 五个全局快捷键的「标签 / 热键 / 启用开关」三合一。
-///
-/// ⚠️ `enabled_pairs` 只给标签与开关，**给不出热键** —— 而冲突描述恰恰需要
-///   热键才能比对。第一版 `describe_conflict` 拿 `enabled_pairs` 的第二项当热键
-///   去比，类型直接对不上（bool vs &str）。两张表看着重复，故合并成这一张：
-///   `enabled_pairs` 改成它的薄封装，全工程只有这一处列全五个。
-pub fn shortcut_items(cfg: &crate::config::AppConfig) -> Vec<(&'static str, &str, bool)> {
-    vec![
-        ("全局快捷键", &cfg.global_shortcut, cfg.shortcut_toggle_enabled),
-        ("剪贴板快捷键", &cfg.clipboard_shortcut, cfg.shortcut_clipboard_enabled),
-        ("搜索快捷键", &cfg.search_shortcut, cfg.shortcut_search_enabled),
-        ("AI 对话快捷键", &cfg.chat_shortcut, cfg.shortcut_chat_enabled),
-        ("统一捕获快捷键", &cfg.capture_shortcut, cfg.shortcut_capture_enabled),
-    ]
-}
-
 pub fn set_enabled(app: &AppHandle, previous: &str, next: &str, enable: bool) -> Result<(), String> {
     if enable {
         if is_shortcut_registered(app, next) {
@@ -193,8 +216,8 @@ pub fn set_enabled(app: &AppHandle, previous: &str, next: &str, enable: bool) ->
 }
 
 /// 把「旧快捷键 → 新快捷键」的改绑一次做完：冲突预检、反注册旧的、注册新的，
-/// 注册失败时回滚旧键。四个可自定义快捷键（主窗/剪贴板/搜索/AI 对话）的
-/// set_*_shortcut 命令共用这一份逻辑，只是各自读写配置里自己的字段。
+/// 注册失败时回滚旧键。六个可自定义快捷键的 set_*_shortcut 命令共用这一份逻辑，
+/// 只是各自读写配置里自己的字段。
 pub fn rebind_shortcut(app: &AppHandle, previous: &str, next: &str) -> Result<(), String> {
     if crate::shortcut::is_shortcut_registered(app, next) {
         // 说清楚是「和我们自己的另一个撞了」还是「被别的软件占了」——
@@ -224,7 +247,7 @@ pub fn rebind_shortcut(app: &AppHandle, previous: &str, next: &str) -> Result<()
 ///   的另一个快捷键（换个键就行），也不知道是别的软件占了（得去关那个软件），
 ///   两种情况的**下一步完全不同**，而界面把它们说成了同一句话。
 ///
-/// 判据：我们自己的五个快捷键都写在配置里，故可以逐一比对；
+/// 判据：我们自己的六个快捷键都写在配置里，故可以逐一比对；
 /// **都不匹配**才归为「被其它程序占用」。
 pub fn describe_conflict(app: &AppHandle, hotkey: &str, fallback: &str) -> String {
     let cfg = crate::config::load();

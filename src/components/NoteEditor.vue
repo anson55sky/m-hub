@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Crepe } from '@milkdown/crepe'
 import '@milkdown/crepe/theme/common/style.css'
 import '@milkdown/crepe/theme/frame.css'
@@ -11,10 +11,12 @@ import { createTable } from '@milkdown/kit/preset/gfm'
 import { Fragment, type Node as ProseNode, type Schema } from '@milkdown/kit/prose/model'
 import type { EditorView } from '@milkdown/kit/prose/view'
 import { NodeSelection, TextSelection, type EditorState } from '@milkdown/kit/prose/state'
-import { Tag as TagIcon, Trash2, X } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight, Link2, Sparkles, Tag as TagIcon, Trash2, X } from 'lucide-vue-next'
 import { isTauri, tauriApi, type Note, type Tag } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { attachBlockDrag } from '../utils/blockDrag'
+import { beautifyMarkdown } from '../utils/beautify'
+import { buildBacklinkIndex, normalizeTitle as normalizeLinkTitle } from '../utils/backlinks'
 import { expandOnEnter, matchWysiwygLine, type LineShortcut } from '../utils/markdownEnter'
 import { loosenHtmlBreaks, renderNoteMarkdown, restoreCrepeMarkdown } from '../utils/markdownHtml'
 import { deriveNoteTitle } from '../utils/markdown'
@@ -42,7 +44,11 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'save', id: number, title: string, content: string): void
   (e: 'delete', id: number): void
+  /** 点反链条目跳到来源笔记（索引里有它，跳转必须真的发生，否则那一行是死的） */
+  (e: 'openNote', id: number): void
 }>()
+
+const showToast = inject<(msg: string) => void>('showToast', () => {})
 
 const store = useStore()
 
@@ -367,6 +373,85 @@ function captureCrepeMarkdown(): string | null {
     console.warn('读取编辑器 Markdown 失败', e)
     return null
   }
+}
+
+// ---- 双链面板（发布说明 ②）----
+
+/**
+ * 全库双链索引。
+ *
+ * 参与索引的是 `store.state.notes` —— 它已经**排除了回收站**（repo 层口径），
+ * 正是 `buildBacklinkIndex` 要求的「只含未删除的」：否则反链里会出现一篇
+ * 点进去是「已删除」的笔记。
+ *
+ * 代价是每次落库都会重建全库索引（O(全部正文)）。这里**刻意不另起一个**
+ * 「只扫当前笔记上下文」的快扫实现 —— 那会是第二份口径，两边对不上时
+ * 表现为「面板说有 3 条、点进去只有 2 条」，而这种差异没有任何报错会提示。
+ */
+const backlinkIndex = computed(() => buildBacklinkIndex(store.state.notes))
+
+/** 引用了本篇的笔记。同一篇引用多次已合并成一条（见 buildBacklinkIndex）。 */
+const incomingNotes = computed(() => {
+  const id = props.note?.id
+  if (id == null) return []
+  return backlinkIndex.value.incoming.get(id) ?? []
+})
+
+/**
+ * 本篇引用了、但库里**不存在**的目标标题（去重后的原文）。
+ *
+ * ⚠️ 不能直接读 `index.dangling` —— 那是**全库**计数，不按来源笔记分，
+ *   拿来显示会把别人写的悬空链接算到本篇头上。只能从自己的出链里再算一次。
+ * 这类链接必须交代：静默丢弃时用户看到的就是「我写了 [[X]] 却没反应」，
+ * 会以为是自己把标记写错了。
+ */
+const danglingOut = computed(() => {
+  const id = props.note?.id
+  if (id == null) return []
+  const links = backlinkIndex.value.outgoing.get(id)
+  if (!links) return []
+  const have = backlinkIndex.value.byTitle
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const l of links) {
+    const key = normalizeLinkTitle(l.target).toLowerCase()
+    if (have.has(key) || seen.has(key)) continue
+    seen.add(key)
+    out.push(l.target)
+  }
+  return out
+})
+
+/** 面板默认展开 —— 这个功能的存在感就来自「打开就看得见」，收起来等于没有。 */
+const backlinksOpen = ref(true)
+
+// ---- 一键美化（发布说明 ⑥）----
+
+/**
+ * 美化当前正文。
+ *
+ * **幂等是硬要求**：第二下必须回答「已经是整洁格式」，而不是又改一遍。
+ * 判据只是「美化前后是否不同」——`beautify.beautify()` 守着
+ * `beautify(beautify(x)) === beautify(x)`（18 例），这里不必再算一次。
+ */
+function onBeautify() {
+  // 实时预览模式下正文的真源是 Crepe（localContent 只是它的回写），先取一次，
+  // 否则美化的是上一次回写的内容、用户刚敲的几个字会被整段覆盖掉。
+  const captured = mode.value === 'wysiwyg' ? captureCrepeMarkdown() : null
+  const current = captured == null ? localContent.value : restoreCrepeMarkdown(captured)
+  const next = beautifyMarkdown(current)
+  if (next === current) {
+    showToast('已是整洁格式，没有可整理的地方')
+    return
+  }
+  adoptMarkdown(next)
+  // ⚠️ 实时预览里改 `localContent` **不会**改 Crepe 的文档 —— 两者是「编辑器 →
+  //   localContent」的单向回写，不是双向绑定。不重挂的话用户看到的是
+  //   「点了一下没反应」，而库里其实已经存了美化后的版本（界面与事实相反）。
+  // ⚠️ 走 `mountEditor` 而不是 `@milkdown/kit/utils` 的 `replaceAll`：
+  //   `replaceAll` 会触发 `markdownUpdated` → `restoreCrepeMarkdown` 回序列化，
+  //   可能把刚美化好的结果改回去一部分，表现为「美化点完又变回去」。
+  if (mode.value === 'wysiwyg') void mountEditor(next)
 }
 
 /** 离开当前笔记时立刻落盘。id 用离开前的那篇，不能用已经换上来的 props.note。 */
@@ -1023,6 +1108,15 @@ function onEditorAreaMouseDown(e: MouseEvent) {
           </button>
         </div>
         <button
+          class="icon-btn beautify"
+          type="button"
+          title="一键美化：统一空行、标题、列表与分隔线的排版（重复点不会有第二遍改动）"
+          aria-label="一键美化"
+          @click="onBeautify"
+        >
+          <Sparkles :size="14" :stroke-width="1.8" />
+        </button>
+        <button
           class="icon-btn del"
           title="删除笔记"
           aria-label="删除笔记"
@@ -1065,6 +1159,69 @@ function onEditorAreaMouseDown(e: MouseEvent) {
         />
         <p v-else class="md-preview md-preview-empty">开始记录…</p>
       </div>
+
+      <!-- 反链面板（发布说明 ②）：有内容才占位，否则是一条无信息的横条 -->
+      <section
+        v-if="incomingNotes.length > 0 || danglingOut.length > 0"
+        class="ed-backlinks"
+        :class="{ open: backlinksOpen }"
+      >
+        <button
+          type="button"
+          class="eb-head"
+          :aria-expanded="backlinksOpen"
+          @click="backlinksOpen = !backlinksOpen"
+        >
+          <ChevronRight
+            v-if="!backlinksOpen"
+            :size="13"
+            :stroke-width="1.8"
+            class="eb-caret"
+          />
+          <ChevronDown v-else :size="13" :stroke-width="1.8" class="eb-caret" />
+          <Link2 :size="13" :stroke-width="1.8" class="eb-icon" />
+          <span class="eb-title">反向链接</span>
+          <span class="eb-count">{{ incomingNotes.length }}</span>
+          <span
+            v-if="danglingOut.length"
+            class="eb-dangling"
+            :title="`这些目标在笔记库里不存在：${danglingOut.join('、')}`"
+          >
+            {{ danglingOut.length }} 条指向不存在的笔记
+          </span>
+        </button>
+
+        <div v-if="backlinksOpen" class="eb-body">
+          <p v-if="incomingNotes.length === 0" class="eb-empty">
+            还没有别的笔记引用这一篇
+          </p>
+          <template v-else>
+            <p v-for="e in incomingNotes" :key="e.id" class="eb-row">
+              <!-- 自己引自己：点了也不会换笔记，给一个看起来能点的按钮就是「点了没反应」 -->
+              <button
+                v-if="e.id !== note.id"
+                type="button"
+                class="eb-line eb-line--link"
+                :title="`打开「${e.title}」`"
+                @click="emit('openNote', e.id)"
+              >
+                <span class="eb-name">{{ e.title }}</span>
+                <span class="eb-arrow">↗</span>
+              </button>
+              <span v-else class="eb-line">
+                <span class="eb-name">{{ e.title }}</span>
+                <span class="eb-self">本篇</span>
+              </span>
+              <span class="eb-snip">{{ e.snippet }}</span>
+            </p>
+          </template>
+
+          <p v-if="danglingOut.length" class="eb-dangling-list">
+            本篇引用了、但在笔记库里找不到的标题：
+            <code v-for="t in danglingOut" :key="t" class="eb-chip">{{ t }}</code>
+          </p>
+        </div>
+      </section>
 
       <!-- 底栏：左标签行 + 右保存状态 -->
       <footer class="ed-footer">
@@ -1195,6 +1352,16 @@ function onEditorAreaMouseDown(e: MouseEvent) {
 .del:hover {
   color: var(--c-red);
   background: color-mix(in srgb, var(--c-red) 10%, transparent);
+}
+
+.beautify:hover {
+  color: var(--brand-500);
+  background: color-mix(in srgb, var(--brand-500) 12%, transparent);
+}
+
+.beautify:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .crepe-root {
@@ -1388,6 +1555,178 @@ function onEditorAreaMouseDown(e: MouseEvent) {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   }
+}
+
+.ed-backlinks {
+  flex: 0 0 auto;
+  margin-top: 8px;
+  border-top: 1px solid var(--border-soft);
+  min-height: 0;
+}
+
+/* 展开时允许它自己收缩：面板再多也不能把编辑器挤成一条（编辑器是 flex:1 + min-height:0，
+   真出问题会先压到它），由 .eb-body 自己滚动。 */
+.ed-backlinks.open {
+  flex: 0 1 auto;
+}
+
+.eb-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-size: calc(0.75rem * var(--fs-notes, 1));
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.eb-head:hover {
+  color: var(--text-1);
+}
+
+.eb-caret {
+  flex-shrink: 0;
+}
+
+.eb-icon {
+  color: var(--brand-500);
+  flex-shrink: 0;
+}
+
+.eb-title {
+  flex-shrink: 0;
+}
+
+.eb-count {
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--brand-50);
+  color: var(--brand-500);
+  font-size: calc(0.625rem * var(--fs-notes, 1));
+  font-weight: 600;
+}
+
+.eb-dangling {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--c-orange);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eb-body {
+  max-height: min(34vh, 260px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 6px;
+}
+
+.eb-empty {
+  margin: 0;
+  font-size: calc(0.6875rem * var(--fs-notes, 1));
+  color: var(--text-4);
+  padding: 4px 0;
+}
+
+.eb-row {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-soft);
+}
+
+.eb-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+
+.eb-line--link {
+  cursor: pointer;
+}
+
+.eb-name {
+  font-size: calc(0.75rem * var(--fs-notes, 1));
+  font-weight: 600;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eb-line--link .eb-name {
+  color: var(--brand-500);
+}
+
+.eb-line--link:hover .eb-name {
+  text-decoration: underline;
+}
+
+.eb-arrow {
+  flex-shrink: 0;
+  font-size: calc(0.6875rem * var(--fs-notes, 1));
+  color: var(--text-4);
+}
+
+.eb-self {
+  flex-shrink: 0;
+  font-size: calc(0.625rem * var(--fs-notes, 1));
+  color: var(--text-4);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-pill);
+  padding: 0 6px;
+}
+
+.eb-snip {
+  font-size: calc(0.6875rem * var(--fs-notes, 1));
+  color: var(--text-3);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.eb-dangling-list {
+  margin: 2px 0 0;
+  font-size: calc(0.6875rem * var(--fs-notes, 1));
+  color: var(--text-4);
+  line-height: 1.9;
+}
+
+.eb-chip {
+  display: inline-block;
+  margin: 0 4px 0 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--c-red) 10%, transparent);
+  color: var(--c-red);
+  font-family: inherit;
+  font-size: inherit;
 }
 
 .ed-footer {

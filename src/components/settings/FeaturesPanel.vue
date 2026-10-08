@@ -192,6 +192,41 @@ async function onClearClipboard() {
   }
 }
 
+// ---- 速记回收站保留策略 ----
+//
+// 这一行曾经**根本没有**：界面写着「保留 N 天」，后端 `purge_expired_trash`
+// 命令却从来没人调用 —— 说的和做的相反。现在两头接齐：启动时后端清一次
+// （lib.rs），改设置时这里立刻再清一次并把删掉的条数报出来。
+const trashDays = ref(30)
+const trashSaving = ref(false)
+
+function commitTrashDays() {
+  const days = Math.round(trashDays.value)
+  if (!isTauri() || trashSaving.value) return
+  const clamped = Math.min(3650, Math.max(0, days))
+  if (clamped !== trashDays.value) trashDays.value = clamped
+  if (clamped === store.state.config.notes_trash_days) return
+  trashSaving.value = true
+  void store
+    .setNotesTrashDays(clamped)
+    .then(() => tauriApi.purgeExpiredTrash(clamped))
+    .then((n) => {
+      showToast(
+        clamped === 0
+          ? '回收站改为永久保留（已清理的条目不受影响）'
+          : n > 0
+            ? `保留 ${clamped} 天，已清理 ${n} 条过期笔记`
+            : `回收站保留 ${clamped} 天`
+      )
+    })
+    .catch((e) => {
+      void reportClientError('更新回收站保留天数失败', e)
+    })
+    .finally(() => {
+      trashSaving.value = false
+    })
+}
+
 onMounted(() => {
 
   clipMaxItems.value = store.state.config.clipboard_max_items ?? 500
@@ -199,6 +234,8 @@ onMounted(() => {
   clipTtlDays.value = store.state.config.clipboard_ttl_days ?? 7
 
   pasteMethod.value = store.state.config.clipboard_paste_method ?? 'auto'
+
+  trashDays.value = store.state.config.notes_trash_days ?? 30
 
 })
 </script>
@@ -386,6 +423,30 @@ onMounted(() => {
               <Trash2 :size="14" :stroke-width="2" />
               清空
             </button>
+          </div>
+        </section>
+
+        <section id="sv-sec-notes" class="sv-sec" aria-label="速记">
+          <h3 class="sv-sec-title">速记</h3>
+
+          <h4 class="sv-subtitle">回收站</h4>
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">回收站保留天数</span>
+              <span class="setting-desc">笔记删除后进回收站，超过 N 天自动彻底清理；填 0 = 永久保留（不自动清理）。启动时清一次，改这里立刻再清一次并告诉你删了几条</span>
+            </div>
+            <div class="num-edit">
+              <input
+                v-model.number="trashDays"
+                class="num-input"
+                type="number"
+                min="0"
+                max="3650"
+                step="1"
+                :disabled="trashSaving"
+                @change="commitTrashDays"
+              />
+            </div>
           </div>
         </section>
 

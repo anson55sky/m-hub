@@ -32,7 +32,7 @@ export function trayLabel(): string {
 }
 
 /**
- * 四个全局快捷键的默认值（内部写法）——`src-tauri/src/shortcut.rs` 四个
+ * 六个全局快捷键的默认值（内部写法）——`src-tauri/src/shortcut.rs` 六个
  * `DEFAULT_*` 常量的**镜像**。改默认值必须两边一起改，故有
  * `scripts/check-default-shortcuts.mjs` 在 prebuild 锁死。
  *
@@ -74,6 +74,17 @@ const DEFAULT_SHORTCUT_VARIANTS = {
    * `scripts/check-default-shortcuts.mjs` 锁死。
    */
   capture: { mac: 'CommandOrControl+Shift+U', other: 'Ctrl+Shift+U' },
+  /**
+   * 速记（2026-10-08 新增，v0.8.0 发布说明 ⑩）：切到速记并新建一条笔记。
+   *
+   * `⌘⇧N` 是「新建」的行业惯例组合；Finder 的「新建文件夹」与 Chrome 的
+   * 「新建无痕窗口」用的也是它，但两者都是**应用内**快捷键、不进系统热键池，
+   * 全局注册照样拿得到（同主窗显隐敢用 `⌘⇧Space` 的判据）。
+   *
+   * 键位与 shortcut.rs 的 `DEFAULT_NOTES_SHORTCUT` 对齐，由
+   * `scripts/check-default-shortcuts.mjs` 锁死。
+   */
+  notes: { mac: 'CommandOrControl+Shift+N', other: 'Ctrl+Shift+N' },
 } as const
 
 export type ShortcutKey = keyof typeof DEFAULT_SHORTCUT_VARIANTS

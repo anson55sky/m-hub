@@ -470,20 +470,10 @@ pub fn empty_note_trash(state: State<'_, DbState>) -> Result<usize, String> {
 ///   发现「我三个月前删的东西怎么找不回来了」，而他从未被告知过这件事。
 #[tauri::command]
 pub fn purge_expired_trash(state: State<'_, DbState>, keep_days: i64) -> Result<usize, String> {
-    if keep_days <= 0 {
-        // 0 或负数 = 永久保留。这是合法的用户选择，不该被当成错误、
-        // 更不该悄悄退化成「按 0 天清理」—— 那会在启动时把整个回收站清空。
-        return Ok(0);
-    }
+    // 0 / 负数的「永久保留」语义在 repo 层（`note::purge_expired`）一处判掉，
+    // 启动期那次清理走的是同一个函数 —— 两处各写一遍必然漂。
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(keep_days);
-    let cutoff = cutoff.format("%Y-%m-%d %H:%M:%S%.6f").to_string();
-    let n = conn
-        .execute(
-            "DELETE FROM notes WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
-            rusqlite::params![cutoff],
-        )
-        .map_err(err_str)?;
+    let n = note::purge_expired(&conn, keep_days).map_err(err_str)?;
     if n > 0 {
         log::info!("回收站自动清理: {} 条（保留 {} 天）", n, keep_days);
     }
@@ -1666,6 +1656,8 @@ enum ConfiguredShortcut {
     Chat,
     /// 统一捕获（2026-09-29 新增）
     Capture,
+    /// 速记（2026-10-08 新增，v0.8.0 发布说明 ⑩）
+    Notes,
 }
 
 impl ConfiguredShortcut {
@@ -1681,9 +1673,10 @@ impl ConfiguredShortcut {
             "search" => Self::Search,
             "chat" => Self::Chat,
             "capture" => Self::Capture,
+            "notes" => Self::Notes,
             other => {
                 return Err(format!(
-                    "未知的快捷键标识：{other}（合法值：toggle / clipboard / search / chat / capture）"
+                    "未知的快捷键标识：{other}（合法值：toggle / clipboard / search / chat / capture / notes）"
                 ))
             }
         })
@@ -1701,6 +1694,7 @@ impl ConfiguredShortcut {
             ConfiguredShortcut::Search => &mut cfg.shortcut_search_enabled,
             ConfiguredShortcut::Chat => &mut cfg.shortcut_chat_enabled,
             ConfiguredShortcut::Capture => &mut cfg.shortcut_capture_enabled,
+            ConfiguredShortcut::Notes => &mut cfg.shortcut_notes_enabled,
         }
     }
 
@@ -1711,6 +1705,7 @@ impl ConfiguredShortcut {
             ConfiguredShortcut::Search => &mut cfg.search_shortcut,
             ConfiguredShortcut::Chat => &mut cfg.chat_shortcut,
             ConfiguredShortcut::Capture => &mut cfg.capture_shortcut,
+            ConfiguredShortcut::Notes => &mut cfg.notes_shortcut,
         }
     }
 
@@ -1721,6 +1716,7 @@ impl ConfiguredShortcut {
             ConfiguredShortcut::Search => "搜索",
             ConfiguredShortcut::Chat => "AI 对话",
             ConfiguredShortcut::Capture => "统一捕获",
+            ConfiguredShortcut::Notes => "速记",
         }
     }
 }
@@ -1801,6 +1797,7 @@ fn config_field(cfg: &crate::config::AppConfig, which: &ConfiguredShortcut) -> S
         ConfiguredShortcut::Search => cfg.search_shortcut.clone(),
         ConfiguredShortcut::Chat => cfg.chat_shortcut.clone(),
         ConfiguredShortcut::Capture => cfg.capture_shortcut.clone(),
+        ConfiguredShortcut::Notes => cfg.notes_shortcut.clone(),
     }
 }
 
@@ -1827,6 +1824,19 @@ pub fn get_capture_shortcut() -> Result<String, String> {
 #[tauri::command]
 pub fn set_capture_shortcut(app: tauri::AppHandle, value: String) -> Result<String, String> {
     set_configured_shortcut(app, value, ConfiguredShortcut::Capture)
+}
+
+#[tauri::command]
+pub fn get_notes_shortcut() -> Result<String, String> {
+    Ok(crate::config::load().notes_shortcut)
+}
+
+/// 改绑速记快捷键（v0.8.0 发布说明 ⑩）。同样走 `set_configured_shortcut` ——
+/// 六个快捷键共用这一套「先试注册新键、冲突则回滚旧键、再落盘」的流程，
+/// 单独写一份就会漏掉「注册失败不落盘」那层保护。
+#[tauri::command]
+pub fn set_notes_shortcut(app: tauri::AppHandle, value: String) -> Result<String, String> {
+    set_configured_shortcut(app, value, ConfiguredShortcut::Notes)
 }
 
 // ---------- 开机自启动 ----------
