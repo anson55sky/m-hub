@@ -24,6 +24,7 @@ import { NOTE_EDITOR_MODES, normalizeNoteEditorMode, type NoteEditorMode } from 
 import { getQuickEmojis } from '../utils/emoji'
 import { saveNoteImageFile } from '../utils/noteImage'
 import { parseTimestamp } from '../utils/time'
+import type { ShowToast } from '../utils/toast'
 import EmojiPicker from './EmojiPicker.vue'
 
 /**
@@ -48,7 +49,7 @@ const emit = defineEmits<{
   (e: 'openNote', id: number): void
 }>()
 
-const showToast = inject<(msg: string) => void>('showToast', () => {})
+const showToast = inject<ShowToast>('showToast', () => {})
 
 const store = useStore()
 
@@ -516,15 +517,24 @@ function closeTidy() {
 /**
  * 采纳整理结果，替换正文。
  *
- * 替换**不经过 undo**：600ms 防抖的自动保存会立刻把它写进库。所以这里必须让
- * 用户看清楚再点，且「取消」是零成本的退路 —— 原正文在采纳前一直完好无损。
+ * ⚠️ **重挂编辑器会清空 Milkdown 的撤销栈** —— 替换之后 ⌘Z 撤不回这一次
+ *   （`rewriteEditorContent` 走 `mountEditor`，不是 `replaceAll`，理由见它的注释）。
+ *   所以退路必须由我们给：toast 上的「撤销替换」把原文整段写回去。
+ *   给一个假的「可以 ⌘Z」比不给更糟 —— 用户会以为有后路，然后真的没有。
  */
 function adoptTidy() {
   const next = tidyResult.value.trim()
   if (!next) return
+  const prev = tidyFrom.value
   rewriteEditorContent(next)
   closeTidy()
-  showToast('已用整理结果替换正文（⌘Z 之前可以先撤销）')
+  showToast('已用整理结果替换正文', {
+    label: '撤销替换',
+    onClick: () => {
+      rewriteEditorContent(prev)
+      showToast('已还原为整理前的正文')
+    },
+  })
 }
 
 watch(tidyOpen, (v) => {
@@ -1377,7 +1387,7 @@ function onEditorAreaMouseDown(e: MouseEvent) {
     <Teleport to="body">
       <div
         v-if="tidyOpen"
-        class="modal-mask tidy-mask"
+        class="modal-mask"
         role="dialog"
         aria-modal="true"
         aria-label="AI 深度整理"
@@ -1416,7 +1426,7 @@ function onEditorAreaMouseDown(e: MouseEvent) {
           </div>
 
           <footer class="tidy-foot">
-            <span class="tidy-note">替换后自动保存，原正文不再可一键取回</span>
+            <span class="tidy-note">替换后自动保存；重挂编辑器会清空撤销栈，不满意可用提示条上的「撤销替换」还原</span>
             <div class="tidy-acts">
               <button class="ghost-btn" type="button" :disabled="tidyBusy" @click="closeTidy">取消</button>
               <button

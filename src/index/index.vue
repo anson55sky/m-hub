@@ -12,6 +12,7 @@ import NoteFolderTree from '../components/NoteFolderTree.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { parseTimestamp } from '../utils/time'
 import { filterNotesByFolder } from '../utils/noteFolderFilter'
+import type { ToastOptions } from '../utils/toast'
 import NotesOverviewCard from '../components/NotesOverviewCard.vue'
 import TodoOverviewCard from '../components/TodoOverviewCard.vue'
 import ResourcesOverviewCard from '../components/ResourcesOverviewCard.vue'
@@ -947,8 +948,9 @@ async function onImportNotes() {
     })
     if (!picked || Array.isArray(picked)) return
     const s = await tauriApi.importNotes(picked)
-    // ⚠️ 全量重拉（含正文），不能用 refreshNotes —— 那是 meta-only 列表，
-    //   导入进来的笔记会点开一片空白。见 store.reloadNotesFull 的注释。
+    // 后端刻意没 emit `notes-changed`：它的监听者只刷笔记，而导入还**新建**了
+    // 文件夹与标签 —— 只刷笔记的话它们不出现，而笔记已经挂在那些文件夹下
+    // （表现为「导入的笔记筛不出来」）。见 store.reloadNotesFull。
     await store.reloadNotesFull()
     if (s.notes === 0) {
       showToast(
@@ -1314,44 +1316,24 @@ function onOpenNote(n: Note) {
 }
 
 // ---- 轻提示 ----
-interface ToastAction {
-  label: string
-  onClick: () => void
-}
-
-/**
- * `duration` 是给「话比较多、2.2 秒读不完」的那些结果用的（导出/导入的条目清单）。
- *
- * ⚠️ 顺带说明它为什么不是「第二参数塞个数字」：第二参数是撤销按钮那个结构，
- *   两边都在第二位就是两条含义，靠猜区分必然踩错。合成一个对象后，
- *   「只有时长」与「只有撤销」都不必写占位字段。
- */
-interface ToastOptions {
-  /** 毫秒。给了就按它算，含撤销按钮时的 5000s 经验值也不再套用。 */
-  duration?: number
-  label?: string
-  onClick?: () => void
-}
-
+// 签名与两个可选形态的语义见 utils/toast.ts（唯一定义处）。
 const toastMsg = ref('')
-const toastAction = ref<ToastAction | null>(null)
+const toastAction = ref<{ label: string; onClick: () => void } | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 
-function showToast(msg: string, opts?: ToastAction | ToastOptions) {
-  // 旧调用点传的是 `{ label, onClick }`（无 duration 的结构）——按「有 label 即动作」判定，
-  // 不去判 `duration` 在不在，那样两个形状会互相误判（约定：判据用形状里最明确的那个字段）。
-  const action =
-    opts && 'label' in opts && opts.label
-      ? { label: opts.label, onClick: opts.onClick ?? (() => {}) }
-      : null
-  const duration = opts && 'duration' in opts && opts.duration ? opts.duration : undefined
+function showToast(msg: string, opts?: ToastOptions) {
+  // 按「有 label 即按钮」判定（不用 `duration` 在不在来判断）——两个形态都可能出现
+  // 时，只有 label 是「一定意味着有个按钮」的那个字段。
+  const action = opts?.label
+    ? { label: opts.label, onClick: opts.onClick ?? (() => {}) }
+    : null
   toastMsg.value = msg
   toastAction.value = action
   if (toastTimer) clearTimeout(toastTimer)
   toastTimer = setTimeout(() => {
     toastMsg.value = ''
     toastAction.value = null
-  }, duration ?? (action ? 5000 : 2200))
+  }, opts?.duration ?? (action ? 5000 : 2200))
 }
 
 provide('showToast', showToast)
